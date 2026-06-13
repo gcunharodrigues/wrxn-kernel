@@ -18,7 +18,9 @@
       {
         "hooks": [
           { "type": "command", "command": "node .claude/hooks/synapse-engine.cjs" },
-          { "type": "command", "command": "node .claude/hooks/session-history.cjs" }
+          { "type": "command", "command": "node .claude/hooks/session-history.cjs" },
+          { "type": "command", "command": "node .claude/hooks/reference-detect.cjs" },
+          { "type": "command", "command": "node .claude/hooks/recall-surface.cjs" }
         ]
       }
     ],
@@ -36,6 +38,21 @@
           { "type": "command", "command": "node .claude/hooks/enforce-push-authority.cjs" },
           { "type": "command", "command": "node .claude/hooks/enforce-tests-on-push.cjs" },
           { "type": "command", "command": "node .claude/hooks/enforce-review-marker.cjs" }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          { "type": "command", "command": "node .claude/hooks/code-intel-push.cjs" }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node .claude/hooks/wiki-lint.cjs" }
         ]
       }
     ]

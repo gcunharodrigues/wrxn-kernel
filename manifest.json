@@ -19,6 +19,11 @@
       "profile": "project"
     },
     {
+      "path": ".claude/hooks/code-intel-push.cjs",
+      "class": "managed",
+      "profile": "project"
+    },
+    {
       "path": ".claude/hooks/enforce-managed-guard.cjs",
       "class": "managed",
       "profile": "project"
@@ -44,6 +49,16 @@
       "profile": "project"
     },
     {
+      "path": ".claude/hooks/recall-surface.cjs",
+      "class": "managed",
+      "profile": "project"
+    },
+    {
+      "path": ".claude/hooks/reference-detect.cjs",
+      "class": "managed",
+      "profile": "project"
+    },
+    {
       "path": ".claude/hooks/session-end.cjs",
       "class": "managed",
       "profile": "project"
@@ -60,6 +75,11 @@
     },
     {
       "path": ".claude/hooks/synapse-engine.cjs",
+      "class": "managed",
+      "profile": "project"
+    },
+    {
+      "path": ".claude/hooks/wiki-lint.cjs",
       "class": "managed",
       "profile": "project"
     },
