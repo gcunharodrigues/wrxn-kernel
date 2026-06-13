@@ -329,6 +329,36 @@
       "profile": "project"
     },
     {
+      "path": ".claude/skills/audit/SKILL.md",
+      "class": "managed",
+      "profile": "workspace"
+    },
+    {
+      "path": ".claude/skills/level-up/SKILL.md",
+      "class": "managed",
+      "profile": "workspace"
+    },
+    {
+      "path": ".claude/skills/onboard/SKILL.md",
+      "class": "managed",
+      "profile": "workspace"
+    },
+    {
+      "path": "aios-intake.md",
+      "class": "seeded",
+      "profile": "workspace"
+    },
+    {
+      "path": "connections.md",
+      "class": "seeded",
+      "profile": "workspace"
+    },
+    {
+      "path": "decisions/log.md",
+      "class": "seeded",
+      "profile": "workspace"
+    },
+    {
       "path": ".recon.json",
       "class": "seeded",
       "profile": "project"

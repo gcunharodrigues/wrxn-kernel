@@ -8,6 +8,7 @@ const { init } = require('../lib/install.cjs');
 const { update } = require('../lib/update.cjs');
 const worktree = require('../lib/worktree.cjs');
 const executor = require('../lib/executor.cjs');
+const onboard = require('../lib/onboard.cjs');
 
 const PKG_ROOT = path.join(__dirname, '..');
 
@@ -76,8 +77,13 @@ Usage:
                                  validate an executor's structured report against the contract +
                                  boundary gates (rejects a non-devops report that claims a push)
 
+  wrxn onboard [--root <dir>]    scaffold the Day-1 operator file set under context/ from a filled
+                                 aios-intake.md (the deterministic half of the onboard skill;
+                                 workspace installs only). Idempotent.
+
 Profiles: --project (default, the dev pipeline + intelligence + enforcement) |
-          --workspace (adds the operator layer + connections registry).`;
+          --workspace (adds the operator layer: onboard/audit/level-up + intake + decisions log +
+          connections registry).`;
 
 function main(argv) {
   const args = parseArgs(argv);
@@ -241,6 +247,22 @@ function main(argv) {
       return 2;
     }
     process.stdout.write(JSON.stringify(executor.buildDispatchSpec(issueText, type), null, 2) + '\n');
+    return 0;
+  }
+
+  if (cmd === 'onboard') {
+    const root = path.resolve(args.flags.root || process.cwd());
+    let report;
+    try {
+      report = onboard.scaffold(root);
+    } catch (err) {
+      process.stderr.write(`wrxn: ${err.message}\n`);
+      return 2;
+    }
+    process.stdout.write(`wrxn onboard → ${root}\n`);
+    for (const f of report.scaffolded) process.stdout.write(`  scaffolded ${f}\n`);
+    for (const f of report.skipped) process.stdout.write(`  skipped    ${f} (no filled intake answer)\n`);
+    process.stdout.write(`${report.scaffolded.length} scaffolded, ${report.skipped.length} skipped.\n`);
     return 0;
   }
 
