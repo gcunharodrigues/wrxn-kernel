@@ -44,6 +44,21 @@
       "profile": "project"
     },
     {
+      "path": ".claude/hooks/session-end.cjs",
+      "class": "managed",
+      "profile": "project"
+    },
+    {
+      "path": ".claude/hooks/session-history.cjs",
+      "class": "managed",
+      "profile": "project"
+    },
+    {
+      "path": ".claude/hooks/session-start.cjs",
+      "class": "managed",
+      "profile": "project"
+    },
+    {
       "path": ".claude/hooks/synapse-engine.cjs",
       "class": "managed",
       "profile": "project"
@@ -316,6 +331,16 @@
     {
       "path": ".synapse/routing",
       "class": "seeded",
+      "profile": "project"
+    },
+    {
+      "path": ".wrxn/continuity/.gitkeep",
+      "class": "state",
+      "profile": "project"
+    },
+    {
+      "path": ".wrxn/history/.gitkeep",
+      "class": "state",
       "profile": "project"
     },
     {

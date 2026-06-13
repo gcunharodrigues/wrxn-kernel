@@ -4,7 +4,11 @@ description: Compact the current conversation into a handoff document for anothe
 argument-hint: "What will the next session be used for?"
 ---
 
-Write a handoff document summarising the current conversation so a fresh agent can continue the work. Save to the temporary directory of the user's OS - not the current workspace.
+Write a handoff document summarising the current conversation so a fresh agent can continue the work.
+
+Save it to the install's continuity slot: `.wrxn/continuity/latest.md` (resolve the install root by walking up to the `wrxn.install.json` receipt; create the `.wrxn/continuity/` directory if absent). This slot is the deliberate, intent-carrying baton — the NEXT session's `session-start` hook injects its contents as the resume surface, taking precedence over the automatic episodic session page.
+
+CONTINUITY DOCTRINE: this skill is the SINGLE writer of `.wrxn/continuity/latest.md`. The automatic `session-end` hook writes ONLY dated session pages under `.wrxn/wiki/sessions/` and NEVER touches the baton — so a deliberate handoff is never clobbered by the automatic episodic record. Overwrite the previous baton (the latest deliberate handoff is the live one).
 
 Include a "suggested skills" section in the document, which suggests skills that the agent should invoke.
 

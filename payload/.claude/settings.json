@@ -1,9 +1,24 @@
 {
   "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node .claude/hooks/session-start.cjs" }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node .claude/hooks/session-end.cjs" }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "hooks": [
-          { "type": "command", "command": "node .claude/hooks/synapse-engine.cjs" }
+          { "type": "command", "command": "node .claude/hooks/synapse-engine.cjs" },
+          { "type": "command", "command": "node .claude/hooks/session-history.cjs" }
         ]
       }
     ],
