@@ -17,6 +17,9 @@ function tmp(prefix) {
 
 const MANIFEST = loadManifest(path.join(PKG_ROOT, 'manifest.json'));
 const PAYLOAD_PATHS = MANIFEST.files.map((f) => f.path);
+// A default (project) install lays only the project-profile subset (the profile split lives in
+// profile.test.cjs); these assertions therefore measure against the project subset.
+const PROJECT_PATHS = MANIFEST.files.filter((f) => f.profile === 'project').map((f) => f.path);
 
 // ── Manifest contract ───────────────────────────────────────────────────────
 
@@ -45,7 +48,7 @@ test('loadManifest rejects an unclassifiable class', () => {
 test('loadManifest rejects an absolute or escaping path', () => {
   const dir = tmp('wrxn-badpath-');
   const bad = path.join(dir, 'manifest.json');
-  fs.writeFileSync(bad, JSON.stringify({ version: '1', files: [{ path: '../escape.md', class: 'managed' }] }));
+  fs.writeFileSync(bad, JSON.stringify({ version: '1', files: [{ path: '../escape.md', class: 'managed', profile: 'project' }] }));
   assert.throws(() => loadManifest(bad), /repo-relative/);
 });
 
@@ -56,10 +59,10 @@ test('init lays the full payload and classifies each laid file', () => {
   const report = init({ pkgRoot: PKG_ROOT, target, profile: 'project' });
 
   assert.equal(report.profile, 'project');
-  assert.equal(report.laid.length, PAYLOAD_PATHS.length);
+  assert.equal(report.laid.length, PROJECT_PATHS.length);
   assert.equal(report.skipped.length, 0);
 
-  for (const rel of PAYLOAD_PATHS) {
+  for (const rel of PROJECT_PATHS) {
     assert.ok(fs.existsSync(path.join(target, rel)), `${rel} not laid`);
   }
   // every laid file carries its class
@@ -71,7 +74,7 @@ test('init lays the full payload and classifies each laid file', () => {
   const receipt = JSON.parse(fs.readFileSync(path.join(target, RECEIPT), 'utf8'));
   assert.equal(receipt.kernelVersion, pkgVersion);
   assert.equal(receipt.profile, 'project');
-  assert.equal(receipt.files.length, PAYLOAD_PATHS.length);
+  assert.equal(receipt.files.length, PROJECT_PATHS.length);
 });
 
 // ── idempotency ───────────────────────────────────────────────────────────────
@@ -82,7 +85,7 @@ test('re-running init is a no-op (idempotent)', () => {
   const second = init({ pkgRoot: PKG_ROOT, target, profile: 'project' });
 
   assert.equal(second.laid.length, 0, 'second run laid nothing');
-  assert.equal(second.skipped.length, PAYLOAD_PATHS.length, 'second run skipped everything');
+  assert.equal(second.skipped.length, PROJECT_PATHS.length, 'second run skipped everything');
 });
 
 test('init never overwrites an existing seeded file', () => {
@@ -145,7 +148,7 @@ test('npx <pkg> --version answers from a packed tarball install', () => {
   const installTarget = path.join(work, 'target');
   fs.mkdirSync(installTarget);
   execFileSync('node', [installedBin, 'init', '--project', '--root', installTarget], { encoding: 'utf8' });
-  for (const rel of PAYLOAD_PATHS) {
+  for (const rel of PROJECT_PATHS) {
     assert.ok(fs.existsSync(path.join(installTarget, rel)), `${rel} not laid from tarball install`);
   }
 });

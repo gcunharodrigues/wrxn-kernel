@@ -10,287 +10,367 @@
   "files": [
     {
       "path": ".claude/constitution.local.md",
-      "class": "seeded"
+      "class": "seeded",
+      "profile": "project"
     },
     {
       "path": ".claude/constitution.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/hooks/enforce-managed-guard.cjs",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/hooks/enforce-managed-precommit.cjs",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/hooks/enforce-push-authority.cjs",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/hooks/enforce-review-marker.cjs",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/hooks/enforce-tests-on-push.cjs",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/hooks/synapse-engine.cjs",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/settings.json",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/diagnose/SKILL.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/diagnose/scripts/hitl-loop.template.sh",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/grill-me/SKILL.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/grill-with-docs/ADR-FORMAT.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/grill-with-docs/CONTEXT-FORMAT.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/grill-with-docs/SKILL.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/handoff/SKILL.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/improve-codebase-architecture/DEEPENING.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/improve-codebase-architecture/HTML-REPORT.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/improve-codebase-architecture/INTERFACE-DESIGN.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/improve-codebase-architecture/LANGUAGE.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/improve-codebase-architecture/SKILL.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/memory/SKILL.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/prototype/LOGIC.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/prototype/SKILL.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/prototype/UI.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/qa-walk/SKILL.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/qa-walk/references/cli-mode.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/qa-walk/references/finding-issue-template.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/qa-walk/references/walk-report-template.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/qa-walk/references/web-mode.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/setup-matt-pocock-skills/SKILL.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/setup-matt-pocock-skills/domain.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/setup-matt-pocock-skills/issue-tracker-github.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/setup-matt-pocock-skills/issue-tracker-gitlab.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/setup-matt-pocock-skills/issue-tracker-local.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/setup-matt-pocock-skills/triage-labels.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/skill-creator/LICENSE.txt",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/skill-creator/SKILL.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/skill-creator/scripts/init_skill.py",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/skill-creator/scripts/package_skill.py",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/skill-creator/scripts/quick_validate.py",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/synapse/SKILL.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/synapse/assets/README.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/synapse/references/brackets.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/synapse/references/commands.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/synapse/references/domains.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/synapse/references/layers.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/synapse/references/manifest.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/tdd/SKILL.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/tech-search/SKILL.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/tech-search/prompts/page-extract.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/to-issues/SKILL.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/to-prd/SKILL.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/triage/AGENT-BRIEF.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/triage/OUT-OF-SCOPE.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/triage/SKILL.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".claude/skills/write-a-skill/SKILL.md",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".recon.json",
-      "class": "seeded"
+      "class": "seeded",
+      "profile": "project"
     },
     {
       "path": ".synapse/global",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".synapse/manifest",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".synapse/pipeline",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".synapse/routing",
-      "class": "seeded"
+      "class": "seeded",
+      "profile": "project"
     },
     {
       "path": ".wrxn/wiki.cjs",
-      "class": "managed"
+      "class": "managed",
+      "profile": "project"
     },
     {
       "path": ".wrxn/wiki/.gitkeep",
-      "class": "state"
+      "class": "state",
+      "profile": "project"
     },
     {
       "path": ".wrxn/wiki/concepts/.gitkeep",
-      "class": "state"
+      "class": "state",
+      "profile": "project"
     },
     {
       "path": ".wrxn/wiki/decisions/.gitkeep",
-      "class": "state"
+      "class": "state",
+      "profile": "project"
     },
     {
       "path": ".wrxn/wiki/gotchas/.gitkeep",
-      "class": "state"
+      "class": "state",
+      "profile": "project"
     },
     {
       "path": ".wrxn/wiki/sessions/.gitkeep",
-      "class": "state"
+      "class": "state",
+      "profile": "project"
     },
     {
       "path": "docs/agents/domain.md",
-      "class": "seeded"
+      "class": "seeded",
+      "profile": "project"
     },
     {
       "path": "docs/agents/issue-tracker.md",
-      "class": "seeded"
+      "class": "seeded",
+      "profile": "project"
     },
     {
       "path": "docs/agents/triage-labels.md",
-      "class": "seeded"
+      "class": "seeded",
+      "profile": "project"
+    },
+    {
+      "path": "docs/workspace/operator-layer.md",
+      "class": "seeded",
+      "profile": "workspace"
     }
+  ],
+  "profiles": [
+    "project",
+    "workspace"
   ]
 }

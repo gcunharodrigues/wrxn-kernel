@@ -56,7 +56,8 @@ Usage:
       prune <name> [--force]    remove a worktree + branch (refuses unmerged unless --force)
       check <tracks.json>       refuse an overlapping disjoint-file split
 
-Profiles: --project (default). --workspace lands in a later release.`;
+Profiles: --project (default, the dev pipeline + intelligence + enforcement) |
+          --workspace (adds the operator layer + connections registry).`;
 
 function main(argv) {
   const args = parseArgs(argv);
@@ -87,10 +88,6 @@ function main(argv) {
   if (cmd === 'init') {
     const target = path.resolve(args.flags.root || process.cwd());
     const profile = args.flags.profile || 'project';
-    if (profile === 'workspace') {
-      process.stderr.write('wrxn: --workspace profile is not in this release; use --project\n');
-      return 2;
-    }
     const report = init({ pkgRoot: PKG_ROOT, target, profile });
     process.stdout.write(`wrxn init (${profile}) → ${target}\n`);
     for (const f of report.laid) {
