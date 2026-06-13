@@ -31,6 +31,8 @@ function parseArgs(argv) {
       args.flags.root = argv[++i];
     } else if (a === '--base') {
       args.flags.base = argv[++i];
+    } else if (a === '--path') {
+      args.flags.path = argv[++i];
     } else if (a.startsWith('--')) {
       args.flags[a.slice(2)] = true;
     } else {
@@ -48,11 +50,13 @@ Usage:
                                  lay the kernel payload into <dir> (default: cwd)
   wrxn update [--root <dir>]     update an install: replace managed files, keep
                                  seeded + state; refuses a downgrade
-  wrxn worktree <sub> [--root <repo>] [--base <branch>]
-                                 ephemeral AFK track lifecycle:
+  wrxn worktree <sub> [--root <repo>] [--base <branch>] [--path <dir>]
+                                 worktree lifecycle (two faces, one engine):
       list                       show the repo's worktrees
-      add <name>                 create an ephemeral worktree on track/<name> off base
-      integrate <name>          merge track/<name> back to base, then auto-prune
+      add <name>                 ephemeral AFK track on track/<name> (temp path, off base)
+      new <name>                 named durable worktree on wt/<name> (persistent path)
+      status <name>              clean/dirty + ahead/behind for a worktree
+      integrate <name>          merge <name> back to base, then auto-prune
       prune <name> [--force]    remove a worktree + branch (refuses unmerged unless --force)
       check <tracks.json>       refuse an overlapping disjoint-file split
 
@@ -125,6 +129,9 @@ function main(argv) {
     const repo = path.resolve(args.flags.root || process.cwd());
     const base = args.flags.base || 'main';
     const name = args._[2];
+    // A name resolves to a named (wt/) worktree if one exists, else the ephemeral (track/) face.
+    const detectPrefix = (n) => worktree.listWorktrees(repo).some((w) => w.branch === worktree.NAMED_PREFIX + n)
+      ? worktree.NAMED_PREFIX : worktree.BRANCH_PREFIX;
     try {
       if (sub === 'list') {
         for (const w of worktree.listWorktrees(repo)) {
@@ -134,19 +141,31 @@ function main(argv) {
       }
       if (sub === 'add') {
         if (!name) { process.stderr.write('wrxn: worktree add requires <name>\n'); return 2; }
-        const r = worktree.createWorktree(repo, name, { base });
+        const r = worktree.createWorktree(repo, name, { base, path: args.flags.path });
         process.stdout.write(`worktree ${r.branch} → ${r.path}\n`);
+        return 0;
+      }
+      if (sub === 'new') {
+        if (!name) { process.stderr.write('wrxn: worktree new requires <name>\n'); return 2; }
+        const r = worktree.createNamedWorktree(repo, name, { base, path: args.flags.path });
+        process.stdout.write(`named worktree ${r.branch} → ${r.path}\n`);
+        return 0;
+      }
+      if (sub === 'status') {
+        if (!name) { process.stderr.write('wrxn: worktree status requires <name>\n'); return 2; }
+        const s = worktree.worktreeStatus(repo, name, { base, prefix: detectPrefix(name) });
+        process.stdout.write(`${s.branch}\t${s.clean ? 'clean' : 'dirty'}\tahead ${s.ahead}, behind ${s.behind}\t${s.path || '(no worktree)'}\n`);
         return 0;
       }
       if (sub === 'integrate') {
         if (!name) { process.stderr.write('wrxn: worktree integrate requires <name>\n'); return 2; }
-        const r = worktree.integrateWorktree(repo, name, { base });
+        const r = worktree.integrateWorktree(repo, name, { base, prefix: detectPrefix(name) });
         process.stdout.write(`integrated ${r.branch} → ${r.base}, worktree + branch pruned\n`);
         return 0;
       }
       if (sub === 'prune') {
         if (!name) { process.stderr.write('wrxn: worktree prune requires <name>\n'); return 2; }
-        const r = worktree.pruneWorktree(repo, name, { force: !!args.flags.force });
+        const r = worktree.pruneWorktree(repo, name, { base, force: !!args.flags.force, prefix: detectPrefix(name) });
         process.stdout.write(`pruned ${r.branch}${r.forced ? ' (forced)' : ''}\n`);
         return 0;
       }
