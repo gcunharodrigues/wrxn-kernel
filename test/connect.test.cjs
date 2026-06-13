@@ -145,6 +145,39 @@ test('re-registering the same name upserts (no duplicate rows)', () => {
   assert.deepEqual(all[0].scopes, ['b'], 'latest registration wins');
 });
 
+// ── Finding fixes (21-findings: f1 mcp crash, f2 path escape, f3 corrupt registry) ──
+
+test('f1: default invoker rejects an mcp launcher that crashes on launch (nonzero exit)', () => {
+  const r = connect.defaultInvoke({ transport: 'mcp', command: 'node', args: ['-e', 'process.exit(1)'] });
+  assert.equal(r.ok, false);
+  assert.match(r.detail, /crashed on launch/);
+});
+
+test('f1: an mcp launcher that exits clean (0) within the probe is still reachable', () => {
+  const r = connect.defaultInvoke({ transport: 'mcp', command: 'node', args: ['-e', ';'] });
+  assert.equal(r.ok, true);
+});
+
+test('f2: a state credential pointer that escapes root via ../ never resolves', () => {
+  const root = tmp('wrxn-conn-escape-');
+  const c = connect.resolveCredential('state:../../../etc/passwd', root);
+  assert.equal(c.kind, 'state');
+  assert.equal(c.resolved, false);
+  assert.equal(c.escaped, true);
+});
+
+test('f3: a present-but-corrupt registry throws instead of silently emptying', () => {
+  const root = tmp('wrxn-conn-corrupt-');
+  fs.mkdirSync(path.join(root, '.wrxn'), { recursive: true });
+  fs.writeFileSync(connect.registryPath(root), '{ this is not json');
+  assert.throws(() => connect.listConnections(root), /corrupt/);
+  // and register refuses to clobber it:
+  assert.throws(
+    () => connect.registerConnection(root, { name: 'x', transport: 'cli', command: 'git' }, { invoke: () => ({ ok: true, detail: 'stub' }) }),
+    /corrupt/
+  );
+});
+
 // ── CLI surface (CLI-First) ─────────────────────────────────────────────────────
 
 test('CLI: wrxn connect add registers a real cli tool, list + get read it back', () => {
