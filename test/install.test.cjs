@@ -66,9 +66,10 @@ test('init lays the full payload and classifies each laid file', () => {
   for (const f of report.laid) {
     assert.ok(['managed', 'seeded', 'state'].includes(f.class), `${f.path} unclassified in report`);
   }
-  // receipt records the install
+  // receipt records the install at the package release version
+  const pkgVersion = JSON.parse(fs.readFileSync(path.join(PKG_ROOT, 'package.json'), 'utf8')).version;
   const receipt = JSON.parse(fs.readFileSync(path.join(target, RECEIPT), 'utf8'));
-  assert.equal(receipt.kernelVersion, MANIFEST.version);
+  assert.equal(receipt.kernelVersion, pkgVersion);
   assert.equal(receipt.profile, 'project');
   assert.equal(receipt.files.length, PAYLOAD_PATHS.length);
 });

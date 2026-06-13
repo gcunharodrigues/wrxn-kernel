@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 
 const { init } = require('../lib/install.cjs');
+const { update } = require('../lib/update.cjs');
 
 const PKG_ROOT = path.join(__dirname, '..');
 
@@ -42,6 +43,8 @@ Usage:
   wrxn --version                 print the kernel version
   wrxn init [--project] [--root <dir>]
                                  lay the kernel payload into <dir> (default: cwd)
+  wrxn update [--root <dir>]     update an install: replace managed files, keep
+                                 seeded + state; refuses a downgrade
 
 Profiles: --project (default). --workspace lands in a later release.`;
 
@@ -60,17 +63,18 @@ function main(argv) {
     return cmd ? 0 : (args.flags.help ? 0 : 2);
   }
 
-  if (cmd === 'init') {
-    // An explicit --root must carry a real path. An empty/missing value (e.g. an
-    // unset shell var expanding to "") must NOT silently fall through to cwd — that
-    // footgun lays the payload into whatever dir you happen to be standing in.
-    if ('root' in args.flags) {
-      const r = args.flags.root;
-      if (typeof r !== 'string' || r.trim() === '') {
-        process.stderr.write('wrxn: --root requires a non-empty directory path\n');
-        return 2;
-      }
+  // An explicit --root must carry a real path. An empty/missing value (e.g. an unset
+  // shell var expanding to "") must NOT silently fall through to cwd — that footgun
+  // writes into whatever dir you happen to be standing in. Shared by init + update.
+  if ('root' in args.flags) {
+    const r = args.flags.root;
+    if (typeof r !== 'string' || r.trim() === '') {
+      process.stderr.write('wrxn: --root requires a non-empty directory path\n');
+      return 2;
     }
+  }
+
+  if (cmd === 'init') {
     const target = path.resolve(args.flags.root || process.cwd());
     const profile = args.flags.profile || 'project';
     if (profile === 'workspace') {
@@ -86,6 +90,26 @@ function main(argv) {
       process.stdout.write(`  skipped [${f.class}] ${f.path} (exists)\n`);
     }
     process.stdout.write(`${report.laid.length} laid, ${report.skipped.length} unchanged.\n`);
+    return 0;
+  }
+
+  if (cmd === 'update') {
+    const target = path.resolve(args.flags.root || process.cwd());
+    let report;
+    try {
+      report = update({ pkgRoot: PKG_ROOT, target });
+    } catch (err) {
+      process.stderr.write(`wrxn: ${err.message}\n`);
+      return 2;
+    }
+    process.stdout.write(`wrxn update ${report.from} → ${report.to} (${target})\n`);
+    for (const f of report.updated) {
+      process.stdout.write(`  ${f.reason === 'new-in-version' ? 'added  ' : 'updated'} [${f.class}] ${f.path}\n`);
+    }
+    for (const f of report.preserved) {
+      process.stdout.write(`  kept    [${f.class}] ${f.path}\n`);
+    }
+    process.stdout.write(`${report.updated.length} updated, ${report.preserved.length} kept.\n`);
     return 0;
   }
 
