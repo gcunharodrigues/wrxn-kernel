@@ -11,7 +11,9 @@
         "matcher": "Bash",
         "hooks": [
           { "type": "command", "command": "node .claude/hooks/enforce-managed-precommit.cjs" },
-          { "type": "command", "command": "node .claude/hooks/enforce-push-authority.cjs" }
+          { "type": "command", "command": "node .claude/hooks/enforce-push-authority.cjs" },
+          { "type": "command", "command": "node .claude/hooks/enforce-tests-on-push.cjs" },
+          { "type": "command", "command": "node .claude/hooks/enforce-review-marker.cjs" }
         ]
       }
     ]

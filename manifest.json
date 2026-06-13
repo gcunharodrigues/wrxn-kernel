@@ -7,6 +7,8 @@
     { "path": ".claude/constitution.md", "class": "managed" },
     { "path": ".claude/settings.json", "class": "managed" },
     { "path": ".claude/hooks/enforce-push-authority.cjs", "class": "managed" },
+    { "path": ".claude/hooks/enforce-tests-on-push.cjs", "class": "managed" },
+    { "path": ".claude/hooks/enforce-review-marker.cjs", "class": "managed" },
     { "path": ".claude/hooks/enforce-managed-guard.cjs", "class": "managed" },
     { "path": ".claude/hooks/enforce-managed-precommit.cjs", "class": "managed" },
     { "path": ".claude/skills/tdd/SKILL.md", "class": "managed" },
