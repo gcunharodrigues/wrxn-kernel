@@ -6,6 +6,7 @@ const path = require('path');
 
 const { init } = require('../lib/install.cjs');
 const { update } = require('../lib/update.cjs');
+const worktree = require('../lib/worktree.cjs');
 
 const PKG_ROOT = path.join(__dirname, '..');
 
@@ -28,6 +29,8 @@ function parseArgs(argv) {
       args.flags.profile = 'workspace';
     } else if (a === '--root') {
       args.flags.root = argv[++i];
+    } else if (a === '--base') {
+      args.flags.base = argv[++i];
     } else if (a.startsWith('--')) {
       args.flags[a.slice(2)] = true;
     } else {
@@ -45,6 +48,13 @@ Usage:
                                  lay the kernel payload into <dir> (default: cwd)
   wrxn update [--root <dir>]     update an install: replace managed files, keep
                                  seeded + state; refuses a downgrade
+  wrxn worktree <sub> [--root <repo>] [--base <branch>]
+                                 ephemeral AFK track lifecycle:
+      list                       show the repo's worktrees
+      add <name>                 create an ephemeral worktree on track/<name> off base
+      integrate <name>          merge track/<name> back to base, then auto-prune
+      prune <name> [--force]    remove a worktree + branch (refuses unmerged unless --force)
+      check <tracks.json>       refuse an overlapping disjoint-file split
 
 Profiles: --project (default). --workspace lands in a later release.`;
 
@@ -111,6 +121,52 @@ function main(argv) {
     }
     process.stdout.write(`${report.updated.length} updated, ${report.preserved.length} kept.\n`);
     return 0;
+  }
+
+  if (cmd === 'worktree') {
+    const sub = args._[1];
+    const repo = path.resolve(args.flags.root || process.cwd());
+    const base = args.flags.base || 'main';
+    const name = args._[2];
+    try {
+      if (sub === 'list') {
+        for (const w of worktree.listWorktrees(repo)) {
+          process.stdout.write(`  ${w.branch || '(detached)'}\t${w.path}\n`);
+        }
+        return 0;
+      }
+      if (sub === 'add') {
+        if (!name) { process.stderr.write('wrxn: worktree add requires <name>\n'); return 2; }
+        const r = worktree.createWorktree(repo, name, { base });
+        process.stdout.write(`worktree ${r.branch} → ${r.path}\n`);
+        return 0;
+      }
+      if (sub === 'integrate') {
+        if (!name) { process.stderr.write('wrxn: worktree integrate requires <name>\n'); return 2; }
+        const r = worktree.integrateWorktree(repo, name, { base });
+        process.stdout.write(`integrated ${r.branch} → ${r.base}, worktree + branch pruned\n`);
+        return 0;
+      }
+      if (sub === 'prune') {
+        if (!name) { process.stderr.write('wrxn: worktree prune requires <name>\n'); return 2; }
+        const r = worktree.pruneWorktree(repo, name, { force: !!args.flags.force });
+        process.stdout.write(`pruned ${r.branch}${r.forced ? ' (forced)' : ''}\n`);
+        return 0;
+      }
+      if (sub === 'check') {
+        const spec = args._[2];
+        if (!spec) { process.stderr.write('wrxn: worktree check requires <tracks.json>\n'); return 2; }
+        const tracks = JSON.parse(fs.readFileSync(path.resolve(spec), 'utf8'));
+        worktree.verifyDisjoint(tracks);
+        process.stdout.write(`disjoint OK (${tracks.length} tracks)\n`);
+        return 0;
+      }
+      process.stderr.write(`wrxn: unknown worktree subcommand "${sub || ''}"\n\n${USAGE}\n`);
+      return 2;
+    } catch (err) {
+      process.stderr.write(`wrxn: ${err.message}\n`);
+      return 2;
+    }
   }
 
   process.stderr.write(`wrxn: unknown command "${cmd}"\n\n${USAGE}\n`);
