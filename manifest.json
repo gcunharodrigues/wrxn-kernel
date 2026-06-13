@@ -1,0 +1,13 @@
+{
+  "$schema": "internal://wrxn-manifest/v1",
+  "version": "1",
+  "description": "The file-class manifest: the single source of truth for what `wrxn init` lays and how each file is governed on update. Every payload file MUST be classified. Three classes: managed (kernel-owned, overwritten on update), seeded (created once at init, never overwritten), state (project-owned, kernel never touches contents). The installer refuses any payload file absent from this manifest and any class not in {managed,seeded,state}.",
+  "classes": ["managed", "seeded", "state"],
+  "files": [
+    { "path": ".claude/constitution.md", "class": "managed" },
+    { "path": ".claude/hooks/enforce-push-authority.cjs", "class": "managed" },
+    { "path": ".claude/skills/tdd/SKILL.md", "class": "managed" },
+    { "path": ".claude/constitution.local.md", "class": "seeded" },
+    { "path": ".wrxn/wiki/.gitkeep", "class": "state" }
+  ]
+}
