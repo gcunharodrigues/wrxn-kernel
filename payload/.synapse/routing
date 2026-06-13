@@ -1,0 +1,8 @@
+# Domain: routing (L6 keyword-recall) — fires only when a trigger word appears in the prompt.
+# SEEDED: operator-owned, created once at init, never overwritten on `wrxn update`. This is the
+# representative keyword domain — add your own recall rules here, or register more domains in
+# .synapse/manifest with a <DOMAIN>_RECALL=word1,word2 line and a sibling .synapse/<domain> file.
+ROUTING_RULE_0=git push, PR creation, and release tags go through the devops role only — delegate, never run them directly.
+ROUTING_RULE_1=A new project is a git worktree (e.g. `wrxn init --project` under projects/<slug>), never a bare mkdir.
+ROUTING_RULE_2=Deploys: the first `vercel deploy` auto-promotes to production — confirm intent before shipping.
+ROUTING_RULE_3=An issue is the unit of work; cut vertical tracer-bullet slices, each independently buildable and walkable.

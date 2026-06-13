@@ -17,6 +17,7 @@
     { "path": ".synapse/global", "class": "managed" },
     { "path": ".synapse/pipeline", "class": "managed" },
     { "path": ".claude/constitution.local.md", "class": "seeded" },
+    { "path": ".synapse/routing", "class": "seeded" },
     { "path": ".wrxn/wiki/.gitkeep", "class": "state" }
   ]
 }

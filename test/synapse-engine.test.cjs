@@ -98,6 +98,37 @@ test('fail-open (empty object) on unparseable stdin', () => {
   assert.deepEqual(out.trim() ? JSON.parse(out) : {}, {});
 });
 
+// ── 06b keyword recall: L6 domain fires only on its trigger word ───────────────
+
+test('a keyword-recall domain fires when its trigger word appears in the prompt', () => {
+  const root = freshInstall('wrxn-syn-recall-hit-');
+  const ctx = inject(
+    { prompt: 'how do I deploy this to prod', cwd: root },
+    { CLAUDE_PROJECT_DIR: root, WRXN_RULES_BUDGET: '100000' }
+  );
+  assert.match(ctx, /\[RECALL: routing\]/);
+});
+
+test('the same recall domain stays silent when no trigger word is present', () => {
+  const root = freshInstall('wrxn-syn-recall-miss-');
+  const ctx = inject(
+    { prompt: 'explain this function to me', cwd: root },
+    { CLAUDE_PROJECT_DIR: root, WRXN_RULES_BUDGET: '100000' }
+  );
+  assert.doesNotMatch(ctx, /\[RECALL: routing\]/);
+  // always-on layers still inject regardless.
+  assert.match(ctx, /\[GLOBAL\]/);
+});
+
+test('recall matching is case-insensitive', () => {
+  const root = freshInstall('wrxn-syn-recall-case-');
+  const ctx = inject(
+    { prompt: 'Set up a WORKTREE for the new track', cwd: root },
+    { CLAUDE_PROJECT_DIR: root, WRXN_RULES_BUDGET: '100000' }
+  );
+  assert.match(ctx, /\[RECALL: routing\]/);
+});
+
 // ── pure-function units (engine is self-contained but exports its internals) ────
 
 const engine = require('../payload/.claude/hooks/synapse-engine.cjs');

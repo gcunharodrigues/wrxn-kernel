@@ -22,6 +22,11 @@ GLOBAL_ALWAYS_ON=true
 PIPELINE_STATE=active
 PIPELINE_ALWAYS_ON=true
 
+# L6 — Keyword-recall. Loads .synapse/routing only when a trigger word appears in the prompt.
+# The domain file is SEEDED (operator-owned); this registry line is managed.
+ROUTING_STATE=active
+ROUTING_RECALL=deploy,worktree,push,pull request,release,new project,issue
+
 # Budget governor — ceiling (in tokens) on the TRIMMABLE sections (everything except the
 # Constitution, which is always kept). Over-budget sections are dropped lowest-priority-first
 # with a visible [SYNAPSE-RULES-TRIM] marker. Override with WRXN_RULES_BUDGET.
