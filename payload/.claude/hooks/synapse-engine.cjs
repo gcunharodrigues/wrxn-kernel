@@ -229,7 +229,7 @@ function buildSections(root, prompt) {
   if (domains.CONSTITUTION && domains.CONSTITUTION.state === 'active') {
     const body = renderConstitution(readFileOr(path.join(root, '.claude', 'constitution.md'), ''));
     if (body.trim()) {
-      sections.push({ name: 'CONSTITUTION', header: 'CONSTITUTION] (NON-NEGOTIABLE', text: `[CONSTITUTION] (NON-NEGOTIABLE)\n${body}`, always: true });
+      sections.push({ name: 'CONSTITUTION', header: 'CONSTITUTION', text: `[CONSTITUTION] (NON-NEGOTIABLE)\n${body}`, always: true });
     }
   }
 
