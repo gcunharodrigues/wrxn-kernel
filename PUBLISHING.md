@@ -16,12 +16,12 @@ Pre-flight done 2026-06-13. The package is **publish-ready**. Publish + tag are 
 - [x] **Dogfood record archived** — `acceptance/dogfood-01-todo-cli/` (wrxn-kernel-22, ACCEPTED).
 - [x] `private: false`, `bin.wrxn`, `engines.node >=20` set.
 
-## Decisions to make BEFORE publishing (operator)
+## Decisions
 
-1. **Version.** `package.json` is `0.0.1`; issue 23 is titled "npm publish v0.1". Bump to `0.1.0` to
-   signal the first minor release? (`npm version 0.1.0 --no-git-tag-version`, or edit + commit.)
-2. **License.** Currently `UNLICENSED` on a `private:false` package — intentional (proprietary), or
-   set a real SPDX license before going public?
+1. **Version — DECIDED: `0.1.0`** (operator, 2026-06-13). `package.json` bumped 0.0.1 → 0.1.0 to
+   signal the first minor release.
+2. **License.** Still `UNLICENSED` on a `private:false` package — left as-is for v0.1.0 (proprietary).
+   Revisit before any wider/open distribution.
 
 ## Publish (operator / @devops — when the two decisions above are settled)
 
