@@ -9,6 +9,7 @@ const { update } = require('../lib/update.cjs');
 const worktree = require('../lib/worktree.cjs');
 const executor = require('../lib/executor.cjs');
 const onboard = require('../lib/onboard.cjs');
+const connect = require('../lib/connect.cjs');
 
 const PKG_ROOT = path.join(__dirname, '..');
 
@@ -37,6 +38,20 @@ function parseArgs(argv) {
       args.flags.path = argv[++i];
     } else if (a === '--executor') {
       args.flags.executor = argv[++i];
+    } else if (a === '--transport') {
+      args.flags.transport = argv[++i];
+    } else if (a === '--command') {
+      args.flags.command = argv[++i];
+    } else if (a === '--args') {
+      args.flags.args = argv[++i];
+    } else if (a === '--scopes') {
+      args.flags.scopes = argv[++i];
+    } else if (a === '--credential') {
+      args.flags.credential = argv[++i];
+    } else if (a === '--owner') {
+      args.flags.owner = argv[++i];
+    } else if (a === '--probe') {
+      args.flags.probe = argv[++i];
     } else if (a === '--check-report') {
       args.flags['check-report'] = true;
     } else if (a.startsWith('--')) {
@@ -76,6 +91,17 @@ Usage:
   wrxn dispatch --check-report <report.json> [--executor <type>]
                                  validate an executor's structured report against the contract +
                                  boundary gates (rejects a non-devops report that claims a push)
+
+  wrxn connect <sub> [--root <dir>]
+                                 connections registry — the workspace nervous system. MCP is the
+                                 socket, CLI is the floor, credentials are state.
+      add <name> --transport <mcp|cli> --command <cmd> [--args a,b] [--scopes a,b]
+                 [--credential env:NAME|state:relpath] [--owner who] [--probe <arg>]
+                                 register a tool only AFTER validating its interface by invocation;
+                                 an unreachable interface is rejected. Stores the credential POINTER,
+                                 never the secret (registry is per-install state, never shipped).
+      list                       print all registered connections (agent-readable JSON)
+      get <name>                 print one connection by name
 
   wrxn onboard [--root <dir>]    scaffold the Day-1 operator file set under context/ from a filled
                                  aios-intake.md (the deterministic half of the onboard skill;
@@ -264,6 +290,49 @@ function main(argv) {
     for (const f of report.skipped) process.stdout.write(`  skipped    ${f} (no filled intake answer)\n`);
     process.stdout.write(`${report.scaffolded.length} scaffolded, ${report.skipped.length} skipped.\n`);
     return 0;
+  }
+
+  if (cmd === 'connect') {
+    const sub = args._[1];
+    const root = path.resolve(args.flags.root || process.cwd());
+    try {
+      if (sub === 'add') {
+        const name = args._[2];
+        if (!name) { process.stderr.write('wrxn: connect add requires <name>\n'); return 2; }
+        const entry = {
+          name,
+          transport: args.flags.transport,
+          command: args.flags.command,
+          scopes: args.flags.scopes ? String(args.flags.scopes).split(',').map((s) => s.trim()).filter(Boolean) : [],
+          credential: args.flags.credential || null,
+          owner: args.flags.owner || null,
+        };
+        if (args.flags.probe) entry.probe = args.flags.probe;
+        // An mcp socket launcher usually needs args (e.g. `node <server> serve`). Comma-separated.
+        if (args.flags.args) entry.args = String(args.flags.args).split(',').map((s) => s.trim()).filter(Boolean);
+        const res = connect.registerConnection(root, entry);
+        process.stdout.write(`connected ${res.entry.name} [${res.entry.transport}] — ${res.validated.detail}\n`);
+        process.stdout.write(`  credential: ${res.entry.credential || '(none)'} → ${res.credential.resolved ? 'resolved' : 'UNRESOLVED'}\n`);
+        return 0;
+      }
+      if (sub === 'list') {
+        process.stdout.write(JSON.stringify(connect.listConnections(root), null, 2) + '\n');
+        return 0;
+      }
+      if (sub === 'get') {
+        const name = args._[2];
+        if (!name) { process.stderr.write('wrxn: connect get requires <name>\n'); return 2; }
+        const found = connect.findConnection(root, name);
+        if (!found) { process.stderr.write(`wrxn: no connection named "${name}"\n`); return 2; }
+        process.stdout.write(JSON.stringify(found, null, 2) + '\n');
+        return 0;
+      }
+      process.stderr.write(`wrxn: unknown connect subcommand "${sub || ''}"\n\n${USAGE}\n`);
+      return 2;
+    } catch (err) {
+      process.stderr.write(`wrxn: ${err.message}\n`);
+      return 2;
+    }
   }
 
   process.stderr.write(`wrxn: unknown command "${cmd}"\n\n${USAGE}\n`);
