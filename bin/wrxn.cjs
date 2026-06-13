@@ -126,6 +126,9 @@ function main(argv) {
       process.stdout.write(`  kept    [${f.class}] ${f.path}\n`);
     }
     process.stdout.write(`${report.updated.length} updated, ${report.preserved.length} kept.\n`);
+    if (report.migrationsRan && report.migrationsRan.length) {
+      process.stdout.write(`migrations applied: ${report.migrationsRan.join(', ')}\n`);
+    }
     return 0;
   }
 
