@@ -47,7 +47,9 @@ const USAGE = `wrxn — WRXN Kernel installer
 Usage:
   wrxn --version                 print the kernel version
   wrxn init [--project] [--root <dir>]
-                                 lay the kernel payload into <dir> (default: cwd)
+                                 lay the kernel payload into <dir> (default: cwd).
+                                 brownfield-safe: an existing file is never overwritten —
+                                 it is preserved and reported as a collision.
   wrxn update [--root <dir>]     update an install: replace managed files, keep
                                  seeded + state; refuses a downgrade
   wrxn worktree <sub> [--root <repo>] [--base <branch>] [--path <dir>]
@@ -98,9 +100,12 @@ function main(argv) {
       process.stdout.write(`  laid    [${f.class}] ${f.path}\n`);
     }
     for (const f of report.skipped) {
-      process.stdout.write(`  skipped [${f.class}] ${f.path} (exists)\n`);
+      process.stdout.write(`  skipped [${f.class}] ${f.path} (${f.collision ? 'collision — existing file preserved' : 'exists'})\n`);
     }
     process.stdout.write(`${report.laid.length} laid, ${report.skipped.length} unchanged.\n`);
+    if (report.brownfield) {
+      process.stdout.write(`brownfield install — ${report.collisions.length} existing file(s) preserved (never overwritten): ${report.collisions.map((c) => c.path).join(', ')}\n`);
+    }
     return 0;
   }
 
