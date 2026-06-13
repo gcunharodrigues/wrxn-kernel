@@ -1,0 +1,6 @@
+# Domain: pipeline (L1) — the unified-dev build route. Always-on. Managed kernel file.
+PIPELINE_RULE_0=The default build route is unified-dev: grill -> research -> prototype -> PRD -> issues -> verticality review -> tdd -> code review -> security review -> QA-walk -> operator accepts.
+PIPELINE_RULE_1=The HITL spine (grill, PRD, issues, accept) runs in the main conversation; the build/review/security/QA-walk executors run as isolated subagents.
+PIPELINE_RULE_2=Scale the front half to the task — a clear, scoped, low-novelty change thins it (grill -> PRD -> issues -> build); a net-new or unclear-approach change runs the full front half.
+PIPELINE_RULE_3=An issue is ready-for-agent only after the verticality-review gate passes (no horizontal, not-demoable, too-coarse, or dependency-error slices).
+PIPELINE_RULE_4=Each AFK executor reads and follows the actual skill file for its phase (tdd, qa-walk, triage) — never a paraphrase of the loop.

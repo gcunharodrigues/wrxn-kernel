@@ -1,0 +1,6 @@
+# Domain: global (L1) — WRXN operational invariants. Always-on. Managed kernel file.
+GLOBAL_RULE_0=git push, PR creation, and release tags are EXCLUSIVE to the devops role — every other agent delegates, never runs them directly (Constitution Art. I).
+GLOBAL_RULE_1=The unit of work is an issue with explicit acceptance criteria — no code is written without one (Constitution Art. II).
+GLOBAL_RULE_2=Before building, apply the decision hierarchy: REUSE (>=90% match) > ADAPT (60-89%, <30% change) > CREATE (justify it).
+GLOBAL_RULE_3=Use conventional commits and reference the issue id (e.g. `feat(x): ... [issue-id]`).
+GLOBAL_RULE_4=Tests and typecheck pass on every commit; the full green suite is the push gate (Constitution Art. III).

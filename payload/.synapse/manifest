@@ -1,0 +1,28 @@
+# SYNAPSE Manifest — domain registry (flat KEY=VALUE)
+#
+# The context-injection engine (.claude/hooks/synapse-engine.cjs) reads this on every
+# UserPromptSubmit to know which domains exist and how each fires. Managed kernel file.
+#
+# Per-domain keys:
+#   <DOMAIN>_STATE=active|inactive   — a domain is only ever loaded when active.
+#   <DOMAIN>_ALWAYS_ON=true          — load on every prompt (L0/L1).
+#   <DOMAIN>_RECALL=word1,word2,...  — load only when a trigger word appears in the prompt (L6).
+# A domain's rules live in the sibling file .synapse/<domain> (lowercased), as <DOMAIN>_RULE_N=...
+# The CONSTITUTION domain is special: its body is sourced from .claude/constitution.md, not a domain file.
+
+# L0 — Constitution (NON-NEGOTIABLE). Always; never trimmed by the budget governor.
+CONSTITUTION_STATE=active
+CONSTITUTION_ALWAYS_ON=true
+
+# L1 — Global operational invariants. Always-on.
+GLOBAL_STATE=active
+GLOBAL_ALWAYS_ON=true
+
+# L1 — Pipeline routing (the unified-dev build route). Always-on.
+PIPELINE_STATE=active
+PIPELINE_ALWAYS_ON=true
+
+# Budget governor — ceiling (in tokens) on the TRIMMABLE sections (everything except the
+# Constitution, which is always kept). Over-budget sections are dropped lowest-priority-first
+# with a visible [SYNAPSE-RULES-TRIM] marker. Override with WRXN_RULES_BUDGET.
+RULES_BUDGET_TOKENS=600

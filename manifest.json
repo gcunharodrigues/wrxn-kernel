@@ -12,6 +12,10 @@
     { "path": ".claude/hooks/enforce-managed-guard.cjs", "class": "managed" },
     { "path": ".claude/hooks/enforce-managed-precommit.cjs", "class": "managed" },
     { "path": ".claude/skills/tdd/SKILL.md", "class": "managed" },
+    { "path": ".claude/hooks/synapse-engine.cjs", "class": "managed" },
+    { "path": ".synapse/manifest", "class": "managed" },
+    { "path": ".synapse/global", "class": "managed" },
+    { "path": ".synapse/pipeline", "class": "managed" },
     { "path": ".claude/constitution.local.md", "class": "seeded" },
     { "path": ".wrxn/wiki/.gitkeep", "class": "state" }
   ]
