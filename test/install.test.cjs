@@ -96,6 +96,25 @@ test('init never overwrites an existing seeded file', () => {
   assert.equal(fs.readFileSync(seededPath, 'utf8'), 'OPERATOR EDIT — must survive\n');
 });
 
+// ── footgun guard: an explicit but empty --root must not fall through to cwd ──
+
+test('init rejects an empty --root instead of silently using cwd', () => {
+  const bin = path.join(PKG_ROOT, 'bin', 'wrxn.cjs');
+  const cwd = tmp('wrxn-emptyroot-');
+  let threw = false;
+  try {
+    // empty-string --root (the $T-expanded-to-empty footgun) must error, lay nothing
+    execFileSync('node', [bin, 'init', '--project', '--root', ''], { cwd, encoding: 'utf8', stdio: 'pipe' });
+  } catch (err) {
+    threw = true;
+    assert.equal(err.status, 2, 'exit code 2 on empty --root');
+    assert.match(String(err.stderr), /--root/);
+  }
+  assert.ok(threw, 'init with empty --root must exit non-zero');
+  // and it must not have laid the payload into cwd
+  assert.equal(fs.existsSync(path.join(cwd, '.claude', 'constitution.md')), false, 'nothing laid into cwd');
+});
+
 // ── packed-tarball proof (the AC1 path) ───────────────────────────────────────
 
 test('npx <pkg> --version answers from a packed tarball install', () => {

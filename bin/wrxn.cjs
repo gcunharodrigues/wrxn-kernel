@@ -61,6 +61,16 @@ function main(argv) {
   }
 
   if (cmd === 'init') {
+    // An explicit --root must carry a real path. An empty/missing value (e.g. an
+    // unset shell var expanding to "") must NOT silently fall through to cwd — that
+    // footgun lays the payload into whatever dir you happen to be standing in.
+    if ('root' in args.flags) {
+      const r = args.flags.root;
+      if (typeof r !== 'string' || r.trim() === '') {
+        process.stderr.write('wrxn: --root requires a non-empty directory path\n');
+        return 2;
+      }
+    }
     const target = path.resolve(args.flags.root || process.cwd());
     const profile = args.flags.profile || 'project';
     if (profile === 'workspace') {
