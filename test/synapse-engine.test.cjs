@@ -64,6 +64,14 @@ test('the constitution body is sourced from constitution.md (article text presen
   assert.match(ctx, /No-Invention/);
 });
 
+test('wrapped multi-line constitution bullets keep their continuation text', () => {
+  // A bullet that wraps across two physical lines must not be truncated at the wrap.
+  const body = engine.renderConstitution(
+    '# Title\n\n## Article I\n\n- it delegates when out of scope and never assumes\n  another agent\'s authority.\n'
+  );
+  assert.match(body, /never assumes another agent's authority\./);
+});
+
 test('budget governor trims over-budget sections with a visible marker, never the constitution', () => {
   const root = freshInstall('wrxn-syn-budget-');
   // A 1-token budget forces every trimmable (non-constitution) section to drop.
@@ -127,6 +135,103 @@ test('recall matching is case-insensitive', () => {
     { CLAUDE_PROJECT_DIR: root, WRXN_RULES_BUDGET: '100000' }
   );
   assert.match(ctx, /\[RECALL: routing\]/);
+});
+
+// ── 06c token-base + forced handoff ────────────────────────────────────────────
+
+// Write a transcript JSONL whose last assistant line carries the given usage; return its path.
+function writeTranscript(dir, usage) {
+  const p = path.join(dir, 'transcript.jsonl');
+  const lines = [
+    JSON.stringify({ type: 'user', message: { role: 'user' } }),
+    JSON.stringify({ type: 'assistant', message: { role: 'assistant', model: 'claude-opus-4-8', usage } }),
+  ];
+  fs.writeFileSync(p, lines.join('\n') + '\n');
+  return p;
+}
+
+// Write a fake HOME with a .claude.json recording lastModelUsage keys for `cwd`; return the HOME dir.
+function fakeHome(prefix, cwd, modelKeys) {
+  const home = tmp(prefix);
+  const lastModelUsage = {};
+  for (const k of modelKeys) lastModelUsage[k] = {};
+  fs.writeFileSync(
+    path.join(home, '.claude.json'),
+    JSON.stringify({ projects: { [cwd]: { lastModelUsage } } })
+  );
+  return home;
+}
+
+// resident = input + cache_read + cache_creation (output excluded).
+const USAGE_90K = { input_tokens: 80000, cache_read_input_tokens: 8000, cache_creation_input_tokens: 2000, output_tokens: 5000 };
+
+test('forced handoff fires at >= the threshold (45% of a 200k window)', () => {
+  const root = freshInstall('wrxn-syn-ho-fire-');
+  const tx = writeTranscript(root, USAGE_90K);
+  const home = fakeHome('wrxn-home-200k-', root, ['claude-opus-4-8']); // no [1m] → 200k window
+  const ctx = inject(
+    { prompt: 'continue', cwd: root, transcript_path: tx },
+    { CLAUDE_PROJECT_DIR: root, HOME: home, WRXN_RULES_BUDGET: '100000' }
+  );
+  assert.match(ctx, /\[HANDOFF REQUIRED\]/);
+});
+
+test('no handoff below the threshold (20% of a 200k window)', () => {
+  const root = freshInstall('wrxn-syn-ho-below-');
+  const tx = writeTranscript(root, { input_tokens: 40000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 9000 });
+  const home = fakeHome('wrxn-home-200k2-', root, ['claude-opus-4-8']);
+  const ctx = inject(
+    { prompt: 'continue', cwd: root, transcript_path: tx },
+    { CLAUDE_PROJECT_DIR: root, HOME: home, WRXN_RULES_BUDGET: '100000' }
+  );
+  assert.doesNotMatch(ctx, /\[HANDOFF REQUIRED\]/);
+  assert.match(ctx, /\[CONSTITUTION\]/); // rules still inject
+});
+
+test('the [1m] window tag rebases the math (90k of 1M = 9%, no handoff — the original-bug fix)', () => {
+  const root = freshInstall('wrxn-syn-ho-1m-');
+  const tx = writeTranscript(root, USAGE_90K);
+  const home = fakeHome('wrxn-home-1m-', root, ['claude-opus-4-8[1m]']); // [1m] → 1M window
+  const ctx = inject(
+    { prompt: 'continue', cwd: root, transcript_path: tx },
+    { CLAUDE_PROJECT_DIR: root, HOME: home, WRXN_RULES_BUDGET: '100000' }
+  );
+  assert.doesNotMatch(ctx, /\[HANDOFF REQUIRED\]/);
+});
+
+test('WRXN_HANDOFF_PCT overrides the default threshold', () => {
+  const root = freshInstall('wrxn-syn-ho-override-');
+  const tx = writeTranscript(root, { input_tokens: 50000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 0 });
+  const home = fakeHome('wrxn-home-ov-', root, ['claude-opus-4-8']); // 25% of 200k
+  const ctx = inject(
+    { prompt: 'continue', cwd: root, transcript_path: tx },
+    { CLAUDE_PROJECT_DIR: root, HOME: home, WRXN_RULES_BUDGET: '100000', WRXN_HANDOFF_PCT: '0.2' }
+  );
+  assert.match(ctx, /\[HANDOFF REQUIRED\]/); // 25% >= 20%
+});
+
+test('no transcript_path → no handoff, rules still inject (silent)', () => {
+  const root = freshInstall('wrxn-syn-ho-notx-');
+  const ctx = inject(
+    { prompt: 'continue', cwd: root },
+    { CLAUDE_PROJECT_DIR: root, WRXN_RULES_BUDGET: '100000' }
+  );
+  assert.doesNotMatch(ctx, /\[HANDOFF REQUIRED\]/);
+  assert.match(ctx, /\[GLOBAL\]/);
+});
+
+test('readResidentTokens sums input + cache, excludes output', () => {
+  const dir = tmp('wrxn-syn-resident-');
+  const tx = writeTranscript(dir, USAGE_90K);
+  assert.equal(engine.readResidentTokens(tx), 90000);
+});
+
+test('modelWindow reads the [1m] tag from ~/.claude.json keys', () => {
+  const root = '/some/project';
+  const home1m = fakeHome('wrxn-win-1m-', root, ['claude-opus-4-8[1m]']);
+  const home200 = fakeHome('wrxn-win-200-', root, ['claude-sonnet-4-6']);
+  assert.equal(engine.modelWindow(root, home1m), 1000000);
+  assert.equal(engine.modelWindow(root, home200), 200000);
 });
 
 // ── pure-function units (engine is self-contained but exports its internals) ────

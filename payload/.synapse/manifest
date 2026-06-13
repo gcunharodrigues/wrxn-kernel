@@ -31,3 +31,8 @@ ROUTING_RECALL=deploy,worktree,push,pull request,release,new project,issue
 # Constitution, which is always kept). Over-budget sections are dropped lowest-priority-first
 # with a visible [SYNAPSE-RULES-TRIM] marker. Override with WRXN_RULES_BUDGET.
 RULES_BUDGET_TOKENS=600
+
+# Forced-handoff threshold — fraction of the REAL model window consumed at which the engine injects
+# the NON-BLOCKING [HANDOFF REQUIRED] directive. The window is read from ~/.claude.json ([1m] tag ⇒
+# 1M else 200k); resident tokens from the transcript's last assistant usage. Override WRXN_HANDOFF_PCT.
+HANDOFF_PCT=0.40

@@ -20,6 +20,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 
 function emit(envelope) {
   process.stdout.write(JSON.stringify(envelope));
@@ -112,8 +113,13 @@ function renderConstitution(md) {
     if (!inArticle) continue;
     if (/^#\s/.test(line)) { inArticle = false; continue; }
     const t = line.trim();
-    if (t.startsWith('- ')) out.push('  ' + t.slice(2).trim());
-    else if (t.startsWith('-')) out.push('  ' + t.slice(1).trim());
+    if (!t) continue;
+    if (t.startsWith('-')) {
+      out.push('  ' + t.replace(/^-\s*/, ''));
+    } else if (out.length) {
+      // A wrapped bullet's continuation line — fold it into the preceding bullet rather than drop it.
+      out[out.length - 1] += ' ' + t;
+    }
   }
   return out.join('\n');
 }
@@ -142,6 +148,71 @@ function applyBudget(trimmable, budget) {
     trimmed.unshift(dropped.name);
   }
   return { kept, trimmed };
+}
+
+// ── token-base + forced handoff (06c) ────────────────────────────────────────────
+//
+// The handoff math must run on REAL token usage, not an assumed 200k (the original bug fired
+// at ~37% of a 1M window). Both signals are portable into any install:
+//   resident → the last assistant line's usage in the transcript (transcript_path is in the payload).
+//   window   → ~/.claude.json projects[cwd].lastModelUsage KEYS carry the tagged id; [1m] ⇒ 1M else 200k.
+// See memory `synapse-model-window-from-claude-json`.
+
+// Resident tokens = the last assistant turn's input + cache_read + cache_creation (output EXCLUDED —
+// it is not resident in the next prompt's context). Returns a number, or null when unreadable.
+function readResidentTokens(transcriptPath) {
+  try {
+    const lines = fs.readFileSync(transcriptPath, 'utf8').split('\n');
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i].trim();
+      if (!line) continue;
+      let obj;
+      try { obj = JSON.parse(line); } catch { continue; }
+      const msg = obj && obj.message;
+      if (!msg || msg.role !== 'assistant' || !msg.usage) continue;
+      const u = msg.usage;
+      return (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// Model context window from ~/.claude.json. The lastModelUsage KEYS for the session's cwd carry the
+// tagged model id (e.g. "claude-opus-4-8[1m]"); a [1m] tag ⇒ 1,000,000, else the 200,000 default.
+// Empty/unreadable → 200,000 (self-corrects once usage accrues). homeDir override keeps it testable.
+function modelWindow(cwd, homeDir) {
+  try {
+    const home = homeDir || process.env.HOME || os.homedir();
+    const cfg = JSON.parse(fs.readFileSync(path.join(home, '.claude.json'), 'utf8'));
+    const proj = (cfg.projects && cfg.projects[cwd]) || {};
+    const keys = Object.keys(proj.lastModelUsage || {});
+    return keys.some((k) => /\[1m\]/i.test(k)) ? 1000000 : 200000;
+  } catch {
+    return 200000;
+  }
+}
+
+// Handoff threshold (fraction of the window): env WRXN_HANDOFF_PCT > manifest HANDOFF_PCT > 0.40.
+function resolveHandoffPct(manifestText) {
+  const env = Number(process.env.WRXN_HANDOFF_PCT);
+  if (Number.isFinite(env) && env > 0) return env;
+  const m = Number(manifestValue(manifestText, 'HANDOFF_PCT'));
+  return Number.isFinite(m) && m > 0 ? m : 0.40;
+}
+
+// The NON-BLOCKING forced-handoff directive (never refuses work — orders the agent to wrap up cleanly).
+function handoffDirective(consumed, pct) {
+  const now = Math.round(consumed * 100);
+  const thresh = Math.round(pct * 100);
+  return [
+    '[HANDOFF REQUIRED]',
+    `  Context is at ~${now}% of the model window (>= the ${thresh}% handoff threshold). NON-BLOCKING — do NOT stop work:`,
+    '  1. Finish the current request.',
+    '  2. Run the handoff skill to write the baton (a compact handoff document).',
+    '  3. Tell the operator to /clear and open a fresh session, where the baton injects on resume.',
+  ].join('\n');
 }
 
 // ── assembly ────────────────────────────────────────────────────────────────────
@@ -185,9 +256,10 @@ function resolveBudget(manifestText) {
   return Number.isFinite(m) && m > 0 ? m : 600;
 }
 
-// Compose the full additionalContext for a prompt at an install root, or '' to no-op.
-function compose(root, prompt) {
-  const { sections, manifestText } = buildSections(root, prompt);
+// Compose the full additionalContext for an UserPromptSubmit event at an install root, or '' to no-op.
+function compose(root, event) {
+  const ev = event || {};
+  const { sections, manifestText } = buildSections(root, ev.prompt);
   if (!sections.length) return '';
 
   const always = sections.filter((s) => s.always);
@@ -198,6 +270,19 @@ function compose(root, prompt) {
   if (trimmed.length) {
     out.push(`[SYNAPSE-RULES-TRIM] ${trimmed.join(', ')} dropped over the ${resolveBudget(manifestText)}-token rules budget`);
   }
+
+  // 06c — forced handoff at >= threshold of REAL consumed context. Always-kept (outside the budget):
+  // a handoff directive must never be trimmed. Silent when the token base is unreadable.
+  if (ev.transcript_path) {
+    const resident = readResidentTokens(ev.transcript_path);
+    if (resident != null) {
+      const window = modelWindow(ev.cwd || root, process.env.HOME || os.homedir());
+      const consumed = resident / window;
+      const pct = resolveHandoffPct(manifestText);
+      if (consumed >= pct) out.push(handoffDirective(consumed, pct));
+    }
+  }
+
   return `<synapse-rules>\n\n${out.join('\n\n')}\n\n</synapse-rules>`;
 }
 
@@ -216,7 +301,7 @@ function main() {
 
   let additionalContext = '';
   try {
-    additionalContext = compose(root, event.prompt);
+    additionalContext = compose(root, event);
   } catch {
     return emit({}); // any assembly fault → fail open
   }
@@ -240,4 +325,8 @@ module.exports = {
   buildSections,
   compose,
   findInstallRoot,
+  readResidentTokens,
+  modelWindow,
+  resolveHandoffPct,
+  handoffDirective,
 };
