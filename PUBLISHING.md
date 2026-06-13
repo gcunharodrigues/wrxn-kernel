@@ -20,8 +20,8 @@ Pre-flight done 2026-06-13. The package is **publish-ready**. Publish + tag are 
 
 1. **Version — DECIDED: `0.1.0`** (operator, 2026-06-13). `package.json` bumped 0.0.1 → 0.1.0 to
    signal the first minor release.
-2. **License.** Still `UNLICENSED` on a `private:false` package — left as-is for v0.1.0 (proprietary).
-   Revisit before any wider/open distribution.
+2. **License — DECIDED: `MIT`** (operator, 2026-06-13). Open source. `LICENSE` file added
+   (© 2026 Guilherme Cunha Rodrigues); `package.json` `license: "MIT"`.
 
 ## Publish (operator / @devops — when the two decisions above are settled)
 
