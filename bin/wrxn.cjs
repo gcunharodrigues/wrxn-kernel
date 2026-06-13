@@ -34,6 +34,10 @@ function parseArgs(argv) {
       args.flags.base = argv[++i];
     } else if (a === '--path') {
       args.flags.path = argv[++i];
+    } else if (a === '--executor') {
+      args.flags.executor = argv[++i];
+    } else if (a === '--check-report') {
+      args.flags['check-report'] = true;
     } else if (a.startsWith('--')) {
       args.flags[a.slice(2)] = true;
     } else {
@@ -62,12 +66,15 @@ Usage:
       integrate <name>          merge <name> back to base, then auto-prune
       prune <name> [--force]    remove a worktree + branch (refuses unmerged unless --force)
       check <tracks.json>       refuse an overlapping disjoint-file split
-  wrxn dispatch <issue-file>     print the builder-executor dispatch spec for a ready-for-agent
-                                 issue (the structured order a thin subagent follows: read the
-                                 tdd skill, build red→green, run isolated, never push)
-  wrxn dispatch --check-report <report.json>
-                                 validate a builder's structured report against the contract +
-                                 boundary gates (rejects a report that claims a push)
+  wrxn dispatch <issue-file> [--executor <type>]
+                                 print the dispatch spec for a ready-for-agent issue — the
+                                 structured order a thin subagent of <type> follows (skill or
+                                 instructions, ACs, isolation, boundary gates). <type> is one of:
+                                 builder (default) | reviewer | security | qa-walker | researcher |
+                                 devops. Only devops passes the push gate.
+  wrxn dispatch --check-report <report.json> [--executor <type>]
+                                 validate an executor's structured report against the contract +
+                                 boundary gates (rejects a non-devops report that claims a push)
 
 Profiles: --project (default, the dev pipeline + intelligence + enforcement) |
           --workspace (adds the operator layer + connections registry).`;
@@ -203,7 +210,12 @@ function main(argv) {
   if (cmd === 'dispatch') {
     const file = args._[1];
     if (!file) { process.stderr.write('wrxn: dispatch requires <issue-file> (or --check-report <report.json>)\n'); return 2; }
-    // --check-report <report.json>: validate a builder's structured report against the contract + gates.
+    const type = args.flags.executor || 'builder';
+    if (!executor.EXECUTOR_TYPES.includes(type)) {
+      process.stderr.write(`wrxn: unknown executor "${type}" (one of ${executor.EXECUTOR_TYPES.join(', ')})\n`);
+      return 2;
+    }
+    // --check-report <report.json>: validate an executor's structured report against the contract + gates.
     if (args.flags['check-report']) {
       let report;
       try {
@@ -212,7 +224,7 @@ function main(argv) {
         process.stderr.write(`wrxn: cannot read report: ${err.message}\n`);
         return 2;
       }
-      const result = executor.validateReport(report);
+      const result = executor.validateReport(report, type);
       if (result.ok) {
         process.stdout.write('report OK\n');
         return 0;
@@ -220,7 +232,7 @@ function main(argv) {
       process.stderr.write(`report INVALID:\n${result.errors.map((e) => `  - ${e}`).join('\n')}\n`);
       return 2;
     }
-    // Default: print the dispatch spec for the issue (what the builder subagent is ordered to do).
+    // Default: print the dispatch spec for the issue (what the subagent of this type is ordered to do).
     let issueText;
     try {
       issueText = fs.readFileSync(path.resolve(file), 'utf8');
@@ -228,7 +240,7 @@ function main(argv) {
       process.stderr.write(`wrxn: cannot read issue: ${err.message}\n`);
       return 2;
     }
-    process.stdout.write(JSON.stringify(executor.buildDispatchSpec(issueText), null, 2) + '\n');
+    process.stdout.write(JSON.stringify(executor.buildDispatchSpec(issueText, type), null, 2) + '\n');
     return 0;
   }
 
