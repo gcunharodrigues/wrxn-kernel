@@ -7,6 +7,7 @@ const path = require('path');
 const { init } = require('../lib/install.cjs');
 const { update } = require('../lib/update.cjs');
 const worktree = require('../lib/worktree.cjs');
+const executor = require('../lib/executor.cjs');
 
 const PKG_ROOT = path.join(__dirname, '..');
 
@@ -61,6 +62,12 @@ Usage:
       integrate <name>          merge <name> back to base, then auto-prune
       prune <name> [--force]    remove a worktree + branch (refuses unmerged unless --force)
       check <tracks.json>       refuse an overlapping disjoint-file split
+  wrxn dispatch <issue-file>     print the builder-executor dispatch spec for a ready-for-agent
+                                 issue (the structured order a thin subagent follows: read the
+                                 tdd skill, build red→green, run isolated, never push)
+  wrxn dispatch --check-report <report.json>
+                                 validate a builder's structured report against the contract +
+                                 boundary gates (rejects a report that claims a push)
 
 Profiles: --project (default, the dev pipeline + intelligence + enforcement) |
           --workspace (adds the operator layer + connections registry).`;
@@ -191,6 +198,38 @@ function main(argv) {
       process.stderr.write(`wrxn: ${err.message}\n`);
       return 2;
     }
+  }
+
+  if (cmd === 'dispatch') {
+    const file = args._[1];
+    if (!file) { process.stderr.write('wrxn: dispatch requires <issue-file> (or --check-report <report.json>)\n'); return 2; }
+    // --check-report <report.json>: validate a builder's structured report against the contract + gates.
+    if (args.flags['check-report']) {
+      let report;
+      try {
+        report = JSON.parse(fs.readFileSync(path.resolve(file), 'utf8'));
+      } catch (err) {
+        process.stderr.write(`wrxn: cannot read report: ${err.message}\n`);
+        return 2;
+      }
+      const result = executor.validateReport(report);
+      if (result.ok) {
+        process.stdout.write('report OK\n');
+        return 0;
+      }
+      process.stderr.write(`report INVALID:\n${result.errors.map((e) => `  - ${e}`).join('\n')}\n`);
+      return 2;
+    }
+    // Default: print the dispatch spec for the issue (what the builder subagent is ordered to do).
+    let issueText;
+    try {
+      issueText = fs.readFileSync(path.resolve(file), 'utf8');
+    } catch (err) {
+      process.stderr.write(`wrxn: cannot read issue: ${err.message}\n`);
+      return 2;
+    }
+    process.stdout.write(JSON.stringify(executor.buildDispatchSpec(issueText), null, 2) + '\n');
+    return 0;
   }
 
   process.stderr.write(`wrxn: unknown command "${cmd}"\n\n${USAGE}\n`);
