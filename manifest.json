@@ -5,7 +5,10 @@
   "classes": ["managed", "seeded", "state"],
   "files": [
     { "path": ".claude/constitution.md", "class": "managed" },
+    { "path": ".claude/settings.json", "class": "managed" },
     { "path": ".claude/hooks/enforce-push-authority.cjs", "class": "managed" },
+    { "path": ".claude/hooks/enforce-managed-guard.cjs", "class": "managed" },
+    { "path": ".claude/hooks/enforce-managed-precommit.cjs", "class": "managed" },
     { "path": ".claude/skills/tdd/SKILL.md", "class": "managed" },
     { "path": ".claude/constitution.local.md", "class": "seeded" },
     { "path": ".wrxn/wiki/.gitkeep", "class": "state" }

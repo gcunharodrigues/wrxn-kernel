@@ -1,0 +1,19 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          { "type": "command", "command": "node .claude/hooks/enforce-managed-guard.cjs" }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "node .claude/hooks/enforce-managed-precommit.cjs" },
+          { "type": "command", "command": "node .claude/hooks/enforce-push-authority.cjs" }
+        ]
+      }
+    ]
+  }
+}
