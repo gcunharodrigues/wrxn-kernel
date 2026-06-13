@@ -16,8 +16,15 @@
     { "path": ".synapse/manifest", "class": "managed" },
     { "path": ".synapse/global", "class": "managed" },
     { "path": ".synapse/pipeline", "class": "managed" },
+    { "path": ".wrxn/wiki.cjs", "class": "managed" },
+    { "path": ".claude/skills/memory/SKILL.md", "class": "managed" },
     { "path": ".claude/constitution.local.md", "class": "seeded" },
     { "path": ".synapse/routing", "class": "seeded" },
-    { "path": ".wrxn/wiki/.gitkeep", "class": "state" }
+    { "path": ".recon.json", "class": "seeded" },
+    { "path": ".wrxn/wiki/.gitkeep", "class": "state" },
+    { "path": ".wrxn/wiki/concepts/.gitkeep", "class": "state" },
+    { "path": ".wrxn/wiki/decisions/.gitkeep", "class": "state" },
+    { "path": ".wrxn/wiki/gotchas/.gitkeep", "class": "state" },
+    { "path": ".wrxn/wiki/sessions/.gitkeep", "class": "state" }
   ]
 }
