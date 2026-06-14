@@ -137,7 +137,8 @@ test('npx <pkg> --version answers from a packed tarball install', () => {
   fs.writeFileSync(path.join(proj, 'package.json'), JSON.stringify({ name: 'consumer', version: '1.0.0' }));
   execFileSync('npm', ['install', '--silent', '--no-audit', '--no-fund', tgz], { cwd: proj });
 
-  const installedBin = path.join(proj, 'node_modules', 'wrxn', 'bin', 'wrxn.cjs');
+  const pkgName = JSON.parse(fs.readFileSync(path.join(PKG_ROOT, 'package.json'), 'utf8')).name;
+  const installedBin = path.join(proj, 'node_modules', ...pkgName.split('/'), 'bin', 'wrxn.cjs');
   assert.ok(fs.existsSync(installedBin), 'bin shipped in the tarball');
 
   const pkgVersion = JSON.parse(fs.readFileSync(path.join(PKG_ROOT, 'package.json'), 'utf8')).version;
