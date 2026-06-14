@@ -131,11 +131,13 @@ test('npx <pkg> --version answers from a packed tarball install', () => {
   const tgz = path.join(work, tgzName);
   assert.ok(fs.existsSync(tgz), 'tarball produced');
 
-  // install the tarball into a throwaway project (zero deps → offline-safe)
+  // install the tarball into a throwaway project. wrxn now pins recon-wrxn (a real dependency with
+  // heavy native modules), so this resolves it over the registry — but --ignore-scripts skips the
+  // native compile (this e2e only proves wrxn's bin + payload laydown, not recon-wrxn at runtime).
   const proj = path.join(work, 'proj');
   fs.mkdirSync(proj);
   fs.writeFileSync(path.join(proj, 'package.json'), JSON.stringify({ name: 'consumer', version: '1.0.0' }));
-  execFileSync('npm', ['install', '--silent', '--no-audit', '--no-fund', tgz], { cwd: proj });
+  execFileSync('npm', ['install', '--silent', '--no-audit', '--no-fund', '--ignore-scripts', tgz], { cwd: proj });
 
   const pkgName = JSON.parse(fs.readFileSync(path.join(PKG_ROOT, 'package.json'), 'utf8')).name;
   const installedBin = path.join(proj, 'node_modules', ...pkgName.split('/'), 'bin', 'wrxn.cjs');
@@ -152,4 +154,14 @@ test('npx <pkg> --version answers from a packed tarball install', () => {
   for (const rel of PROJECT_PATHS) {
     assert.ok(fs.existsSync(path.join(installTarget, rel)), `${rel} not laid from tarball install`);
   }
+
+  // recon-wrxn wiring laid e2e (R3): the MCP config, the config file, and the gitignore entry
+  const mcp = JSON.parse(fs.readFileSync(path.join(installTarget, '.mcp.json'), 'utf8'));
+  assert.ok(mcp.mcpServers['recon-wrxn'], '.mcp.json wires the recon-wrxn server');
+  assert.ok(fs.existsSync(path.join(installTarget, '.recon-wrxn.json')), '.recon-wrxn.json laid');
+  assert.match(fs.readFileSync(path.join(installTarget, '.gitignore'), 'utf8'), /^\.recon-wrxn\/$/m, '.recon-wrxn/ gitignored');
+  // the receipt records the new managed files
+  const receipt = JSON.parse(fs.readFileSync(path.join(installTarget, RECEIPT), 'utf8'));
+  const recorded = receipt.files.map((f) => f.path);
+  assert.ok(recorded.includes('.mcp.json') && recorded.includes('.recon-wrxn.json'), 'receipt records recon-wrxn files');
 });
