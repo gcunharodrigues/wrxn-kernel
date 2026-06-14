@@ -4,7 +4,8 @@
 # Why: UserPromptSubmit hooks (where SYNAPSE runs) receive no model/context-window data, so the
 # handoff math cannot tell a 200k session from a 1M one. The statusline IS handed the live window
 # (context_window.context_window_size) on stdin every render — so we publish it to a session-scoped
-# /tmp file that the synapse-engine hook reads back (readStatuslineWindow → .context_window_size).
+# temp file that the synapse-engine hook reads back (readStatuslineWindow → .context_window_size).
+# The temp dir MUST match the reader's os.tmpdir() — both honor $TMPDIR, falling back to /tmp.
 #
 # How to enable: paste the marker-bounded block below into your Claude Code statusline script, OR run
 #   wrxn statusline --inject [--path <your-statusline-script>]
@@ -24,6 +25,6 @@ if [[ -n "$session_id" ]]; then
     cw_size=$(echo "$input" | jq -r '.context_window.context_window_size // empty')
     [[ -z "$cw_size" || "$cw_size" == "null" ]] && { [[ "$(echo "$input" | jq -r '.model.id // ""')" == *"[1m]"* ]] && cw_size=1000000 || cw_size=200000; }
     printf '{"context_window_size":%s,"model_id":"%s"}\n' "$cw_size" "$(echo "$input" | jq -r '.model.id // ""')" \
-        > "/tmp/claude-statusline-ctx-${session_id}.json" 2>/dev/null || true
+        > "${TMPDIR:-/tmp}/claude-statusline-ctx-${session_id}.json" 2>/dev/null || true
 fi
 # <<< wrxn sidecar <<<

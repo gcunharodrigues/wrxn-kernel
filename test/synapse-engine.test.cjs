@@ -9,6 +9,7 @@ const { execFileSync } = require('child_process');
 
 const PKG_ROOT = path.join(__dirname, '..');
 const { init } = require('../lib/install.cjs');
+const { snippet } = require('../lib/statusline.cjs');
 
 const ENGINE = path.join(PKG_ROOT, 'payload', '.claude', 'hooks', 'synapse-engine.cjs');
 
@@ -393,6 +394,27 @@ test('readStatuslineWindow returns the size or null', () => {
     assert.equal(engine.readStatuslineWindow('nope-none'), null);
     assert.equal(engine.readStatuslineWindow(), null);
   } finally { fs.rmSync(p, { force: true }); }
+});
+
+// B1 regression: the REAL shell snippet writer and the node reader must resolve the SAME temp dir.
+// Both honor $TMPDIR (the writer via ${TMPDIR:-/tmp}, the reader via os.tmpdir()); a hardcoded /tmp
+// in the writer silently broke the feature on macOS / any host with $TMPDIR set.
+test('the shell snippet writer and readStatuslineWindow agree under a custom $TMPDIR', () => {
+  const tdir = tmp('wrxn-tmpdir-');
+  const sid = 'b1-regression';
+  const input = JSON.stringify({ context_window: { context_window_size: 1000000 }, model: { id: 'claude-opus-4-8[1m]' } });
+  const script = `input='${input}'\nsession_id='${sid}'\n${snippet()}`;
+  execFileSync('bash', ['-c', script], { env: { ...process.env, TMPDIR: tdir } });
+  // the writer must have placed the file under $TMPDIR (not a hardcoded /tmp)
+  assert.ok(fs.existsSync(path.join(tdir, `claude-statusline-ctx-${sid}.json`)), 'writer honors $TMPDIR');
+  const prevT = process.env.TMPDIR;
+  process.env.TMPDIR = tdir;
+  try {
+    assert.equal(engine.readStatuslineWindow(sid), 1000000); // reader (os.tmpdir) finds the same file
+  } finally {
+    if (prevT === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = prevT;
+    fs.rmSync(path.join(tdir, `claude-statusline-ctx-${sid}.json`), { force: true });
+  }
 });
 
 // ── pure-function units (engine is self-contained but exports its internals) ────

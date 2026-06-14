@@ -23,7 +23,7 @@ test('snippet() carries both markers and the sidecar write', () => {
   assert.ok(s.includes(statusline.MARKER_START), 'has START marker');
   assert.ok(s.includes(statusline.MARKER_END), 'has END marker');
   // the block is what the reader (synapse-engine readStatuslineWindow) consumes — output shape pinned
-  assert.match(s, /\/tmp\/claude-statusline-ctx-\$\{session_id\}\.json/, 'writes the session sidecar file');
+  assert.match(s, /\$\{TMPDIR:-\/tmp\}\/claude-statusline-ctx-\$\{session_id\}\.json/, 'writes the sidecar under $TMPDIR (matches os.tmpdir)');
   assert.match(s, /"context_window_size":%s/, 'JSON shape matches readStatuslineWindow');
   // marker-bounded: START precedes END, nothing past END
   assert.ok(s.indexOf(statusline.MARKER_START) < s.indexOf(statusline.MARKER_END), 'START before END');
