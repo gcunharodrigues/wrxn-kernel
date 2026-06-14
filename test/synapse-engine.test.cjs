@@ -234,6 +234,77 @@ test('modelWindow reads the [1m] tag from ~/.claude.json keys', () => {
   assert.equal(engine.modelWindow(root, home200), 200000);
 });
 
+// ── 29: explicit WRXN_CONTEXT_WINDOW override precedence ──────────────────────────
+// On [1m] sessions lastModelUsage is often empty AND the transcript model id lacks the
+// [1m] tag — there is no reliable auto-signal. modelWindow must honor an explicit override.
+
+test('WRXN_CONTEXT_WINDOW env overrides the window regardless of claude.json', () => {
+  const root = '/some/project';
+  // claude.json says 200k (no [1m] tag) — the env override must win.
+  const home200 = fakeHome('wrxn-win-envov-', root, ['claude-opus-4-8']);
+  const prev = process.env.WRXN_CONTEXT_WINDOW;
+  process.env.WRXN_CONTEXT_WINDOW = '1000000';
+  try {
+    assert.equal(engine.modelWindow(root, home200), 1000000);
+  } finally {
+    if (prev === undefined) delete process.env.WRXN_CONTEXT_WINDOW;
+    else process.env.WRXN_CONTEXT_WINDOW = prev;
+  }
+});
+
+test('an invalid/empty WRXN_CONTEXT_WINDOW falls through to auto-detection', () => {
+  const root = '/some/project';
+  const home1m = fakeHome('wrxn-win-envbad-', root, ['claude-opus-4-8[1m]']);
+  const prev = process.env.WRXN_CONTEXT_WINDOW;
+  try {
+    process.env.WRXN_CONTEXT_WINDOW = 'not-a-number';
+    assert.equal(engine.modelWindow(root, home1m), 1000000); // falls through to [1m] auto-detect
+    process.env.WRXN_CONTEXT_WINDOW = '0';
+    assert.equal(engine.modelWindow(root, home1m), 1000000); // non-positive ignored
+    process.env.WRXN_CONTEXT_WINDOW = '';
+    assert.equal(engine.modelWindow(root, home1m), 1000000); // empty ignored
+  } finally {
+    if (prev === undefined) delete process.env.WRXN_CONTEXT_WINDOW;
+    else process.env.WRXN_CONTEXT_WINDOW = prev;
+  }
+});
+
+test('the manifest CONTEXT_WINDOW value is used when no env override is set', () => {
+  const root = '/some/project';
+  const home200 = fakeHome('wrxn-win-manifest-', root, ['claude-opus-4-8']); // no [1m] → would be 200k
+  const prev = process.env.WRXN_CONTEXT_WINDOW;
+  delete process.env.WRXN_CONTEXT_WINDOW;
+  try {
+    assert.equal(engine.modelWindow(root, home200, 'CONTEXT_WINDOW=1000000\n'), 1000000);
+  } finally {
+    if (prev !== undefined) process.env.WRXN_CONTEXT_WINDOW = prev;
+  }
+});
+
+test('the [1m] auto-detect still returns 1M when no override is present', () => {
+  const root = '/some/project';
+  const home1m = fakeHome('wrxn-win-auto1m-', root, ['claude-opus-4-8[1m]']);
+  const prev = process.env.WRXN_CONTEXT_WINDOW;
+  delete process.env.WRXN_CONTEXT_WINDOW;
+  try {
+    assert.equal(engine.modelWindow(root, home1m), 1000000);
+  } finally {
+    if (prev !== undefined) process.env.WRXN_CONTEXT_WINDOW = prev;
+  }
+});
+
+test('the plain fallback is 200k when no override and no [1m] signal', () => {
+  const root = '/some/project';
+  const home200 = fakeHome('wrxn-win-fallback-', root, ['claude-opus-4-8']);
+  const prev = process.env.WRXN_CONTEXT_WINDOW;
+  delete process.env.WRXN_CONTEXT_WINDOW;
+  try {
+    assert.equal(engine.modelWindow(root, home200), 200000);
+  } finally {
+    if (prev !== undefined) process.env.WRXN_CONTEXT_WINDOW = prev;
+  }
+});
+
 // ── pure-function units (engine is self-contained but exports its internals) ────
 
 const engine = require('../payload/.claude/hooks/synapse-engine.cjs');

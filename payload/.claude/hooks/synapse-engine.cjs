@@ -179,19 +179,38 @@ function readResidentTokens(transcriptPath) {
   }
 }
 
-// Model context window from ~/.claude.json. The lastModelUsage KEYS for the session's cwd carry the
-// tagged model id (e.g. "claude-opus-4-8[1m]"); a [1m] tag ⇒ 1,000,000, else the 200,000 default.
-// Empty/unreadable → 200,000 (self-corrects once usage accrues). homeDir override keeps it testable.
-function modelWindow(cwd, homeDir) {
+// Model context window, resolved by an explicit precedence (issue 29). On [1m] sessions
+// lastModelUsage is often EMPTY and the transcript model id lacks the [1m] tag — there is no
+// reliable auto-signal — so the window must be settable explicitly rather than guessed:
+//   1. env WRXN_CONTEXT_WINDOW — a positive finite number wins unconditionally.
+//   2. manifest CONTEXT_WINDOW — a positive finite value (when manifestText is supplied).
+//   3. ~/.claude.json lastModelUsage KEYS — a [1m] tag ⇒ 1,000,000 (auto-detect, when present).
+//   4. fallback 200,000.
+// homeDir/manifestText overrides keep it testable.
+function modelWindow(cwd, homeDir, manifestText) {
+  // 1. explicit env override.
+  const envWin = Number(process.env.WRXN_CONTEXT_WINDOW);
+  if (Number.isFinite(envWin) && envWin > 0) return envWin;
+
+  // 2. manifest CONTEXT_WINDOW (the engine already reads scalar manifest values).
+  if (manifestText != null) {
+    const manWin = Number(manifestValue(manifestText, 'CONTEXT_WINDOW'));
+    if (Number.isFinite(manWin) && manWin > 0) return manWin;
+  }
+
+  // 3. lastModelUsage [1m] auto-detect.
   try {
     const home = homeDir || process.env.HOME || os.homedir();
     const cfg = JSON.parse(fs.readFileSync(path.join(home, '.claude.json'), 'utf8'));
     const proj = (cfg.projects && cfg.projects[cwd]) || {};
     const keys = Object.keys(proj.lastModelUsage || {});
-    return keys.some((k) => /\[1m\]/i.test(k)) ? 1000000 : 200000;
+    if (keys.some((k) => /\[1m\]/i.test(k))) return 1000000;
   } catch {
-    return 200000;
+    // fall through to the default.
   }
+
+  // 4. fallback.
+  return 200000;
 }
 
 // Handoff threshold (fraction of the window): env WRXN_HANDOFF_PCT > manifest HANDOFF_PCT > 0.40.
@@ -276,7 +295,7 @@ function compose(root, event) {
   if (ev.transcript_path) {
     const resident = readResidentTokens(ev.transcript_path);
     if (resident != null) {
-      const window = modelWindow(ev.cwd || root, process.env.HOME || os.homedir());
+      const window = modelWindow(ev.cwd || root, process.env.HOME || os.homedir(), manifestText);
       const consumed = resident / window;
       const pct = resolveHandoffPct(manifestText);
       if (consumed >= pct) out.push(handoffDirective(consumed, pct));
