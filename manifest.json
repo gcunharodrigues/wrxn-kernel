@@ -359,6 +359,11 @@
       "profile": "workspace"
     },
     {
+      "path": ".mcp.json",
+      "class": "managed",
+      "profile": "project"
+    },
+    {
       "path": ".recon-wrxn.json",
       "class": "seeded",
       "profile": "project"

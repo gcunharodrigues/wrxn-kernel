@@ -148,7 +148,10 @@ function main(argv) {
     for (const f of report.skipped) {
       process.stdout.write(`  skipped [${f.class}] ${f.path} (${f.collision ? 'collision — existing file preserved' : 'exists'})\n`);
     }
-    process.stdout.write(`${report.laid.length} laid, ${report.skipped.length} unchanged.\n`);
+    for (const f of report.merged || []) {
+      process.stdout.write(`  merged  [${f.class}] ${f.path} (recon-wrxn server added to your existing config)\n`);
+    }
+    process.stdout.write(`${report.laid.length} laid, ${report.skipped.length} unchanged${report.merged && report.merged.length ? `, ${report.merged.length} merged` : ''}.\n`);
     if (report.brownfield) {
       process.stdout.write(`brownfield install — ${report.collisions.length} existing file(s) preserved (never overwritten): ${report.collisions.map((c) => c.path).join(', ')}\n`);
     }
