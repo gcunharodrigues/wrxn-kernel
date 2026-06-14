@@ -179,26 +179,49 @@ function readResidentTokens(transcriptPath) {
   }
 }
 
-// Model context window, resolved by an explicit precedence (issue 29). On [1m] sessions
-// lastModelUsage is often EMPTY and the transcript model id lacks the [1m] tag — there is no
-// reliable auto-signal — so the window must be settable explicitly rather than guessed:
-//   1. env WRXN_CONTEXT_WINDOW — a positive finite number wins unconditionally.
-//   2. manifest CONTEXT_WINDOW — a positive finite value (when manifestText is supplied).
-//   3. ~/.claude.json lastModelUsage KEYS — a [1m] tag ⇒ 1,000,000 (auto-detect, when present).
-//   4. fallback 200,000.
-// homeDir/manifestText overrides keep it testable.
-function modelWindow(cwd, homeDir, manifestText) {
+// The LIVE window for a session, published by the statusline. UserPromptSubmit hooks receive no
+// model/context-window data, but the statusline payload carries context_window.context_window_size
+// (resolved by Claude Code, refreshed every render — so it tracks a mid-session /model switch). The
+// statusline writes it to a session-scoped /tmp sidecar; we read it back here by session_id.
+// See statusline.sh and memory `handoff-window-defaults-200k`. Returns a positive number or null.
+function readStatuslineWindow(sessionId) {
+  if (!sessionId) return null;
+  try {
+    const p = path.join(os.tmpdir(), `claude-statusline-ctx-${sessionId}.json`);
+    const o = JSON.parse(fs.readFileSync(p, 'utf8'));
+    const w = Number(o && o.context_window_size);
+    return Number.isFinite(w) && w > 0 ? w : null;
+  } catch {
+    return null;
+  }
+}
+
+// Model context window, resolved by an explicit precedence (issue 29 + dynamic statusline bridge).
+// On [1m] sessions lastModelUsage is often EMPTY and the transcript model id lacks the [1m] tag, and
+// the hook payload carries no model — so we lean on the statusline (which DOES know the live window):
+//   1. env WRXN_CONTEXT_WINDOW — a positive finite number wins unconditionally (manual force).
+//   2. statusline sidecar — the live per-session window; tracks mid-session model switches.
+//   3. manifest CONTEXT_WINDOW — a positive finite value (when manifestText is supplied).
+//   4. ~/.claude.json lastModelUsage KEYS — a [1m] tag ⇒ 1,000,000 (auto-detect, when present).
+//   5. self-correcting net — resident already past the 200k default ⇒ window is necessarily larger.
+//   6. fallback 200,000.
+// homeDir/manifestText/sessionId/resident overrides keep it testable.
+function modelWindow(cwd, homeDir, manifestText, sessionId, resident) {
   // 1. explicit env override.
   const envWin = Number(process.env.WRXN_CONTEXT_WINDOW);
   if (Number.isFinite(envWin) && envWin > 0) return envWin;
 
-  // 2. manifest CONTEXT_WINDOW (the engine already reads scalar manifest values).
+  // 2. statusline sidecar — the live, authoritative window (dynamic across /model switches).
+  const scWin = readStatuslineWindow(sessionId);
+  if (scWin) return scWin;
+
+  // 3. manifest CONTEXT_WINDOW (the engine already reads scalar manifest values).
   if (manifestText != null) {
     const manWin = Number(manifestValue(manifestText, 'CONTEXT_WINDOW'));
     if (Number.isFinite(manWin) && manWin > 0) return manWin;
   }
 
-  // 3. lastModelUsage [1m] auto-detect.
+  // 4. lastModelUsage [1m] auto-detect.
   try {
     const home = homeDir || process.env.HOME || os.homedir();
     const cfg = JSON.parse(fs.readFileSync(path.join(home, '.claude.json'), 'utf8'));
@@ -206,10 +229,13 @@ function modelWindow(cwd, homeDir, manifestText) {
     const keys = Object.keys(proj.lastModelUsage || {});
     if (keys.some((k) => /\[1m\]/i.test(k))) return 1000000;
   } catch {
-    // fall through to the default.
+    // fall through.
   }
 
-  // 4. fallback.
+  // 5. self-correcting net: resident past the 200k default ⇒ a larger (1M) window.
+  if (Number.isFinite(resident) && resident > 200000) return 1000000;
+
+  // 6. fallback.
   return 200000;
 }
 
@@ -295,7 +321,7 @@ function compose(root, event) {
   if (ev.transcript_path) {
     const resident = readResidentTokens(ev.transcript_path);
     if (resident != null) {
-      const window = modelWindow(ev.cwd || root, process.env.HOME || os.homedir(), manifestText);
+      const window = modelWindow(ev.cwd || root, process.env.HOME || os.homedir(), manifestText, ev.session_id, resident);
       const consumed = resident / window;
       const pct = resolveHandoffPct(manifestText);
       if (consumed >= pct) out.push(handoffDirective(consumed, pct));
@@ -345,6 +371,7 @@ module.exports = {
   compose,
   findInstallRoot,
   readResidentTokens,
+  readStatuslineWindow,
   modelWindow,
   resolveHandoffPct,
   handoffDirective,

@@ -162,6 +162,13 @@ function fakeHome(prefix, cwd, modelKeys) {
   return home;
 }
 
+// Write the statusline sidecar for a session (the bridge the statusline publishes for hooks); return its path.
+function writeSidecar(sid, windowSize) {
+  const p = path.join(os.tmpdir(), `claude-statusline-ctx-${sid}.json`);
+  fs.writeFileSync(p, JSON.stringify({ context_window_size: windowSize, model_id: 'claude-opus-4-8[1m]' }));
+  return p;
+}
+
 // resident = input + cache_read + cache_creation (output excluded).
 const USAGE_90K = { input_tokens: 80000, cache_read_input_tokens: 8000, cache_creation_input_tokens: 2000, output_tokens: 5000 };
 
@@ -303,6 +310,89 @@ test('the plain fallback is 200k when no override and no [1m] signal', () => {
   } finally {
     if (prev !== undefined) process.env.WRXN_CONTEXT_WINDOW = prev;
   }
+});
+
+// ── dynamic statusline sidecar bridge (live window; survives a mid-session /model switch) ──
+// Hooks get no model/context-window; the statusline publishes the live window per session and we
+// read it here. Precedence: env override > sidecar > manifest > [1m] key > resident-net > 200k.
+
+test('modelWindow reads the live window from the statusline sidecar (beats a 200k claude.json)', () => {
+  const root = '/some/project';
+  const home200 = fakeHome('wrxn-sc-1m-', root, ['claude-opus-4-8']);
+  const sid = 'sess-sc-1m';
+  const p = writeSidecar(sid, 1000000);
+  const prev = process.env.WRXN_CONTEXT_WINDOW; delete process.env.WRXN_CONTEXT_WINDOW;
+  try {
+    assert.equal(engine.modelWindow(root, home200, null, sid), 1000000);
+  } finally {
+    fs.rmSync(p, { force: true });
+    if (prev !== undefined) process.env.WRXN_CONTEXT_WINDOW = prev;
+  }
+});
+
+test('a mid-session switch to a 200k model is reflected (sidecar overrides a stale [1m] claude.json)', () => {
+  const root = '/some/project';
+  const home1m = fakeHome('wrxn-sc-200-', root, ['claude-opus-4-8[1m]']);
+  const sid = 'sess-sc-200';
+  const p = writeSidecar(sid, 200000);
+  const prev = process.env.WRXN_CONTEXT_WINDOW; delete process.env.WRXN_CONTEXT_WINDOW;
+  try {
+    assert.equal(engine.modelWindow(root, home1m, null, sid), 200000);
+  } finally {
+    fs.rmSync(p, { force: true });
+    if (prev !== undefined) process.env.WRXN_CONTEXT_WINDOW = prev;
+  }
+});
+
+test('WRXN_CONTEXT_WINDOW still overrides the sidecar (manual force wins)', () => {
+  const root = '/some/project';
+  const home200 = fakeHome('wrxn-sc-env-', root, ['claude-opus-4-8']);
+  const sid = 'sess-sc-env';
+  const p = writeSidecar(sid, 200000);
+  const prev = process.env.WRXN_CONTEXT_WINDOW; process.env.WRXN_CONTEXT_WINDOW = '1000000';
+  try {
+    assert.equal(engine.modelWindow(root, home200, null, sid), 1000000);
+  } finally {
+    fs.rmSync(p, { force: true });
+    if (prev === undefined) delete process.env.WRXN_CONTEXT_WINDOW; else process.env.WRXN_CONTEXT_WINDOW = prev;
+  }
+});
+
+test('a missing or corrupt sidecar falls through to auto-detection', () => {
+  const root = '/some/project';
+  const home1m = fakeHome('wrxn-sc-miss-', root, ['claude-opus-4-8[1m]']);
+  const prev = process.env.WRXN_CONTEXT_WINDOW; delete process.env.WRXN_CONTEXT_WINDOW;
+  try {
+    assert.equal(engine.modelWindow(root, home1m, null, 'sess-none'), 1000000);
+    const p = path.join(os.tmpdir(), 'claude-statusline-ctx-sess-bad.json');
+    fs.writeFileSync(p, 'not json');
+    try { assert.equal(engine.modelWindow(root, home1m, null, 'sess-bad'), 1000000); }
+    finally { fs.rmSync(p, { force: true }); }
+  } finally {
+    if (prev !== undefined) process.env.WRXN_CONTEXT_WINDOW = prev;
+  }
+});
+
+test('the resident-past-200k net returns 1M when no other signal applies', () => {
+  const root = '/some/project';
+  const home200 = fakeHome('wrxn-net-', root, ['claude-opus-4-8']);
+  const prev = process.env.WRXN_CONTEXT_WINDOW; delete process.env.WRXN_CONTEXT_WINDOW;
+  try {
+    assert.equal(engine.modelWindow(root, home200, null, 'sess-net', 216000), 1000000);
+    assert.equal(engine.modelWindow(root, home200, null, 'sess-net', 50000), 200000);
+  } finally {
+    if (prev !== undefined) process.env.WRXN_CONTEXT_WINDOW = prev;
+  }
+});
+
+test('readStatuslineWindow returns the size or null', () => {
+  const sid = 'sess-direct';
+  const p = writeSidecar(sid, 1000000);
+  try {
+    assert.equal(engine.readStatuslineWindow(sid), 1000000);
+    assert.equal(engine.readStatuslineWindow('nope-none'), null);
+    assert.equal(engine.readStatuslineWindow(), null);
+  } finally { fs.rmSync(p, { force: true }); }
 });
 
 // ── pure-function units (engine is self-contained but exports its internals) ────
