@@ -3,24 +3,24 @@
     "SessionStart": [
       {
         "hooks": [
-          { "type": "command", "command": "node .claude/hooks/session-start.cjs" }
+          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/session-start.cjs\"" }
         ]
       }
     ],
     "SessionEnd": [
       {
         "hooks": [
-          { "type": "command", "command": "node .claude/hooks/session-end.cjs" }
+          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/session-end.cjs\"" }
         ]
       }
     ],
     "UserPromptSubmit": [
       {
         "hooks": [
-          { "type": "command", "command": "node .claude/hooks/synapse-engine.cjs" },
-          { "type": "command", "command": "node .claude/hooks/session-history.cjs" },
-          { "type": "command", "command": "node .claude/hooks/reference-detect.cjs" },
-          { "type": "command", "command": "node .claude/hooks/recall-surface.cjs" }
+          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/synapse-engine.cjs\"" },
+          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/session-history.cjs\"" },
+          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/reference-detect.cjs\"" },
+          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/recall-surface.cjs\"" }
         ]
       }
     ],
@@ -28,16 +28,16 @@
       {
         "matcher": "Edit|Write",
         "hooks": [
-          { "type": "command", "command": "node .claude/hooks/enforce-managed-guard.cjs" }
+          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/enforce-managed-guard.cjs\"" }
         ]
       },
       {
         "matcher": "Bash",
         "hooks": [
-          { "type": "command", "command": "node .claude/hooks/enforce-managed-precommit.cjs" },
-          { "type": "command", "command": "node .claude/hooks/enforce-push-authority.cjs" },
-          { "type": "command", "command": "node .claude/hooks/enforce-tests-on-push.cjs" },
-          { "type": "command", "command": "node .claude/hooks/enforce-review-marker.cjs" }
+          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/enforce-managed-precommit.cjs\"" },
+          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/enforce-push-authority.cjs\"" },
+          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/enforce-tests-on-push.cjs\"" },
+          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/enforce-review-marker.cjs\"" }
         ]
       }
     ],
@@ -45,14 +45,14 @@
       {
         "matcher": "Edit|Write",
         "hooks": [
-          { "type": "command", "command": "node .claude/hooks/code-intel-push.cjs" }
+          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/code-intel-push.cjs\"" }
         ]
       }
     ],
     "Stop": [
       {
         "hooks": [
-          { "type": "command", "command": "node .claude/hooks/wiki-lint.cjs" }
+          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/wiki-lint.cjs\"" }
         ]
       }
     ]
