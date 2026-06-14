@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 'use strict';
 
-// WRXN code-intel-push hook — first-touch code-intel / recon-freshness nudge (wrxn-kernel-11).
+// WRXN code-intel-push hook — first-touch code-intel / recon-wrxn-freshness nudge (wrxn-kernel-11).
 // PostToolUse (Edit|Write). On the FIRST touch of a code file this session it injects a <code-intel>
-// nudge: where a recon graph exists it notes freshness (commit lag) and points at recon; absent a
-// graph it nudges to build one. First-touch-GATED per session+file (a touched-list under
+// nudge: where a recon-wrxn index exists it points at the mcp__recon-wrxn__* tools; absent an index
+// it nudges to prime one. First-touch-GATED per session+file (a touched-list under
 // .wrxn/history/<sid>.touched) so a repeat edit of the same file is silent — no per-edit spam.
 //
 // Self-contained: ships into installs, MUST NOT import the kernel lib (node stdlib only).
@@ -60,13 +60,14 @@ function isFirstTouch(root, sid, relPath) {
   }
 }
 
-// A short freshness note: stale (or unknown) when the recon graph's commit doesn't prefix-match HEAD.
+// A short freshness note pointing at the recon-wrxn MCP server (mcp__recon-wrxn__* tools), whose
+// index lives in the fixed `.recon-wrxn/` dir and auto-builds lazily on first query.
 function freshnessNote(root) {
-  const graph = path.join(root, '.recon', 'graph.json');
-  if (!fs.existsSync(graph)) {
-    return 'No recon graph (.recon/graph.json absent) — build it for code-connection enrichment, then reindex.';
+  const indexDir = path.join(root, '.recon-wrxn');
+  if (!fs.existsSync(indexDir)) {
+    return 'No recon-wrxn index (.recon-wrxn/ absent) — query via the mcp__recon-wrxn__* tools to auto-index, or run `recon-wrxn index` to prime it now.';
   }
-  return 'recon graph present — reindex if it lags your edits (the graph is rebuilt at session close).';
+  return 'recon-wrxn index present (.recon-wrxn/) — query code connections via the mcp__recon-wrxn__* tools; it re-indexes live as you edit.';
 }
 
 function main() {

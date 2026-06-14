@@ -168,3 +168,24 @@ test('the CLI prints the adopt-hint on a non-empty repo', () => {
   const out = execFileSync('node', [bin, 'init', '--project', '--root', target], { encoding: 'utf8' });
   assert.match(out, /recon-wrxn index/, 'CLI surfaces the adopt-hint');
 });
+
+// ── AC-9: code-intel-push hook points at recon-wrxn (mcp__recon-wrxn__*) ────────
+
+test('code-intel-push nudge references recon-wrxn and the mcp__recon-wrxn__* namespace', () => {
+  const { execFileSync } = require('child_process');
+  const target = tmp('wrxn-intel-ns-');
+  init({ pkgRoot: PKG_ROOT, target, profile: 'project' });
+  const hook = path.join(target, '.claude', 'hooks', 'code-intel-push.cjs');
+  const event = { session_id: 's1', tool_input: { file_path: path.join(target, 'lib', 'thing.js') } };
+  const out = execFileSync('node', [hook], {
+    input: JSON.stringify(event),
+    encoding: 'utf8',
+    env: { ...process.env, CLAUDE_PROJECT_DIR: target },
+  });
+  const env = out.trim() ? JSON.parse(out) : {};
+  const c = env.hookSpecificOutput && env.hookSpecificOutput.additionalContext;
+  assert.ok(c, 'a code-intel nudge is injected on first touch');
+  assert.match(c, /recon-wrxn/, 'nudge names recon-wrxn');
+  assert.match(c, /mcp__recon-wrxn__/, 'nudge references the recon-wrxn MCP namespace');
+  assert.equal(/mcp__recon__[^w]/.test(c), false, 'no stale mcp__recon__ (non-wrxn) namespace');
+});
