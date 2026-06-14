@@ -155,6 +155,9 @@ function main(argv) {
     if (report.brownfield) {
       process.stdout.write(`brownfield install — ${report.collisions.length} existing file(s) preserved (never overwritten): ${report.collisions.map((c) => c.path).join(', ')}\n`);
     }
+    if (report.adoptHint) {
+      process.stdout.write(`${report.adoptHint}\n`);
+    }
     return 0;
   }
 

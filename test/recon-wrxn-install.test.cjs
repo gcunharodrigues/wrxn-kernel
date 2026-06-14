@@ -105,3 +105,66 @@ test('the receipt records the recon-wrxn managed files (.mcp.json + .recon-wrxn.
   assert.ok(paths.includes('.mcp.json'), '.mcp.json recorded in receipt');
   assert.ok(paths.includes('.recon-wrxn.json'), '.recon-wrxn.json recorded in receipt');
 });
+
+// ── AC-4: .recon-wrxn/ is gitignored (create or append, idempotent) ─────────────
+
+test('init creates .gitignore with the .recon-wrxn/ index dir ignored', () => {
+  const target = tmp('wrxn-gi-create-');
+  init({ pkgRoot: PKG_ROOT, target, profile: 'project' });
+  const gi = fs.readFileSync(path.join(target, '.gitignore'), 'utf8');
+  assert.match(gi, /^\.recon-wrxn\/$/m, '.recon-wrxn/ line present');
+});
+
+test('init appends to an existing .gitignore without losing operator lines', () => {
+  const target = tmp('wrxn-gi-append-');
+  fs.writeFileSync(path.join(target, '.gitignore'), 'node_modules/\ndist/\n');
+  init({ pkgRoot: PKG_ROOT, target, profile: 'project' });
+  const gi = fs.readFileSync(path.join(target, '.gitignore'), 'utf8');
+  assert.match(gi, /node_modules\//, 'operator lines preserved');
+  assert.match(gi, /dist\//, 'operator lines preserved');
+  assert.match(gi, /^\.recon-wrxn\/$/m, '.recon-wrxn/ appended');
+});
+
+test('the .recon-wrxn/ gitignore line is idempotent across re-init (no duplicate)', () => {
+  const target = tmp('wrxn-gi-idem-');
+  init({ pkgRoot: PKG_ROOT, target, profile: 'project' });
+  init({ pkgRoot: PKG_ROOT, target, profile: 'project' });
+  const gi = fs.readFileSync(path.join(target, '.gitignore'), 'utf8');
+  const count = gi.split('\n').filter((l) => l.trim() === '.recon-wrxn/').length;
+  assert.equal(count, 1, 'exactly one .recon-wrxn/ line after re-init');
+});
+
+// ── AC-5: NO synchronous index at init (serve auto-indexes lazily) ──────────────
+
+test('init does NOT build the .recon-wrxn/ index (lazy: serve indexes on first use)', () => {
+  const target = tmp('wrxn-noindex-');
+  init({ pkgRoot: PKG_ROOT, target, profile: 'project' });
+  assert.equal(fs.existsSync(path.join(target, '.recon-wrxn')), false, 'no index dir created at init');
+});
+
+// ── AC-6: a non-empty repo gets an adopt-hint; an empty repo does not ───────────
+
+test('init on a non-empty repo returns an adopt-hint to prime the index', () => {
+  const target = tmp('wrxn-hint-nonempty-');
+  fs.mkdirSync(path.join(target, 'src'));
+  fs.writeFileSync(path.join(target, 'src', 'app.js'), 'console.log(1);\n');
+  const report = init({ pkgRoot: PKG_ROOT, target, profile: 'project' });
+  assert.ok(report.adoptHint, 'adopt-hint present on a non-empty repo');
+  assert.match(report.adoptHint, /recon-wrxn index/, 'hint tells the user to run recon-wrxn index');
+});
+
+test('init on an empty repo returns no adopt-hint', () => {
+  const target = tmp('wrxn-hint-empty-');
+  const report = init({ pkgRoot: PKG_ROOT, target, profile: 'project' });
+  assert.ok(!report.adoptHint, 'no adopt-hint on an empty repo');
+});
+
+test('the CLI prints the adopt-hint on a non-empty repo', () => {
+  const { execFileSync } = require('child_process');
+  const target = tmp('wrxn-hint-cli-');
+  fs.mkdirSync(path.join(target, 'src'));
+  fs.writeFileSync(path.join(target, 'src', 'app.js'), 'console.log(1);\n');
+  const bin = path.join(PKG_ROOT, 'bin', 'wrxn.cjs');
+  const out = execFileSync('node', [bin, 'init', '--project', '--root', target], { encoding: 'utf8' });
+  assert.match(out, /recon-wrxn index/, 'CLI surfaces the adopt-hint');
+});
