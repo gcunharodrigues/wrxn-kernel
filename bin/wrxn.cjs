@@ -3,6 +3,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 
 const { init } = require('../lib/install.cjs');
 const { update } = require('../lib/update.cjs');
@@ -10,6 +11,7 @@ const worktree = require('../lib/worktree.cjs');
 const executor = require('../lib/executor.cjs');
 const onboard = require('../lib/onboard.cjs');
 const connect = require('../lib/connect.cjs');
+const statusline = require('../lib/statusline.cjs');
 
 const PKG_ROOT = path.join(__dirname, '..');
 
@@ -103,6 +105,13 @@ Usage:
       list                       print all registered connections (agent-readable JSON)
       get <name>                 print one connection by name
 
+  wrxn statusline [--inject [--path <script>]]
+                                 SYNAPSE live-window writer. With no flag: report whether a statusline
+                                 is configured (~/.claude/settings.json) + print the marker-bounded
+                                 sidecar block + how to enable. With --inject: append the block to the
+                                 resolved (or --path) statusline script, idempotently (append-only,
+                                 never overwrites). init NEVER touches your statusline.
+
   wrxn onboard [--root <dir>]    scaffold the Day-1 operator file set under context/ from a filled
                                  aios-intake.md (the deterministic half of the onboard skill;
                                  workspace installs only). Idempotent.
@@ -157,6 +166,9 @@ function main(argv) {
     }
     if (report.adoptHint) {
       process.stdout.write(`${report.adoptHint}\n`);
+    }
+    if (report.statuslineHint) {
+      process.stdout.write(`${report.statuslineHint}\n`);
     }
     return 0;
   }
@@ -339,6 +351,46 @@ function main(argv) {
       process.stderr.write(`wrxn: ${err.message}\n`);
       return 2;
     }
+  }
+
+  if (cmd === 'statusline') {
+    const home = process.env.HOME || os.homedir();
+    const detection = statusline.detectStatusLine(home);
+
+    // --inject: append the sidecar block to the resolved (or --path) statusline script, idempotently.
+    if (args.flags.inject) {
+      const target = args.flags.path || detection.scriptPath;
+      if (!target) {
+        process.stderr.write('wrxn: no statusline script to inject into — pass --path <script>, or configure statusLine in ~/.claude/settings.json first\n');
+        return 2;
+      }
+      try {
+        const r = statusline.injectSnippet(target);
+        process.stdout.write(r.injected
+          ? `wrxn sidecar appended to ${r.path}\n`
+          : `wrxn sidecar already present in ${r.path} — no change\n`);
+        return 0;
+      } catch (err) {
+        process.stderr.write(`wrxn: ${err.message}\n`);
+        return 2;
+      }
+    }
+
+    // Default: report detection + print the snippet + how to enable.
+    if (detection.configured) {
+      process.stdout.write(`statusline detected: ${detection.command}\n`);
+      process.stdout.write(detection.scriptPath
+        ? `  script: ${detection.scriptPath}\n`
+        : '  (not a bash <path> command — cannot auto-resolve a script to inject into)\n');
+    } else {
+      process.stdout.write('no statusline configured in ~/.claude/settings.json\n');
+    }
+    process.stdout.write('\nThe SYNAPSE live-window block (host statusline must read stdin into $input and set $session_id):\n\n');
+    process.stdout.write(statusline.snippet() + '\n');
+    process.stdout.write(detection.scriptPath
+      ? `Enable: wrxn statusline --inject   (appends idempotently to ${detection.scriptPath})\n`
+      : 'Enable: wrxn statusline --inject --path <your-statusline-script>\n');
+    return 0;
   }
 
   process.stderr.write(`wrxn: unknown command "${cmd}"\n\n${USAGE}\n`);

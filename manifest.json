@@ -444,6 +444,11 @@
       "profile": "project"
     },
     {
+      "path": "docs/statusline-sidecar.sh",
+      "class": "managed",
+      "profile": "project"
+    },
+    {
       "path": "docs/workspace/operator-layer.md",
       "class": "seeded",
       "profile": "workspace"
