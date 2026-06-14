@@ -38,3 +38,24 @@ test('the lockfile resolved recon-wrxn (npm install ran)', () => {
   assert.ok(resolved, 'recon-wrxn resolved in the lockfile');
   assert.equal(resolved.version, RECON_VERSION, 'lockfile pins the same version');
 });
+
+// ── AC-3: .recon-wrxn.json matches recon-wrxn's initConfig shape (No-Invention) ──
+
+test('init lays .recon-wrxn.json matching recon-wrxn initConfig shape', () => {
+  const target = tmp('wrxn-recon-cfg-');
+  init({ pkgRoot: PKG_ROOT, target, profile: 'project' });
+  const cfg = JSON.parse(fs.readFileSync(path.join(target, '.recon-wrxn.json'), 'utf8'));
+  // recon-wrxn's INIT_TEMPLATE: { projects:[], embeddings:false, watch:true, ignore:[] }
+  assert.deepEqual(cfg, { projects: [], embeddings: false, watch: true, ignore: [] });
+});
+
+test('.recon-wrxn.json carries NO index.outputDir (hard No-Invention — the field does not exist)', () => {
+  const target = tmp('wrxn-recon-noinvent-');
+  init({ pkgRoot: PKG_ROOT, target, profile: 'project' });
+  const cfg = JSON.parse(fs.readFileSync(path.join(target, '.recon-wrxn.json'), 'utf8'));
+  assert.equal('index' in cfg, false, 'no index key');
+  assert.equal('outputDir' in cfg, false, 'no outputDir key');
+  // belt-and-suspenders: the literal string must not appear anywhere in the file
+  const raw = fs.readFileSync(path.join(target, '.recon-wrxn.json'), 'utf8');
+  assert.equal(/outputDir/.test(raw), false, 'the outputDir literal is absent from the config');
+});

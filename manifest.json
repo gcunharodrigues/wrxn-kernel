@@ -359,7 +359,7 @@
       "profile": "workspace"
     },
     {
-      "path": ".recon.json",
+      "path": ".recon-wrxn.json",
       "class": "seeded",
       "profile": "project"
     },
