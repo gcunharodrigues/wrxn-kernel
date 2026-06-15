@@ -5,7 +5,10 @@ Project-local preferences live in the seeded `constitution.local.md` addendum, n
 
 ## Article I — Agent Authority (NON-NEGOTIABLE)
 
-- `git push`, PR creation, and release tags are EXCLUSIVE to the devops role.
+- `git push`, PR creation, and release tags are deliberate acts, held behind a
+  confirmation flag to prevent an accidental push: the op proceeds only once the session
+  confirms intent by setting `WRXN_ACTIVE_AGENT=devops` in the machine-local
+  `.claude/settings.local.json`. `devops` here is a dispatch-phase label, not an authority grant.
 - An agent acts only within its scope; it delegates when out of scope and never assumes
   another agent's authority.
 
