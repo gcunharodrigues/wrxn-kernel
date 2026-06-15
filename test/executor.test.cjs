@@ -85,6 +85,22 @@ test('buildDispatchSpec orders the tdd skill, isolation and the boundary constra
     'declares the structured report schema (AC-2)');
 });
 
+// ── devops push guidance honesty (foundation-honesty-01) ──────────────────────
+// Regression: the devops dispatch spec told the agent to push with an INLINE
+// `AIOX_ACTIVE_AGENT=devops` assignment — the wrong variable (the push-authority gate
+// reads WRXN_ACTIVE_AGENT) AND an inline assignment scopes to the git child, never
+// reaching the hook process. The flag must be set in settings.local.json so it reaches
+// the gate; otherwise a correctly-dispatched devops push is rejected by the install's own gate.
+
+test('devops dispatch spec authorizes the push via WRXN_ACTIVE_AGENT in settings.local.json', () => {
+  const spec = buildDispatchSpec(FIXTURE_ISSUE, 'devops');
+  const guidance = JSON.stringify(spec);
+  assert.match(guidance, /WRXN_ACTIVE_AGENT/, 'references the variable the push-authority gate actually reads');
+  assert.match(guidance, /settings\.local\.json/, 'sets the flag where it reaches the hook process');
+  assert.ok(!/AIOX_ACTIVE_AGENT/.test(guidance), 'no legacy variable name');
+  assert.ok(!/=devops/.test(guidance), 'no inline command-scoped assignment that never reaches the gate');
+});
+
 // ── validateReport (AC-2 structured, AC-1 completion, AC-3 boundary) ──────────
 
 test('validateReport accepts a well-formed completion report', () => {
