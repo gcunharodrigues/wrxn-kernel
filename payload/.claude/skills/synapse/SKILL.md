@@ -1,132 +1,133 @@
 ---
 name: synapse
-description: "This skill should be used when users want to understand the SYNAPSE context engine, manage domains, configure context rules, or troubleshoot rule injection. Use when asked about SYNAPSE architecture, domain management, star-commands, context brackets, or the 8-layer processing pipeline."
+description: "Use when someone wants to understand the SYNAPSE context engine, manage its rule domains, tune the token budget or handoff threshold, or troubleshoot why a rule did or didn't inject. Covers the real engine: the three layers (constitution / always-on / keyword-recall), the flat token budget, and the non-blocking handoff directive."
 ---
 
-# SYNAPSE Context Engine
+# SYNAPSE context engine
 
-## Overview
+## What it is
 
-SYNAPSE (Synkra Adaptive Processing & State Engine) is the unified context engine for AIOX. It injects contextual rules into every prompt via an 8-layer processing pipeline, adapting to context window usage through bracket-aware filtering.
+SYNAPSE is the per-prompt context-injection engine. On every `UserPromptSubmit` it assembles the
+install's active rule domains into a single `<synapse-rules>` block and returns it as
+`additionalContext`, so each prompt carries the constitution plus the operational rules that apply.
 
-**What it does:**
-- Injects rules per-prompt via Claude Code's `UserPromptSubmit` hook
-- Processes 8 layers (L0 Constitution through L7 Star-Commands) sequentially
-- Adapts injection volume based on context brackets (FRESH/MODERATE/DEPLETED/CRITICAL)
-- Integrates with agent state (active agent, workflow, task, squad)
-- Outputs `<synapse-rules>` XML block appended to each prompt
+It is one self-contained hook — `.claude/hooks/synapse-engine.cjs` — that ships into an install and
+reads only the install's own files (`.claude/constitution.md`, the `.synapse/` domains, and the
+`wrxn.install.json` receipt that marks the install root). It imports nothing from the kernel package.
+It is **fail-open**: any fault (unparseable input, missing file, assembly error) emits an empty
+envelope and injects nothing — the engine never blocks a prompt.
 
-**What it replaces:** SYNAPSE replaces the legacy CARL system with full feature parity plus 8 new capabilities including agent-scoped domains, workflow activation, and CRUD management commands.
+## The three layers
 
-**Architecture model:** Open Core — the 8-layer engine lives in `aiox-core` (open source), memory integration is feature-gated in `aiox-pro`.
+SYNAPSE assembles each prompt from three layers, in this order:
 
-## Quick Start
+| Layer | Source | Fires |
+|-------|--------|-------|
+| **L0 — Constitution** | `.claude/constitution.md` | Always. Never trimmed by the budget. |
+| **L1 — Always-on domains** | `.synapse/<domain>` where `<DOMAIN>_ALWAYS_ON=true` | Every prompt. (Seeded: `global`, `pipeline`.) |
+| **L6 — Keyword-recall domains** | `.synapse/<domain>` with a `<DOMAIN>_RECALL=word,...` list | Only when a trigger word appears in the prompt. (Seeded: `routing`.) |
 
-### Verify SYNAPSE is Active
+The constitution is rendered from `constitution.md` (article headings + their bullets) and sits
+outside the token budget — it is always kept. Every other active domain contributes a numbered rules
+section. See [the layer model](references/layers.md).
 
-SYNAPSE runs automatically via the Claude Code hook. To check status:
+## How a domain is defined
 
-```
-*synapse status
-```
-
-This shows: active domains, current bracket, session info, and loaded layers.
-
-### Basic Commands
-
-| Command | What it does |
-|---------|-------------|
-| `*synapse status` | Show current engine state |
-| `*synapse domains` | List all registered domains |
-| `*synapse debug` | Show detailed debug info (manifest parse, load times, rule counts) |
-| `*synapse help` | Show all available synapse commands |
-| `*brief` | Switch to brief response mode |
-| `*dev` | Switch to developer mode (code-focused) |
-| `*review` | Switch to code review mode |
-
-### Create a Custom Domain
+Domains are registered in `.synapse/manifest` (flat `KEY=VALUE`) and their rules live in a sibling
+file `.synapse/<domain>` (lowercased) as `<DOMAIN>_RULE_<N>=text` lines:
 
 ```
-*synapse create
+# .synapse/manifest
+GLOBAL_STATE=active
+GLOBAL_ALWAYS_ON=true
+
+# .synapse/global
+GLOBAL_RULE_0=git push, PR creation, and release tags are EXCLUSIVE to the devops role.
+GLOBAL_RULE_1=The unit of work is an issue with explicit acceptance criteria.
 ```
 
-This walks you through creating a new domain file + manifest entry. See [references/domains.md](references/domains.md) for the full domain guide.
+A domain loads only when `<DOMAIN>_STATE=active`. An always-on domain sets `_ALWAYS_ON=true`; a
+keyword domain sets `_RECALL=word1,word2`. See [the manifest format](references/manifest.md) and
+[domains & rule files](references/domains.md).
 
-## Architecture
+## The token budget
 
-SYNAPSE operates as a 4-layer architecture:
+Everything except the constitution is trimmable. A single flat budget (`RULES_BUDGET_TOKENS`,
+default 600; override `WRXN_RULES_BUDGET`) caps the trimmable sections; when the assembled rules
+exceed it, whole sections are dropped lowest-priority-first and a visible `[SYNAPSE-RULES-TRIM]`
+marker records what was dropped. One budget, applied flat. See
+[token budget & handoff](references/brackets.md).
+
+## The handoff directive
+
+When real consumed context reaches the handoff threshold (`HANDOFF_PCT`, default 0.40; override
+`WRXN_HANDOFF_PCT`) of the model window, SYNAPSE appends a **non-blocking** `[HANDOFF REQUIRED]`
+directive: finish the current request, run the handoff skill to write the baton, then `/clear` and
+resume in a fresh session. It never refuses work. The math runs on real token usage (resident tokens
+from the transcript ÷ the resolved model window), not an assumed window. See
+[token budget & handoff](references/brackets.md).
+
+## Output shape
 
 ```
-.claude/hooks/synapse-engine.js          # Layer 1: Hook Entry (~50 lines)
-        |
-        v imports
-.aiox-core/core/synapse/                 # Layer 2: Engine Modules
-|-- engine.js                            #   SynapseEngine class
-|-- layers/                              #   8 layer processors (L0-L7)
-|-- session/session-manager.js           #   Session state (JSON v2.0)
-|-- domain/domain-loader.js              #   Manifest + domain parser
-|-- context/context-tracker.js           #   Bracket calculation
-|-- memory/memory-bridge.js              #   Pro-gated MIS consumer
-|-- output/formatter.js                  #   <synapse-rules> XML
-        |
-        v reads/writes
-.synapse/                                # Layer 3: Runtime Data
-|-- manifest                             #   Central domain registry (KEY=VALUE)
-|-- constitution, global, context        #   Core domains (L0, L1)
-|-- agent-*, workflow-*                  #   Scoped domains (L2, L3)
-|-- commands                             #   Star-command definitions (L7)
-|-- sessions/, cache/                    #   Session state (gitignored)
-        |
-        v user-invoked
-.claude/commands/synapse/                # Layer 4: CRUD Commands + Skill Docs
-|-- manager.md                           #   Router/dispatcher
-|-- tasks/ (6 tasks)                     #   create, add, edit, toggle, command, suggest
+<synapse-rules>
+
+[CONSTITUTION] (NON-NEGOTIABLE)
+Article I — Agent Authority (NON-NEGOTIABLE)
+  git push, PR creation, and release tags are EXCLUSIVE to the devops role.
+  ...
+
+[GLOBAL]
+  1. git push, PR creation, and release tags are EXCLUSIVE to the devops role ...
+  2. The unit of work is an issue with explicit acceptance criteria ...
+
+[RECALL: routing]
+  1. git push, PR creation, and release tags go through the devops role only ...
+
+[SYNAPSE-RULES-TRIM] ROUTING dropped over the 600-token rules budget
+
+[HANDOFF REQUIRED]
+  Context is at ~42% of the model window (>= the 40% handoff threshold). NON-BLOCKING — do NOT stop work:
+  1. Finish the current request.
+  2. Run the handoff skill to write the baton (a compact handoff document).
+  3. Tell the operator to /clear and open a fresh session, where the baton injects on resume.
+
+</synapse-rules>
 ```
 
-**Key principle:** SYNAPSE is a **consumer** of existing systems (UAP for session state, MIS for memories). It never rewrites code from other epics.
+The trim marker appears only when a section was dropped; the handoff directive only at/above the
+threshold. When no domains are active the engine injects nothing.
+
+## Configuration
+
+| Knob | Where | Effect |
+|------|-------|--------|
+| `RULES_BUDGET_TOKENS` | `.synapse/manifest` | Trimmable-rules token ceiling (default 600). |
+| `HANDOFF_PCT` | `.synapse/manifest` | Handoff threshold as a window fraction (default 0.40). |
+| `CONTEXT_WINDOW` | `.synapse/manifest` | Pin the model window (tokens) for the handoff math. |
+| `WRXN_RULES_BUDGET` | env | Overrides `RULES_BUDGET_TOKENS`. |
+| `WRXN_HANDOFF_PCT` | env | Overrides `HANDOFF_PCT`. |
+| `WRXN_CONTEXT_WINDOW` | env | Forces the model window unconditionally. |
+
+See [invocation & configuration](references/commands.md).
 
 ## References
 
-### Reference Guides
+| Guide | Covers |
+|-------|--------|
+| [The layer model](references/layers.md) | the L0/L1/L6 assembly, ordering, constitution rendering, output format |
+| [The manifest format](references/manifest.md) | the `.synapse/manifest` keys and scalars |
+| [Domains & rule files](references/domains.md) | the seeded domains, the `RULE_N` format, adding a domain |
+| [Token budget & handoff](references/brackets.md) | the flat budget governor + the non-blocking handoff |
+| [Invocation & configuration](references/commands.md) | how the hook is wired, the env/manifest knobs, troubleshooting |
+| [Templates](assets/README.md) | domain-file and manifest-entry templates |
 
-| Guide | Description |
-|-------|-------------|
-| [domains.md](references/domains.md) | Domain types (L0-L7), KEY=VALUE format, creation guide |
-| [commands.md](references/commands.md) | Star-commands, *synapse sub-commands, CRUD operations |
-| [manifest.md](references/manifest.md) | Manifest format specification, all valid keys |
-| [brackets.md](references/brackets.md) | Context bracket system, token budgets, layer activation |
-| [layers.md](references/layers.md) | 8-layer processor architecture, priority, conflict resolution |
-
-### Assets (Templates)
-
-Templates for creating custom domains and manifest entries are maintained at:
-
-- **Domain template:** `.claude/commands/synapse/templates/domain-template`
-- **Manifest entry template:** `.claude/commands/synapse/templates/manifest-entry-template`
-
-See [assets/README.md](assets/README.md) for details.
-
-### CRUD Commands
-
-For domain management operations, use the SYNAPSE manager:
-
-| Command | Purpose |
-|---------|---------|
-| `*synapse create` | Create new domain + manifest entry |
-| `*synapse add` | Add rule to existing domain |
-| `*synapse edit` | Edit or remove rule by index |
-| `*synapse toggle` | Toggle domain active/inactive |
-| `*synapse command` | Create new star-command |
-| `*synapse suggest` | Suggest best domain for a rule |
-
-Full details: [references/commands.md](references/commands.md)
-
-## Key Files
+## Key files
 
 | File | Purpose |
 |------|---------|
-| `.claude/hooks/synapse-engine.js` | Hook entry point (UserPromptSubmit) |
-| `.aiox-core/core/synapse/engine.js` | SynapseEngine orchestrator |
-| `.synapse/manifest` | Domain registry (KEY=VALUE) |
-| `.synapse/commands` | Star-command definitions |
-| `.claude/commands/synapse/manager.md` | CRUD command router |
+| `.claude/hooks/synapse-engine.cjs` | The engine (UserPromptSubmit hook). |
+| `.claude/constitution.md` | L0 source — the non-negotiable articles. |
+| `.synapse/manifest` | Domain registry + budget/handoff scalars. |
+| `.synapse/global`, `.synapse/pipeline` | Seeded always-on (L1) domains. |
+| `.synapse/routing` | Seeded keyword-recall (L6) domain. |

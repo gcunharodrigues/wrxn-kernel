@@ -94,3 +94,67 @@ test('domain.md is laid for the install', () => {
   const domain = path.join(target, 'docs', 'agents', 'domain.md');
   assert.ok(fs.existsSync(domain), 'docs/agents/domain.md not laid');
 });
+
+// ── synapse skill tells the truth about the real engine (regression guard) ───
+//
+// The synapse skill once documented a DELETED architecture — an 8-layer pipeline,
+// star-commands, context brackets, squads, aiox-core/aiox-pro modules, and a `.js`
+// engine file. The real engine (.claude/hooks/synapse-engine.cjs) is three layers
+// (L0 constitution / L1 always-on / L6 keyword-recall) plus one flat token budget
+// and a non-blocking handoff directive. This guard fails the build if any
+// deleted-architecture marker reappears in ANY shipped synapse skill file, so the
+// lie cannot return on a future install.
+
+test('the shipped synapse skill carries no deleted-architecture markers', () => {
+  const target = tmp('wrxn-synapse-truth-');
+  init({ pkgRoot: PKG_ROOT, target, profile: 'project' });
+
+  // every markdown file the install actually ships under the synapse skill
+  const skillDir = path.join(target, '.claude', 'skills', 'synapse');
+  const files = [];
+  (function walk(dir) {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (e.name.endsWith('.md')) files.push(p);
+    }
+  })(skillDir);
+  assert.ok(files.length > 0, 'no synapse skill files were laid');
+
+  // literal substrings from the deleted design (matched case-insensitively)
+  const FORBIDDEN_LITERALS = [
+    '8-layer',
+    'star-command',
+    '*synapse',
+    '*brief',
+    '*dev',
+    'squad',
+    'aiox-core',
+    'aiox-pro',
+    'synapse-engine.js',
+  ];
+  // the 4 deleted context-bracket NAMES. Matched as WHOLE-WORD, UPPERCASE tokens — the deleted
+  // design always wrote them uppercase (e.g. "[CONTEXT BRACKET: MODERATE]", "→ FRESH"), so this
+  // catches every regression while NOT banning the ordinary English words. That matters: the real
+  // engine's own handoff directive emits "open a fresh session", and "critical" is common prose —
+  // a case-insensitive ban here would punish accurate documentation.
+  const FORBIDDEN_BRACKETS = ['FRESH', 'MODERATE', 'DEPLETED', 'CRITICAL'];
+
+  for (const file of files) {
+    const body = fs.readFileSync(file, 'utf8');
+    const lower = body.toLowerCase();
+    const rel = path.relative(target, file);
+    for (const marker of FORBIDDEN_LITERALS) {
+      assert.ok(
+        !lower.includes(marker.toLowerCase()),
+        `${rel} contains deleted-architecture marker "${marker}"`
+      );
+    }
+    for (const name of FORBIDDEN_BRACKETS) {
+      assert.ok(
+        !new RegExp(`\\b${name}\\b`).test(body),
+        `${rel} contains deleted context-bracket "${name}"`
+      );
+    }
+  }
+});

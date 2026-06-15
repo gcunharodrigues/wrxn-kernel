@@ -1,186 +1,108 @@
-# SYNAPSE 8-Layer Architecture Reference
+# SYNAPSE — the layer model
 
-## Overview
+SYNAPSE assembles every prompt from three layers and returns them as one `<synapse-rules>` block.
+The engine is `.claude/hooks/synapse-engine.cjs` (a `UserPromptSubmit` hook). It is self-contained
+(imports nothing from the kernel package), reads only the install's own files, and is fail-open: any
+fault emits an empty envelope and injects nothing.
 
-SYNAPSE processes rules through an 8-layer pipeline executed sequentially on every prompt. Each layer has a specific purpose, trigger condition, and priority level. The engine orchestrator (`.aiox-core/core/synapse/engine.js`) chains all layers and the output formatter produces the final `<synapse-rules>` XML block.
-
-## Layer Pipeline
-
-```
-L0 Constitution → L1 Global → L2 Agent → L3 Workflow → L4 Task → L5 Squad → L6 Keyword → L7 Star-Command
-```
-
-Layers execute in order. Each layer's output is collected and passed to the formatter.
-
-## Layer Details
-
-### L0: Constitution (NON-NEGOTIABLE)
-
-| Property | Value |
-|----------|-------|
-| **Purpose** | Enforce inviolable framework principles (6 articles) |
-| **Trigger** | Always active (`ALWAYS_ON=true`, `NON_NEGOTIABLE=true`) |
-| **Priority** | Highest — cannot be overridden by any other layer |
-| **Domain file** | `.synapse/constitution` |
-| **Source** | Auto-generated from `.aiox-core/constitution.md` via `generate-constitution.js` |
-| **Implementation** | `.aiox-core/core/synapse/layers/l0-constitution.js` |
-
-**Articles:** CLI First, Agent Authority, Story-Driven Development, No Invention, Quality First, Absolute Imports.
-
-### L1: Global + Context
-
-| Property | Value |
-|----------|-------|
-| **Purpose** | Universal rules applied to all prompts + bracket-specific behavior |
-| **Trigger** | Always active (`ALWAYS_ON=true`) |
-| **Priority** | High — applies to every prompt regardless of context |
-| **Domain files** | `.synapse/global`, `.synapse/context` |
-| **Implementation** | `.aiox-core/core/synapse/layers/l1-global.js` |
-
-**Content:** Coding standards, import rules, TypeScript rules, error handling patterns, bracket-specific context rules.
-
-### L2: Agent-Scoped
-
-| Property | Value |
-|----------|-------|
-| **Purpose** | Inject agent-specific rules when an agent is active |
-| **Trigger** | `AGENT_TRIGGER` matches active agent ID from session |
-| **Priority** | Medium-high — only active when agent is activated |
-| **Domain files** | `.synapse/agent-dev`, `.synapse/agent-qa`, `.synapse/agent-architect`, etc. (12 total) |
-| **Implementation** | `.aiox-core/core/synapse/layers/l2-agent.js` |
-
-**Agents covered:** dev, qa, architect, pm, po, sm, devops, analyst, data-engineer, ux (ux-design-expert), aiox-master, squad-creator.
-
-### L3: Workflow-Scoped
-
-| Property | Value |
-|----------|-------|
-| **Purpose** | Inject workflow-specific rules when a workflow is active |
-| **Trigger** | `WORKFLOW_TRIGGER` matches active workflow from session |
-| **Priority** | Medium — active during specific development workflows |
-| **Domain files** | `.synapse/workflow-sdc`, `.synapse/workflow-qa-loop`, `.synapse/workflow-spec`, `.synapse/workflow-brownfield` |
-| **Implementation** | `.aiox-core/core/synapse/layers/l3-workflow.js` |
-
-### L4: Task Context
-
-| Property | Value |
-|----------|-------|
-| **Purpose** | Inject context about the currently active task |
-| **Trigger** | Active task detected in session state |
-| **Priority** | Medium — active during task execution |
-| **Domain files** | Dynamic (injected from session context) |
-| **Implementation** | `.aiox-core/core/synapse/layers/l4-task.js` |
-
-### L5: Squad Discovery
-
-| Property | Value |
-|----------|-------|
-| **Purpose** | Discover and inject rules from active squad domains |
-| **Trigger** | Squad is active in session |
-| **Priority** | Medium-low — only when working with squads |
-| **Domain files** | Squad-specific domains (discovered at runtime) |
-| **Implementation** | `.aiox-core/core/synapse/layers/l5-squad.js` |
-
-### L6: Keyword (RECALL)
-
-| Property | Value |
-|----------|-------|
-| **Purpose** | Activate domains when user prompt contains matching keywords |
-| **Trigger** | User prompt contains keyword listed in domain's `RECALL` field |
-| **Priority** | Low — optional, skipped in DEPLETED bracket to conserve tokens |
-| **Domain files** | Any domain with `RECALL` key in manifest |
-| **Implementation** | `.aiox-core/core/synapse/layers/l6-keyword.js` |
-
-### L7: Star-Command
-
-| Property | Value |
-|----------|-------|
-| **Purpose** | Detect and inject mode-switching commands (`*brief`, `*dev`, `*synapse status`, etc.) |
-| **Trigger** | User types `*command` in prompt |
-| **Priority** | Highest for explicit commands — user intent is paramount |
-| **Domain file** | `.synapse/commands` |
-| **Implementation** | `.aiox-core/core/synapse/layers/l7-star-command.js` |
-
-## Pipeline Execution Flow
+## The layers
 
 ```
-1. Hook receives UserPromptSubmit event (stdin JSON)
-2. Engine calculates context bracket (prompt count → percent → bracket)
-3. Engine determines active layers for current bracket
-4. For each active layer (L0 → L7):
-   a. Layer processor loads relevant domain(s)
-   b. Rules are filtered/resolved
-   c. Layer output is collected
-5. Memory bridge consulted (if pro available, DEPLETED/CRITICAL brackets)
-6. Formatter assembles <synapse-rules> XML within token budget
-7. Output written to stdout (appended to user prompt)
+L0 Constitution  →  L1 Always-on domains  →  L6 Keyword-recall domains
 ```
 
-## Conflict Resolution
+Sections are emitted in manifest order, with the constitution always first.
 
-When rules from different layers conflict:
+### L0 — Constitution (never trimmed)
 
-1. **NON_NEGOTIABLE wins** — L0 Constitution rules cannot be overridden
-2. **Higher layer number = more specific** — L7 Star-Command overrides L1 Global for the current prompt
-3. **Agent > Global** — L2 agent-scoped rules take precedence over L1 global rules
-4. **Workflow > Agent** — L3 workflow rules can augment L2 agent rules
-5. **Explicit > Implicit** — Star-commands (explicit user intent) override automatic rules
+- **Source:** `.claude/constitution.md`.
+- **Fires:** always, while `CONSTITUTION_STATE=active` in `.synapse/manifest`.
+- **Rendering:** `renderConstitution` keeps each `##` article heading and its `-` bullets and drops
+  the prose preamble; a wrapped bullet's continuation line is folded back into its bullet. The
+  section is emitted as `[CONSTITUTION] (NON-NEGOTIABLE)` followed by the rendered articles.
+- **Budget:** outside the token budget — the constitution is always kept, never trimmed.
 
-## Output Format
+### L1 — Always-on domains
 
-The formatter produces XML output:
+- **Source:** `.synapse/<domain>` for any domain whose manifest entry sets `<DOMAIN>_ALWAYS_ON=true`.
+- **Fires:** on every prompt, while `<DOMAIN>_STATE=active`.
+- **Seeded domains:** `global` (operational invariants) and `pipeline` (the unified-dev build route).
+- **Rendering:** the domain's `<DOMAIN>_RULE_<N>=text` lines, ordered by `N`, emitted as a numbered
+  section headed `[<DOMAIN>]`.
 
-```xml
+### L6 — Keyword-recall domains
+
+- **Source:** `.synapse/<domain>` for any domain whose manifest entry carries
+  `<DOMAIN>_RECALL=word1,word2,...`.
+- **Fires:** only when one of the recall words appears (case-insensitively) in the prompt, while
+  `<DOMAIN>_STATE=active`.
+- **Seeded domain:** `routing` (recall words `deploy,worktree,push,pull request,release,new project,issue`).
+- **Rendering:** the domain's numbered rules, emitted under `[RECALL: <domain>]`.
+
+## Assembly flow
+
+1. Read `.synapse/manifest`; parse each domain's `STATE`, `ALWAYS_ON`, and `RECALL`.
+2. If `CONSTITUTION_STATE=active`, render `constitution.md` as the always-kept L0 section.
+3. For every other active domain in manifest order: an always-on domain loads unconditionally; a
+   recall domain loads only if a trigger word is in the prompt. Render its rules.
+4. Split the sections into the always-kept constitution and the trimmable rest; apply the flat token
+   budget (see [token budget & handoff](brackets.md)).
+5. Append the `[SYNAPSE-RULES-TRIM]` marker if anything was dropped, then the `[HANDOFF REQUIRED]`
+   directive if consumed context is at/above the threshold.
+6. Wrap everything in `<synapse-rules> … </synapse-rules>` and return it as `additionalContext`.
+
+## Ordering & trimming priority
+
+Sections keep manifest declaration order (constitution first). When the trimmable rules exceed the
+budget, whole sections are dropped from the END of that order first — the last-declared domain is the
+first to go, and the constitution is never dropped. See [token budget & handoff](brackets.md).
+
+## Output format
+
+```
 <synapse-rules>
-[CONTEXT BRACKET: MODERATE] 40-60% context remaining — all layers active
-[CONSTITUTION] (NON-NEGOTIABLE) CLI First | Agent Authority | Story-Driven | No Invention | Quality First | Absolute Imports
-[ACTIVE AGENT: @dev] Follow story tasks, update Dev Agent Record only, CodeRabbit pre-commit
-[ACTIVE WORKFLOW: sdc] Follow SDC phases, update checkboxes
-[TASK CONTEXT] Current task details
-[SQUAD: mmos] Squad-specific rules
-[STAR-COMMANDS] *dev: Code over explanation, minimal changes
-[DEVMODE STATUS] Pipeline metrics (if DEVMODE=true)
-[LOADED DOMAINS SUMMARY] constitution, global, context, agent-dev, workflow-sdc, commands
+
+[CONSTITUTION] (NON-NEGOTIABLE)
+Article I — Agent Authority (NON-NEGOTIABLE)
+  git push, PR creation, and release tags are EXCLUSIVE to the devops role.
+  ...
+
+[GLOBAL]
+  1. git push, PR creation, and release tags are EXCLUSIVE to the devops role ...
+  2. The unit of work is an issue with explicit acceptance criteria ...
+
+[RECALL: routing]
+  1. git push, PR creation, and release tags go through the devops role only ...
+
+[SYNAPSE-RULES-TRIM] ROUTING dropped over the 600-token rules budget
+
+[HANDOFF REQUIRED]
+  Context is at ~42% of the model window (>= the 40% handoff threshold). NON-BLOCKING — do NOT stop work:
+  1. Finish the current request.
+  2. Run the handoff skill to write the baton (a compact handoff document).
+  3. Tell the operator to /clear and open a fresh session, where the baton injects on resume.
+
 </synapse-rules>
 ```
 
-**Section ordering** (highest priority first):
-1. CONTEXT_BRACKET
-2. CONSTITUTION
-3. AGENT
-4. WORKFLOW
-5. TASK
-6. SQUAD
-7. KEYWORD
-8. MEMORY_HINTS
-9. STAR_COMMANDS
-10. DEVMODE
-11. SUMMARY
+The trim marker appears only when a section was dropped; the handoff directive only at/above the
+threshold. When no domains are active the engine injects nothing.
 
-## Performance Targets
+## Contract
 
-| Metric | Target | Hard Limit |
-|--------|--------|------------|
-| Total pipeline | <70ms | <100ms |
-| Individual layer | <15ms | <20ms (L0/L7: <5ms) |
-| Startup (.synapse/ discovery) | <5ms | <10ms |
-| Session I/O | <10ms | <15ms |
+| Aspect | Behavior |
+|--------|----------|
+| Event | `UserPromptSubmit` (event JSON on stdin) |
+| Inject | `{ "hookSpecificOutput": { "hookEventName": "UserPromptSubmit", "additionalContext": "<synapse-rules>…" } }` |
+| No-op | `{}` (inject nothing) |
+| Install root | nearest ancestor holding `wrxn.install.json` (walked up from `CLAUDE_PROJECT_DIR` or cwd) |
+| Failure mode | fail-open — any fault emits `{}` and never blocks the prompt |
 
-**Timeout behavior:** If any layer exceeds its time limit, it is skipped with a warning. The pipeline never blocks the prompt.
-
-## Source Files
+## Source
 
 | File | Purpose |
 |------|---------|
-| `.aiox-core/core/synapse/engine.js` | SynapseEngine orchestrator |
-| `.aiox-core/core/synapse/layers/l0-constitution.js` | L0 processor |
-| `.aiox-core/core/synapse/layers/l1-global.js` | L1 processor |
-| `.aiox-core/core/synapse/layers/l2-agent.js` | L2 processor |
-| `.aiox-core/core/synapse/layers/l3-workflow.js` | L3 processor |
-| `.aiox-core/core/synapse/layers/l4-task.js` | L4 processor |
-| `.aiox-core/core/synapse/layers/l5-squad.js` | L5 processor |
-| `.aiox-core/core/synapse/layers/l6-keyword.js` | L6 processor |
-| `.aiox-core/core/synapse/layers/l7-star-command.js` | L7 processor |
-| `.aiox-core/core/synapse/layers/layer-processor.js` | Abstract base class |
-| `.aiox-core/core/synapse/output/formatter.js` | XML formatter + token budget |
-| `.claude/hooks/synapse-engine.js` | Hook entry point |
+| `.claude/hooks/synapse-engine.cjs` | The whole engine: parse → build sections → budget → handoff → assemble. |
+| `.claude/constitution.md` | L0 source (the non-negotiable articles). |
+| `.synapse/manifest` | Domain registry + budget/handoff scalars. |
+| `.synapse/global`, `.synapse/pipeline`, `.synapse/routing` | The seeded domains. |

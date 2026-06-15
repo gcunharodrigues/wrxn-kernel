@@ -1,50 +1,34 @@
-# SYNAPSE Assets
+# SYNAPSE templates
 
-Templates for creating custom SYNAPSE domains and manifest entries.
+Templates for adding a SYNAPSE domain by hand. There is no interactive creator — a domain is two
+edits: a rule file in `.synapse/` and a registry entry in `.synapse/manifest`. See
+[domains & rule files](../references/domains.md) and [the manifest format](../references/manifest.md).
 
-## Templates Location
-
-Templates are maintained as the single source of truth in the CRUD commands directory:
-
-| Template | Location |
-|----------|----------|
-| **Domain template** | `.claude/commands/synapse/templates/domain-template` |
-| **Manifest entry template** | `.claude/commands/synapse/templates/manifest-entry-template` |
-
-These templates are used by the `*synapse create` command to scaffold new domains.
-
-## Usage
-
-To create a new domain using these templates, run:
+## Domain rule file — `.synapse/<name>`
 
 ```
-*synapse create
+# Domain: <name> (<always-on L1 | keyword-recall L6>) — <one-line description>
+<NAME>_RULE_0=<first rule>
+<NAME>_RULE_1=<second rule>
 ```
 
-Or reference the templates directly when creating domains manually.
+`<NAME>` is the uppercase prefix; the file is named for its lowercase form. Rules are numbered
+ascending from 0.
 
-## Template Formats
+## Manifest entry — `.synapse/manifest`
 
-### Domain Template
-
-```
-# ==========================================
-# SYNAPSE Domain: {DOMAIN_NAME}
-# Created: {CURRENT_DATE}
-# Description: {DESCRIPTION}
-# ==========================================
-
-# Rules
-{DOMAIN_KEY}_RULE_0={FIRST_RULE}
-```
-
-### Manifest Entry Template
+Always-on (loads on every prompt):
 
 ```
-# Layer 6: {domain-name}
-{DOMAIN_KEY}_STATE=active
-{DOMAIN_KEY}_RECALL={KEYWORDS}
-{DOMAIN_KEY}_EXCLUDE=
+<NAME>_STATE=active
+<NAME>_ALWAYS_ON=true
 ```
 
-For the complete KEY=VALUE format specification, see [../references/manifest.md](../references/manifest.md).
+Keyword-recall (loads only when a trigger word appears in the prompt):
+
+```
+<NAME>_STATE=active
+<NAME>_RECALL=word1,word2
+```
+
+Set `<NAME>_STATE=inactive` (or remove the entry) to stop loading the domain.

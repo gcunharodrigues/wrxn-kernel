@@ -1,100 +1,74 @@
-# SYNAPSE Context Brackets Reference
+# SYNAPSE token budget & handoff
 
-## Overview
+*(This reference covers the flat token-budget governor and the non-blocking handoff directive — the
+two controls SYNAPSE applies after it assembles the layer sections.)*
 
-Context brackets control how much content SYNAPSE injects per prompt based on how much context window remains. As the conversation progresses and context fills up, SYNAPSE adapts by changing which layers are active and how many tokens it injects.
+## The flat token budget
 
-The bracket system is implemented in `.aiox-core/core/synapse/context/context-tracker.js`.
+Everything except the constitution is trimmable. SYNAPSE applies ONE flat budget — there are no
+per-tier or per-window budgets.
 
-## The 4 Brackets
-
-| Bracket | Context Remaining | Token Budget | Behavior |
-|---------|-------------------|-------------|----------|
-| **FRESH** | 60-100% | ~800 tokens | Lean injection — essentials only |
-| **MODERATE** | 40-60% | ~1500 tokens | Standard injection — all layers active |
-| **DEPLETED** | 25-40% | ~2000 tokens | Reinforcement — reinforce critical rules, memory hints enabled |
-| **CRITICAL** | <25% | ~2500 tokens | Handoff warning — recommend session handoff, document state |
-
-## How Brackets Are Calculated
-
-The context tracker estimates remaining context using:
+- **Budget:** `RULES_BUDGET_TOKENS` in `.synapse/manifest` (default `600`), overridable per session
+  with the `WRXN_RULES_BUDGET` env var.
+- **Estimate:** a section's token cost is estimated as `ceil(characters / 4)`.
+- **Exempt:** the constitution (L0) sits outside the budget and is always kept.
+- **How it trims:** the trimmable sections keep manifest order. While the kept set is over budget,
+  whole sections are dropped from the END of that order first — the last-declared domain goes first,
+  so earlier-declared domains have higher priority. Sections are dropped whole, never partially.
+- **What it records:** if anything was dropped, a line is appended naming the dropped domains:
 
 ```
-contextPercent = 100 - ((promptCount * avgTokensPerPrompt) / maxContext * 100)
+[SYNAPSE-RULES-TRIM] ROUTING dropped over the 600-token rules budget
 ```
 
-**Default values:**
-- `avgTokensPerPrompt`: 1500
-- `maxContext`: 200000 (Claude's context window)
+## The handoff directive
 
-**Bracket assignment:**
-- `contextPercent >= 60` → FRESH
-- `contextPercent >= 40` → MODERATE
-- `contextPercent >= 25` → DEPLETED
-- `contextPercent < 25` → CRITICAL
+When the real consumed context reaches the handoff threshold, SYNAPSE appends a **non-blocking**
+`[HANDOFF REQUIRED]` directive. It never refuses work — it orders a clean wrap-up:
 
-Invalid or NaN input defaults to CRITICAL (fail-safe).
-
-## Layer Activation per Bracket
-
-| Bracket | Active Layers | Memory Hints | Handoff Warning |
-|---------|---------------|-------------|-----------------|
-| **FRESH** | L0, L1, L2, L7 | No | No |
-| **MODERATE** | L0-L7 (all) | No | No |
-| **DEPLETED** | L0-L7 (all) | Yes | No |
-| **CRITICAL** | L0-L7 (all) | Yes | Yes |
-
-**Key behavior:**
-- **FRESH**: Only core layers (Constitution, Global, Agent, Star-Commands) — saves tokens early
-- **MODERATE**: Full layer stack activated — normal operation
-- **DEPLETED**: Memory hints from MIS enabled (when pro available) to reinforce context
-- **CRITICAL**: Handoff warning injected, recommending session continuation in new window
-
-## Bracket-Specific Rules
-
-The `.synapse/context` domain file contains rules that vary by bracket:
-
-### FRESH Rules
-- Minimize injected rules to essentials only
-- Avoid redundant context — agent has full conversation history
-- Full layer stack available but lean injection
-
-### MODERATE Rules
-- All layers active at normal priority
-- Monitor token usage — consider summarizing long outputs
-- Prefer concise code examples over verbose explanations
-
-### DEPLETED Rules
-- Reinforce critical rules and constraints
-- Prefer concise responses to save tokens
-- Skip optional layers (L6 keyword domains) to conserve
-- Summarize progress before each action
-
-### CRITICAL Rules
-- Recommend session handoff
-- Summarize current state for new session continuation
-- Only inject L0 Constitution and L1 Global rules — skip other layers
-- Document incomplete work in story file
-
-## Token Budget Enforcement
-
-The output formatter (`.aiox-core/core/synapse/output/formatter.js`) enforces token budgets:
-
-1. Each bracket has a max token budget (800 / 1500 / 2000 / 2500)
-2. Sections are rendered in priority order (CONSTITUTION first, SUMMARY last)
-3. When budget is exceeded, sections are truncated from the end (lowest priority first)
-
-**Truncation order** (last removed first):
 ```
-SUMMARY → KEYWORD → SQUAD → TASK → WORKFLOW → AGENT → CONSTITUTION
+[HANDOFF REQUIRED]
+  Context is at ~42% of the model window (>= the 40% handoff threshold). NON-BLOCKING — do NOT stop work:
+  1. Finish the current request.
+  2. Run the handoff skill to write the baton (a compact handoff document).
+  3. Tell the operator to /clear and open a fresh session, where the baton injects on resume.
 ```
 
-Constitution (L0) is never truncated.
+Like the constitution, the handoff directive is outside the budget — it is never trimmed.
 
-## Source Files
+### The threshold
+
+`consumed = resident_tokens / model_window`. The directive fires when `consumed >=` the threshold.
+The threshold is resolved as: `WRXN_HANDOFF_PCT` env var > `HANDOFF_PCT` in the manifest > `0.40`.
+
+### Resident tokens
+
+The real tokens currently resident in context: the last assistant turn's
+`input_tokens + cache_read_input_tokens + cache_creation_input_tokens` read from the session
+transcript (output tokens are excluded — they are not resident in the next prompt). If the transcript
+is unreadable, the handoff math is skipped silently.
+
+### The model window
+
+The window is resolved by an explicit precedence, so the math is correct on both 200k and 1M sessions
+instead of assuming a fixed window:
+
+1. `WRXN_CONTEXT_WINDOW` env var (a positive number wins unconditionally).
+2. The live statusline sidecar for the session (tracks a mid-session model switch).
+3. `CONTEXT_WINDOW` in `.synapse/manifest`.
+4. `~/.claude.json` — a model id tagged `[1m]` ⇒ 1,000,000.
+5. Self-correcting net: resident already past 200,000 ⇒ the window must be larger (1,000,000).
+6. Fallback: 200,000.
+
+## Why a flat budget
+
+An earlier engine varied the budget by an estimate of how much window remained. This engine does not:
+one flat budget keeps assembly cheap and predictable, and the handoff directive — driven by real
+token usage — covers the "running low" case directly instead of through tiered injection.
+
+## Source
 
 | File | Purpose |
 |------|---------|
-| `.aiox-core/core/synapse/context/context-tracker.js` | Bracket calculation, token budgets, layer configs |
-| `.synapse/context` | Bracket-specific context rules (L1) |
-| `.aiox-core/core/synapse/output/formatter.js` | Token budget enforcement + truncation |
+| `.claude/hooks/synapse-engine.cjs` | `applyBudget`, `estimateTokens`, `resolveBudget`; `readResidentTokens`, `modelWindow`, `resolveHandoffPct`, `handoffDirective`. |
+| `.synapse/manifest` | `RULES_BUDGET_TOKENS`, `HANDOFF_PCT`, `CONTEXT_WINDOW`. |
