@@ -47,6 +47,20 @@ test('push-authority ignores a non-push command', () => {
   assert.deepEqual(d, {});
 });
 
+test('push-authority gate is a deliberate-push confirmation flag, not a devops-role authority', () => {
+  // new framing: the block reason names the real way to satisfy the gate (set the flag in the
+  // local settings file) and drops the multi-actor "authority" language.
+  const blocked = runHook(AUTH, PUSH, { WRXN_ACTIVE_AGENT: '' });
+  assert.equal(blocked.decision, 'block');
+  assert.match(blocked.reason, /settings\.local\.json/);
+  assert.match(blocked.reason, /confirm/i);
+  assert.doesNotMatch(blocked.reason, /devops role/i);
+  assert.doesNotMatch(blocked.reason, /exclusive/i);
+
+  // mechanism unchanged: an unflagged op is blocked, the flag value still allows it.
+  assert.deepEqual(runHook(AUTH, PUSH, { WRXN_ACTIVE_AGENT: 'devops' }), {});
+});
+
 // ── enforce-tests-on-push ─────────────────────────────────────────────────────
 
 test('tests-on-push BLOCKS a push when the suite is red', () => {
