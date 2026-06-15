@@ -9,6 +9,7 @@ const path = require('path');
 const PKG_ROOT = path.join(__dirname, '..');
 const { init, RECEIPT } = require('../lib/install.cjs');
 const { update } = require('../lib/update.cjs');
+const { compareVersions } = require('../lib/semver.cjs');
 
 function tmp(p) {
   return fs.mkdtempSync(path.join(os.tmpdir(), p));
@@ -111,4 +112,26 @@ test('a migration above the target version does not run yet', () => {
   const report = update({ pkgRoot: fakePkg(work, '0.2.0', [future]), target });
   assert.deepEqual(report.migrationsRan, []);
   assert.equal(fs.existsSync(path.join(target, 'future.txt')), false);
+});
+
+// ── no inert migrations: every migration targets a released version (foundation-honesty-06) ──
+//
+// migrate runs a migration only once the install's reached version (the package version) is >=
+// the migration's version. A migration tagged for a version the package has NOT reached is inert:
+// it ships but never runs (the exact trap that left 002's seeded-honesty fix a silent no-op while
+// package.json lagged at 0.2.0). This pins every migration at or below package.json's version so a
+// shipped migration can never be gated on an unreleased version.
+
+test('every migration targets a version <= the package version (no inert migration)', () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(PKG_ROOT, 'package.json'), 'utf8'));
+  const migDir = path.join(PKG_ROOT, 'migrations');
+  const files = fs.readdirSync(migDir).filter((f) => f.endsWith('.cjs'));
+  assert.ok(files.length > 0, 'there are migrations to check');
+  for (const file of files) {
+    const mig = require(path.join(migDir, file));
+    assert.ok(
+      compareVersions(mig.version, pkg.version) <= 0,
+      `migration ${file} targets ${mig.version} > package ${pkg.version} — it will never run on a real update`
+    );
+  }
 });

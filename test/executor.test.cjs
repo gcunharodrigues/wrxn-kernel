@@ -99,6 +99,9 @@ test('devops dispatch spec authorizes the push via WRXN_ACTIVE_AGENT in settings
   assert.match(guidance, /settings\.local\.json/, 'sets the flag where it reaches the hook process');
   assert.ok(!/AIOX_ACTIVE_AGENT/.test(guidance), 'no legacy variable name');
   assert.ok(!/=devops/.test(guidance), 'no inline command-scoped assignment that never reaches the gate');
+  // A flag left set persists across sessions and turns the anti-accidental-push gate into a
+  // permanent no-op — the guidance must tell the agent to clear it after the push.
+  assert.match(guidance, /remove|revert/i, 'instructs removing/reverting the confirm-flag after the push (a persistent flag defeats the gate)');
 });
 
 // ── validateReport (AC-2 structured, AC-1 completion, AC-3 boundary) ──────────
