@@ -1,142 +1,92 @@
-# SYNAPSE Manifest Reference
+# SYNAPSE manifest reference
 
-## Overview
+`.synapse/manifest` is the domain registry. The engine (`.claude/hooks/synapse-engine.cjs`) reads it
+on every `UserPromptSubmit` to learn which domains exist, when each fires, and the budget/handoff
+scalars. It is a flat `KEY=VALUE` file; blank lines and `#` comment lines are ignored.
 
-The manifest (`.synapse/manifest`) is the central registry for all SYNAPSE domains. It uses a KEY=VALUE format and determines which domains are loaded, when they activate, and how they behave.
+## Per-domain keys
 
-The manifest is parsed by `domain-loader.js` (`.aiox-core/core/synapse/domain/domain-loader.js`) on every prompt.
+Each domain has a unique uppercase prefix (e.g. `GLOBAL`, `PIPELINE`, `ROUTING`). The engine reads
+exactly three per-domain keys:
 
-## File Format
+| Key | Values | Meaning |
+|-----|--------|---------|
+| `<DOMAIN>_STATE` | `active` \| anything else | The domain loads only when `active`. |
+| `<DOMAIN>_ALWAYS_ON` | `true` \| `false` | `true` ⇒ load on every prompt (an L1 domain). |
+| `<DOMAIN>_RECALL` | `word1,word2,...` | Load only when a listed word appears in the prompt (an L6 domain). |
+
+A domain is always-on **or** keyword-recall: set `_ALWAYS_ON=true` for the first, `_RECALL=...` for
+the second. The `CONSTITUTION` domain is special — only its `_STATE`/`_ALWAYS_ON` are read; its body
+comes from `.claude/constitution.md`, not a domain file.
+
+No other per-domain keys exist. There are no agent/workflow/task triggers, no exclude lists, and no
+"non-negotiable" flag in the manifest — the constitution's always-kept status is built into the
+engine, not declared here.
+
+## Scalars
+
+The engine also reads these non-domain keys, which tune the budget governor and the handoff directive:
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `RULES_BUDGET_TOKENS` | `600` | Token ceiling on the trimmable sections (the constitution is exempt). |
+| `HANDOFF_PCT` | `0.40` | Fraction of the model window at which the non-blocking handoff fires. |
+| `CONTEXT_WINDOW` | (unset) | Optional: pin the model window (in tokens) used by the handoff math. |
+
+Each can be overridden per-session by an env var — see [token budget & handoff](brackets.md) and
+[invocation & configuration](commands.md).
+
+## The seeded manifest
 
 ```
-# Comments start with #
-# Empty lines are ignored
-
-# Debug mode toggle
-DEVMODE=false
-
-# Domain registration: {PREFIX}_{KEY}={VALUE}
+# L0 — Constitution (NON-NEGOTIABLE). Always; never trimmed.
 CONSTITUTION_STATE=active
 CONSTITUTION_ALWAYS_ON=true
-CONSTITUTION_NON_NEGOTIABLE=true
-```
 
-## Valid Keys
-
-Every domain is identified by a unique prefix (e.g., `CONSTITUTION`, `GLOBAL`, `AGENT_DEV`). The following keys are valid for each prefix:
-
-### Required Keys
-
-| Key | Type | Description |
-|-----|------|-------------|
-| `{PREFIX}_STATE` | `active` \| `inactive` | Whether the domain is loaded. Required for every domain. |
-
-### Optional Keys
-
-| Key | Type | Description | Used By |
-|-----|------|-------------|---------|
-| `{PREFIX}_ALWAYS_ON` | `true` \| `false` | Domain always loaded regardless of context | L0, L1 |
-| `{PREFIX}_NON_NEGOTIABLE` | `true` \| `false` | Rules cannot be overridden by other layers | L0 only |
-| `{PREFIX}_AGENT_TRIGGER` | agent ID string | Activate when this agent is active | L2 |
-| `{PREFIX}_WORKFLOW_TRIGGER` | workflow ID string | Activate when this workflow is active | L3 |
-| `{PREFIX}_RECALL` | comma-separated keywords | Activate when user prompt contains keyword | L6 |
-| `{PREFIX}_EXCLUDE` | comma-separated values | Contexts/agents to exclude domain from | Any |
-
-### Global Key
-
-| Key | Type | Description |
-|-----|------|-------------|
-| `DEVMODE` | `true` \| `false` | Enable debug metrics in output |
-
-## Complete Manifest Example
-
-Below is the current manifest structure (from `.synapse/manifest`):
-
-```
-# Debug mode
-DEVMODE=false
-
-# Layer 0: Constitution (NON-NEGOTIABLE)
-CONSTITUTION_STATE=active
-CONSTITUTION_ALWAYS_ON=true
-CONSTITUTION_NON_NEGOTIABLE=true
-
-# Layer 1: Global (ALWAYS_ON)
+# L1 — Global operational invariants. Always-on.
 GLOBAL_STATE=active
 GLOBAL_ALWAYS_ON=true
 
-# Layer 1: Context brackets (ALWAYS_ON)
-CONTEXT_STATE=active
-CONTEXT_ALWAYS_ON=true
+# L1 — Pipeline (the unified-dev build route). Always-on.
+PIPELINE_STATE=active
+PIPELINE_ALWAYS_ON=true
 
-# Layer 7: Star-commands
-COMMANDS_STATE=active
+# L6 — Keyword-recall. Loads .synapse/routing when a trigger word appears.
+ROUTING_STATE=active
+ROUTING_RECALL=deploy,worktree,push,pull request,release,new project,issue
 
-# Layer 2: Agent-scoped domains
-AGENT_DEV_STATE=active
-AGENT_DEV_AGENT_TRIGGER=dev
-AGENT_QA_STATE=active
-AGENT_QA_AGENT_TRIGGER=qa
-AGENT_ARCHITECT_STATE=active
-AGENT_ARCHITECT_AGENT_TRIGGER=architect
-# ... (12 agent domains total)
-
-# Layer 3: Workflow domains
-WORKFLOW_SDC_STATE=active
-WORKFLOW_SDC_WORKFLOW_TRIGGER=sdc
-WORKFLOW_EPIC_CREATE_STATE=active
-WORKFLOW_EPIC_CREATE_WORKFLOW_TRIGGER=epic_creation
-WORKFLOW_ARCH_REVIEW_STATE=active
-WORKFLOW_ARCH_REVIEW_WORKFLOW_TRIGGER=architecture_review
+# Budget governor + handoff threshold.
+RULES_BUDGET_TOKENS=600
+HANDOFF_PCT=0.40
 ```
 
-## Domain-to-File Mapping
+## Domain → file mapping
 
-The domain-loader resolves domain prefixes to files in `.synapse/`:
+A domain's rules live in a sibling file named for the lowercased prefix:
 
 | Prefix | File | Layer |
 |--------|------|-------|
-| `CONSTITUTION` | `.synapse/constitution` | L0 |
+| `CONSTITUTION` | `.claude/constitution.md` (special) | L0 |
 | `GLOBAL` | `.synapse/global` | L1 |
-| `CONTEXT` | `.synapse/context` | L1 |
-| `COMMANDS` | `.synapse/commands` | L7 |
-| `AGENT_DEV` | `.synapse/agent-dev` | L2 |
-| `AGENT_QA` | `.synapse/agent-qa` | L2 |
-| `WORKFLOW_SDC` | `.synapse/workflow-sdc` | L3 |
-
-**Naming convention:** The prefix is derived from the filename by:
-1. Converting to SCREAMING_SNAKE_CASE
-2. Removing hyphens and replacing with underscores
+| `PIPELINE` | `.synapse/pipeline` | L1 |
+| `ROUTING` | `.synapse/routing` | L6 |
 
 ## Troubleshooting
 
-### Domain Not Loading
+**A domain's rules never appear.**
+1. Check `<DOMAIN>_STATE=active`.
+2. For an always-on domain, check `<DOMAIN>_ALWAYS_ON=true`.
+3. For a recall domain, check the prompt actually contains one of the `<DOMAIN>_RECALL` words.
+4. Check the sibling `.synapse/<domain>` file exists and has `<DOMAIN>_RULE_<N>=...` lines.
+5. If the rules budget is tight, the section may have been dropped — look for a `[SYNAPSE-RULES-TRIM]`
+   marker naming it.
 
-1. Check `{PREFIX}_STATE=active` in manifest
-2. Verify the domain file exists in `.synapse/`
-3. For L2 domains: verify `AGENT_TRIGGER` matches the active agent ID
-4. For L3 domains: verify `WORKFLOW_TRIGGER` matches the active workflow
-5. Run `*synapse debug` to see manifest parse results
+**Format rules.** Keys are `KEY=VALUE` with no spaces around `=`; comments start with `#`; values
+hold no newlines.
 
-### Invalid Format Errors
-
-- Keys must use SCREAMING_SNAKE_CASE
-- Values cannot contain newlines
-- No spaces around `=` sign
-- Comments must start with `#` at the beginning of the line
-
-### Adding a New Domain
-
-Use `*synapse create` or manually:
-1. Create the domain file in `.synapse/` with KEY=VALUE rules
-2. Add the registration keys to `.synapse/manifest`
-3. Run `*synapse reload` to reload from disk
-
-## Source Files
+## Source
 
 | File | Purpose |
 |------|---------|
-| `.synapse/manifest` | The manifest file itself |
-| `.aiox-core/core/synapse/domain/domain-loader.js` | Manifest parser + domain file loader |
-| `.claude/commands/synapse/utils/manifest-parser-reference.md` | Detailed parser format spec |
-| `.claude/commands/synapse/templates/manifest-entry-template` | Template for new manifest entries |
+| `.synapse/manifest` | The registry itself. |
+| `.claude/hooks/synapse-engine.cjs` | `parseSynapseManifest` / `manifestValue` read this file. |
