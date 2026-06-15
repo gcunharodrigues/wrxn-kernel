@@ -159,6 +159,42 @@ test('the shipped synapse skill carries no deleted-architecture markers', () => 
   }
 });
 
+// ── synapse skill carries no fictional authority wording (foundation-honesty-03) ──
+//
+// Issue 04/06 reworded the REAL rules to a confirmation-flag framing, but the synapse
+// skill's illustrative examples kept quoting the OLD authority wording — git push et al.
+// "EXCLUSIVE to the devops role". There is no devops *authority*: the gate is a self-
+// toggled confirmation flag. This guards every shipped synapse skill file from regressing
+// back to the authority-lie phrasing on a future install.
+
+test('the shipped synapse skill carries no fictional authority wording', () => {
+  const target = tmp('wrxn-synapse-authority-');
+  init({ pkgRoot: PKG_ROOT, target, profile: 'project' });
+
+  const skillDir = path.join(target, '.claude', 'skills', 'synapse');
+  const files = [];
+  (function walk(dir) {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (e.name.endsWith('.md')) files.push(p);
+    }
+  })(skillDir);
+  assert.ok(files.length > 0, 'no synapse skill files were laid');
+
+  const FORBIDDEN_AUTHORITY = ['devops role', 'exclusive to the devops'];
+  for (const file of files) {
+    const lower = fs.readFileSync(file, 'utf8').toLowerCase();
+    const rel = path.relative(target, file);
+    for (const marker of FORBIDDEN_AUTHORITY) {
+      assert.ok(
+        !lower.includes(marker),
+        `${rel} contains fictional authority wording "${marker}" (the push gate is a confirmation flag, not a role)`
+      );
+    }
+  }
+});
+
 // ── domain doc is honest: no dead-context references (foundation-honesty-05) ──
 
 test('domain.md ships with no dead-context references', () => {

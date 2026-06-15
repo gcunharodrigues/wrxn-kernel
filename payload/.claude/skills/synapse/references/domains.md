@@ -22,7 +22,7 @@ the rules ascending. Blank lines and `#` comments are ignored.
 
 ```
 # .synapse/global  (always-on, L1)
-GLOBAL_RULE_0=git push, PR creation, and release tags are EXCLUSIVE to the devops role.
+GLOBAL_RULE_0=git push, PR creation, and release tags are deliberate acts held behind a confirmation flag (anti-accidental-push) — `devops` is a dispatch-phase label, not an authority.
 GLOBAL_RULE_1=The unit of work is an issue with explicit acceptance criteria.
 GLOBAL_RULE_2=Before building, apply the decision hierarchy: REUSE > ADAPT > CREATE.
 ```

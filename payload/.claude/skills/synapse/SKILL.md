@@ -42,7 +42,7 @@ GLOBAL_STATE=active
 GLOBAL_ALWAYS_ON=true
 
 # .synapse/global
-GLOBAL_RULE_0=git push, PR creation, and release tags are EXCLUSIVE to the devops role.
+GLOBAL_RULE_0=git push, PR creation, and release tags are deliberate acts held behind a confirmation flag (anti-accidental-push) — `devops` is a dispatch-phase label, not an authority.
 GLOBAL_RULE_1=The unit of work is an issue with explicit acceptance criteria.
 ```
 
@@ -74,15 +74,15 @@ from the transcript ÷ the resolved model window), not an assumed window. See
 
 [CONSTITUTION] (NON-NEGOTIABLE)
 Article I — Agent Authority (NON-NEGOTIABLE)
-  git push, PR creation, and release tags are EXCLUSIVE to the devops role.
+  git push, PR creation, and release tags are deliberate acts held behind a confirmation flag (anti-accidental-push) — `devops` is a dispatch-phase label, not an authority.
   ...
 
 [GLOBAL]
-  1. git push, PR creation, and release tags are EXCLUSIVE to the devops role ...
+  1. git push, PR creation, and release tags are deliberate acts held behind a confirmation flag ...
   2. The unit of work is an issue with explicit acceptance criteria ...
 
 [RECALL: routing]
-  1. git push, PR creation, and release tags go through the devops role only ...
+  1. git push, PR creation, and release tags are deliberate acts held behind a confirmation flag ...
 
 [SYNAPSE-RULES-TRIM] ROUTING dropped over the 600-token rules budget
 
