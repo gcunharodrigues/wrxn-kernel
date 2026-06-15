@@ -171,3 +171,19 @@ test('domain.md ships with no dead-context references', () => {
     assert.ok(!body.includes(marker), `domain.md must not reference dead context "${marker}"`);
   }
 });
+
+// ── routing seed is honest: no devops-role authority wording (foundation-honesty-06) ──
+//
+// The seeded `routing` domain once asserted that git push "goes through the devops role only" —
+// a fictional authority (the real gate is a self-toggled confirmation flag). This guards the seed
+// from regressing back to the role-authority framing on a future install.
+
+test('routing seed ships with no devops-role authority wording', () => {
+  const target = tmp('wrxn-routing-honest-');
+  init({ pkgRoot: PKG_ROOT, target, profile: 'project' });
+
+  const routing = path.join(target, '.synapse', 'routing');
+  const body = fs.readFileSync(routing, 'utf8');
+  assert.equal(body.toLowerCase().includes('devops role'), false, 'routing must not assert a fictional "devops role" authority');
+  assert.match(body, /^ROUTING_RULE_0=/m, 'routing still defines ROUTING_RULE_0');
+});
