@@ -83,6 +83,7 @@ test('session-start fails open ({}) when no install root is resolvable', () => {
 
 test('session-end writes a dated page into the wiki sessions tier', () => {
   const target = freshInstall('wrxn-sess-end-');
+  runHook(HISTORY, { session_id: 'sid-bbb', prompt: 'a captured turn' }, target);
   runHook(END, { session_id: 'sid-bbb', reason: 'clear' }, target);
   const files = fs.readdirSync(sessionsDir(target)).filter((f) => f.endsWith('.md'));
   assert.equal(files.length, 1, 'exactly one session page written');
@@ -104,6 +105,7 @@ test('session-end NEVER writes the continuity baton (clobber fix)', () => {
 test('session-end keeps the frontmatter single-line for a pathological session id', () => {
   const target = freshInstall('wrxn-sess-frontmatter-');
   // A session id carrying a newline must NOT break the parsed `description:` frontmatter line.
+  runHook(HISTORY, { session_id: 'sid\ninjected: evil', prompt: 'a turn' }, target);
   runHook(END, { session_id: 'sid\ninjected: evil', reason: 'clear' }, target);
   const files = fs.readdirSync(sessionsDir(target)).filter((f) => f.endsWith('.md'));
   const body = fs.readFileSync(path.join(sessionsDir(target), files[0]), 'utf8');
@@ -113,6 +115,59 @@ test('session-end keeps the frontmatter single-line for a pathological session i
   // The newline collapsed to a space, so "injected: evil" survives as inline value TEXT — it must
   // NOT have become its own top-level frontmatter key (which a raw newline would have produced).
   assert.ok(!fm.split('\n').some((l) => l.trim().startsWith('injected:')), 'no injected frontmatter key');
+});
+
+// ── foundation-honesty-02: session-end hygiene (reap, skip-empty, bounded) ────
+// SessionEnd is the episodic writer AND the session's janitor: it reaps the ending
+// session's scratch state and bounds the sessions tier — without ever touching the baton.
+
+test('session-end reaps the ending session first-touch marker (.touched)', () => {
+  const target = freshInstall('wrxn-sess-reap-');
+  // code-intel-push records a first-touch marker when a code file is edited this session.
+  const histDir = path.join(target, '.wrxn', 'history');
+  fs.mkdirSync(histDir, { recursive: true });
+  const touched = path.join(histDir, 'sid-reap.touched');
+  fs.writeFileSync(touched, 'lib/install.cjs\n');
+  // The session also captured a turn, so a page is written alongside the reap.
+  runHook(HISTORY, { session_id: 'sid-reap', prompt: 'edit some code' }, target);
+  assert.ok(fs.existsSync(touched), 'precondition: first-touch marker present before end');
+
+  runHook(END, { session_id: 'sid-reap', reason: 'clear' }, target);
+  assert.ok(!fs.existsSync(touched), 'first-touch marker reaped at session end');
+});
+
+test('session-end writes NO page for an empty session (no captured turns)', () => {
+  const target = freshInstall('wrxn-sess-empty-');
+  // No HISTORY turn recorded → no trail → an empty session.
+  runHook(END, { session_id: 'sid-empty', reason: 'clear' }, target);
+  const pages = fs.existsSync(sessionsDir(target))
+    ? fs.readdirSync(sessionsDir(target)).filter((f) => f.endsWith('.md'))
+    : [];
+  assert.equal(pages.length, 0, 'empty session leaves no page');
+});
+
+test('session-end bounds sessions-dir growth (cap + rotation), baton untouched', () => {
+  const target = freshInstall('wrxn-sess-cap-');
+  // A deliberate baton must survive even as session pages rotate out around it.
+  fs.mkdirSync(path.dirname(batonPath(target)), { recursive: true });
+  fs.writeFileSync(batonPath(target), 'BATON: keep me\n');
+
+  const dates = ['2026-06-01', '2026-06-02', '2026-06-03', '2026-06-04', '2026-06-05'];
+  dates.forEach((d, i) => {
+    const sid = `cap-${i}`;
+    const now = `${d}T10:00:00.000Z`;
+    runHook(HISTORY, { session_id: sid, prompt: `turn ${i}` }, target, { WRXN_NOW: now });
+    runHook(END, { session_id: sid, reason: 'clear' }, target, { WRXN_NOW: now, WRXN_SESSIONS_MAX: '3' });
+  });
+
+  const pages = fs.readdirSync(sessionsDir(target)).filter((f) => f.endsWith('.md')).sort();
+  assert.equal(pages.length, 3, 'sessions dir capped at WRXN_SESSIONS_MAX');
+  assert.deepEqual(
+    pages,
+    ['2026-06-03-cap-2.md', '2026-06-04-cap-3.md', '2026-06-05-cap-4.md'],
+    'the three most-recent pages survive; the two oldest were reaped',
+  );
+  assert.equal(fs.readFileSync(batonPath(target), 'utf8'), 'BATON: keep me\n', 'baton untouched by rotation');
 });
 
 // ── AC-3: history capture records the turn trail ──────────────────────────────
@@ -151,6 +206,7 @@ test('e2e: start → history×2 → end produces a page carrying the turn trail'
 test('session-start gives the deliberate baton precedence over the session page', () => {
   const target = freshInstall('wrxn-sess-baton-');
   // An automatic session page exists...
+  runHook(HISTORY, { session_id: 'sid-old', prompt: 'did some work' }, target);
   runHook(END, { session_id: 'sid-old', reason: 'clear' }, target);
   // ...and a deliberate handoff baton was written by the handoff skill.
   fs.mkdirSync(path.dirname(batonPath(target)), { recursive: true });
