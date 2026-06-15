@@ -4,26 +4,21 @@ How the engineering skills should consume this repo's domain documentation when 
 
 ## Before exploring, read these
 
-- **`CONTEXT.md`** at the repo root, or
-- **`CONTEXT-MAP.md`** at the repo root if it exists — it points at one `CONTEXT.md` per context. Read each one relevant to the topic.
-- **`docs/adr/`** — read ADRs that touch the area you're about to work in. In multi-context repos, also check `src/<context>/docs/adr/` for context-scoped decisions.
+- **`CONTEXT.md`** at the repo root — the domain glossary, the canonical vocabulary for this project.
+- **`docs/adr/`** — Architecture Decision Records. Read the ADRs that touch the area you're about to work in.
 
-If any of these files don't exist, **proceed silently**. Don't flag their absence; don't suggest creating them upfront. The producer skill (`grill-with-docs`) creates them lazily when terms or decisions actually get resolved.
+If either doesn't exist yet, **proceed silently**. Don't flag its absence; don't suggest creating it upfront. The producer skill (`grill-with-docs`) creates them lazily — `CONTEXT.md` when the first term is resolved, an ADR when a hard-to-reverse decision is actually made.
 
 ## File structure
 
-This install uses a **single-context** layout (most repos): one `CONTEXT.md` + `docs/adr/` at the repo root.
+A fresh install ships neither file. They appear at the repo root as the project's language and decisions accumulate:
 
 ```
 /
-├── CONTEXT.md
-├── docs/adr/
-│   ├── 0001-event-sourced-orders.md
-│   └── 0002-postgres-for-write-model.md
-└── src/
+├── CONTEXT.md        ← domain glossary (created lazily by grill-with-docs)
+└── docs/
+    └── adr/          ← one file per decision, named NNNN-<slug>.md
 ```
-
-If this grows into a monorepo with separate contexts, add a `CONTEXT-MAP.md` at the root pointing to per-context `CONTEXT.md` files and the skills will switch to multi-context mode.
 
 ## Use the glossary's vocabulary
 
@@ -35,4 +30,4 @@ If the concept you need isn't in the glossary yet, that's a signal — either yo
 
 If your output contradicts an existing ADR, surface it explicitly rather than silently overriding:
 
-> _Contradicts ADR-0007 (event-sourced orders) — but worth reopening because…_
+> _Contradicts ADR-0007 — but worth reopening because…_

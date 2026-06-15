@@ -94,3 +94,16 @@ test('domain.md is laid for the install', () => {
   const domain = path.join(target, 'docs', 'agents', 'domain.md');
   assert.ok(fs.existsSync(domain), 'docs/agents/domain.md not laid');
 });
+
+// ── domain doc is honest: no dead-context references (foundation-honesty-05) ──
+
+test('domain.md ships with no dead-context references', () => {
+  const target = tmp('wrxn-domain-honest-');
+  init({ pkgRoot: PKG_ROOT, target, profile: 'project' });
+
+  const domain = path.join(target, 'docs', 'agents', 'domain.md');
+  const body = fs.readFileSync(domain, 'utf8').toLowerCase();
+  for (const marker of ['squad', 'aiox-core', 'context-map']) {
+    assert.ok(!body.includes(marker), `domain.md must not reference dead context "${marker}"`);
+  }
+});
