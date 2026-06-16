@@ -72,31 +72,9 @@ test('reference-detect is silent on a prompt with no reference signal', () => {
   assert.deepEqual(env, {}, 'no URL / marker → no nudge');
 });
 
-// ── AC: capturing a reference then prompting on its topic shows the recall nudge ──
-
-test('recall-surface nudges when a captured page matches the prompt topic', () => {
-  const target = freshInstall('wrxn-recall-hit-');
-  writePage(target, 'concepts', 'kubernetes-networking', 'How the kubernetes networking model assigns pod IPs.');
-  const env = runHook(RECALL, { prompt: 'remind me how kubernetes networking assigns pod addresses' }, target);
-  const c = ctx(env);
-  assert.ok(c, 'a recall-surface nudge is injected');
-  assert.match(c, /kubernetes-networking/, 'names the matching page slug');
-  assert.match(c, /recall|already have|read/i, 'tells the agent to recall before re-deriving');
-});
-
-test('recall-surface is silent when no captured page matches', () => {
-  const target = freshInstall('wrxn-recall-miss-');
-  writePage(target, 'concepts', 'kubernetes-networking', 'pod IP assignment');
-  const env = runHook(RECALL, { prompt: 'what is the capital of france today please' }, target);
-  assert.deepEqual(env, {}, 'unrelated prompt → no nudge');
-});
-
-test('recall-surface is silent on a trivial prompt', () => {
-  const target = freshInstall('wrxn-recall-trivial-');
-  writePage(target, 'concepts', 'kubernetes-networking', 'pod IP assignment');
-  const env = runHook(RECALL, { prompt: 'ok' }, target);
-  assert.deepEqual(env, {}, 'trivial prompt → no recall');
-});
+// recall-surface now queries the warm Brain door (hybrid prose recall) instead of the wiki substring
+// engine — its dedicated coverage lives in recall-surface.test.cjs. Its fail-open-with-no-install-root
+// behavior is still exercised by the shared loop at the bottom of this file.
 
 // ── AC: recon freshness + code-intel push fires on file touch, first-touch gated ─
 
