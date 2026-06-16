@@ -12,6 +12,7 @@ const executor = require('../lib/executor.cjs');
 const onboard = require('../lib/onboard.cjs');
 const connect = require('../lib/connect.cjs');
 const statusline = require('../lib/statusline.cjs');
+const { convert } = require('../lib/convert.cjs');
 
 const PKG_ROOT = path.join(__dirname, '..');
 
@@ -112,6 +113,11 @@ Usage:
                                  resolved (or --path) statusline script, idempotently (append-only,
                                  never overwrites). init NEVER touches your statusline.
 
+  wrxn convert <file> [--cpu]    convert a source file to Markdown and print it. Per-format routing:
+                                 markitdown (html/docx/txt/pptx/xlsx) · docling (pdf, with automatic
+                                 CPU fallback on a GPU arch-crash) · pure-JS floor when Python is
+                                 absent. --cpu forces docling onto CPU from the first attempt.
+
   wrxn onboard [--root <dir>]    scaffold the Day-1 operator file set under context/ from a filled
                                  aios-intake.md (the deterministic half of the onboard skill;
                                  workspace installs only). Idempotent.
@@ -120,7 +126,7 @@ Profiles: --project (default, the dev pipeline + intelligence + enforcement) |
           --workspace (adds the operator layer: onboard/audit/level-up + intake + decisions log +
           connections registry).`;
 
-function main(argv) {
+async function main(argv) {
   const args = parseArgs(argv);
 
   if (args.flags.version) {
@@ -294,6 +300,19 @@ function main(argv) {
     return 0;
   }
 
+  if (cmd === 'convert') {
+    const file = args._[1];
+    if (!file) { process.stderr.write('wrxn: convert requires <file>\n'); return 2; }
+    try {
+      const md = await convert(path.resolve(file), { gpu: args.flags.cpu ? false : undefined });
+      process.stdout.write(md.endsWith('\n') ? md : md + '\n');
+      return 0;
+    } catch (err) {
+      process.stderr.write(`wrxn: ${err.message}\n`);
+      return 2;
+    }
+  }
+
   if (cmd === 'onboard') {
     const root = path.resolve(args.flags.root || process.cwd());
     let report;
@@ -397,4 +416,7 @@ function main(argv) {
   return 2;
 }
 
-process.exit(main(process.argv.slice(2)));
+main(process.argv.slice(2)).then(
+  (code) => process.exit(code),
+  (err) => { process.stderr.write(`wrxn: ${err && err.message ? err.message : err}\n`); process.exit(1); }
+);
