@@ -67,21 +67,51 @@ test('ingest writes a summary page + N note pages, each stamped derived_from', a
     assert.ok(fs.existsSync(page), `${slug}.md not written`);
     const body = fs.readFileSync(page, 'utf8');
     assert.match(body, /^---/, `${slug} missing frontmatter`);
-    assert.match(body, /derived_from: \.wrxn\/raw\/paper\.txt/, `${slug} missing derived_from provenance`);
+    // raw filename is content-hash-namespaced: paper.<8hex>.txt (provenance never collides)
+    assert.match(body, /derived_from: \.wrxn\/raw\/paper\.[0-9a-f]{8}\.txt/, `${slug} missing derived_from provenance`);
   }
   assert.equal(report.written.length, 3);
 });
 
 // ── AC: raw source placed/kept under .wrxn/raw/ ──────────────────────────────────
 
-test('the raw source is placed under .wrxn/raw/', async () => {
+test('the raw source is placed under .wrxn/raw/ (content-hash-namespaced)', async () => {
   const root = tmpRoot();
   const src = srcIn(root, 'paper.txt', 'ORIGINAL BYTES');
-  await ingest(src, { root, convert: convertStub().convert, distill: distillStub(PAGES).distill });
+  const report = await ingest(src, { root, convert: convertStub().convert, distill: distillStub(PAGES).distill });
 
-  const raw = path.join(root, '.wrxn', 'raw', 'paper.txt');
+  const raw = path.join(root, report.raw); // report.raw is the actual namespaced relpath
+  assert.match(report.raw, /^\.wrxn\/raw\/paper\.[0-9a-f]{8}\.txt$/, 'raw not namespaced');
   assert.ok(fs.existsSync(raw), 'raw copy not placed');
   assert.equal(fs.readFileSync(raw, 'utf8'), 'ORIGINAL BYTES');
+});
+
+// ── HIGH: same-basename, different-content sources never collide in the raw zone ──
+
+test('two same-basename different-content sources → two distinct raw files, correct provenance each', async () => {
+  const root = tmpRoot();
+  fs.mkdirSync(path.join(root, 'a'));
+  fs.mkdirSync(path.join(root, 'b'));
+  const srcA = srcIn(root, path.join('a', 'paper.txt'), 'BYTES A');
+  const srcB = srcIn(root, path.join('b', 'paper.txt'), 'BYTES B — DIFFERENT');
+
+  const pagesFor = (p) => ({ summary: { slug: `${p}-summary`, body: 'x' }, notes: [] });
+  const rA = await ingest(srcA, { root, convert: convertStub().convert, distill: distillStub(pagesFor('a')).distill });
+  const rB = await ingest(srcB, { root, convert: convertStub().convert, distill: distillStub(pagesFor('b')).distill });
+
+  // distinct raw paths
+  assert.notEqual(rA.raw, rB.raw, 'same-basename sources collided to one raw path');
+  // each raw file holds its OWN bytes
+  assert.equal(fs.readFileSync(path.join(root, rA.raw), 'utf8'), 'BYTES A');
+  assert.equal(fs.readFileSync(path.join(root, rB.raw), 'utf8'), 'BYTES B — DIFFERENT');
+  // two files actually exist in the raw zone
+  const rawFiles = fs.readdirSync(path.join(root, '.wrxn', 'raw'));
+  assert.equal(rawFiles.length, 2, `expected 2 raw files, got ${rawFiles.length}`);
+  // each page's derived_from points at the ACTUAL stored raw path
+  const pageA = fs.readFileSync(path.join(root, '.wrxn', 'wiki', 'concepts', 'a-summary.md'), 'utf8');
+  const pageB = fs.readFileSync(path.join(root, '.wrxn', 'wiki', 'concepts', 'b-summary.md'), 'utf8');
+  assert.match(pageA, new RegExp(`derived_from: ${rA.raw.replace(/[.\\]/g, '\\$&')}`));
+  assert.match(pageB, new RegExp(`derived_from: ${rB.raw.replace(/[.\\]/g, '\\$&')}`));
 });
 
 // ── the convert boundary is real-injectable: distill sees its output ─────────────
@@ -168,7 +198,7 @@ test('CLI: wrxn ingest <txt> --distillation writes pages', () => {
 
   const page = path.join(root, '.wrxn', 'wiki', 'concepts', 'paper-summary.md');
   assert.ok(fs.existsSync(page));
-  assert.match(fs.readFileSync(page, 'utf8'), /derived_from: \.wrxn\/raw\/note\.txt/);
+  assert.match(fs.readFileSync(page, 'utf8'), /derived_from: \.wrxn\/raw\/note\.[0-9a-f]{8}\.txt/);
 });
 
 test('CLI: wrxn ingest with no file exits 2', () => {
@@ -183,4 +213,93 @@ test('CLI: wrxn ingest without a distillation points to the ingest skill and exi
     () => execFileSync('node', [WRXN, 'ingest', src, '--root', root], { encoding: 'utf8', stdio: 'pipe' }),
     (err) => err.status === 2 && /ingest skill|distillation/i.test(String(err.stderr))
   );
+});
+
+// ── MED: intra-run slug collision in the distillation is a DISTINCT error ─────────
+
+test('an intra-run duplicate slug in the distillation throws a distinct error', async () => {
+  const root = tmpRoot();
+  const src = srcIn(root, 'paper.txt');
+  const dup = { summary: { slug: 'same', body: 'a' }, notes: [{ slug: 'same', body: 'b' }] };
+  await assert.rejects(
+    () => ingest(src, { root, convert: convertStub().convert, distill: distillStub(dup).distill }),
+    /duplicate slug/i
+  );
+});
+
+// ── MED: atomic write — a pre-existing page is skipped, not clobbered, even via wx ─
+
+test('a dangling symlink at the destination page path is NOT followed (wx/O_EXCL)', async () => {
+  const root = tmpRoot();
+  const src = srcIn(root, 'paper.txt');
+  const concepts = path.join(root, '.wrxn', 'wiki', 'concepts');
+  fs.mkdirSync(concepts, { recursive: true });
+  const dest = path.join(concepts, 'paper-summary.md');
+  const target = path.join(root, 'OUTSIDE-TARGET');
+  fs.symlinkSync(target, dest); // dangling symlink at the page path
+
+  const report = await ingest(src, { root, convert: convertStub().convert, distill: distillStub(PAGES).distill });
+
+  assert.ok(!fs.existsSync(target), 'wx followed the symlink and wrote through it');
+  assert.ok(report.skipped.some((p) => p.endsWith('paper-summary.md')), 'symlinked dest not treated as a skip');
+});
+
+// ── MED: frontmatter injection via crafted source filename ───────────────────────
+
+test('a source filename with embedded newlines is rejected (frontmatter injection), no stray work', async () => {
+  const root = tmpRoot();
+  const evil = 'x\ninjected_key: true\n.txt';
+  const src = path.join(root, evil);
+  fs.writeFileSync(src, 'body');
+  const { convert, calls } = convertStub();
+
+  await assert.rejects(
+    () => ingest(src, { root, convert, distill: distillStub(PAGES).distill }),
+    /control|invalid|filename/i
+  );
+  assert.equal(calls.length, 0, 'converted before the filename guard (stray work)');
+  assert.ok(!fs.existsSync(path.join(root, '.wrxn', 'raw')), 'raw zone created before the filename guard');
+});
+
+// ── LOW: distill boundary validated BEFORE convert + raw copy (fail fast) ─────────
+
+test('no distillation fails fast — convert is not called and no raw zone is created', async () => {
+  const root = tmpRoot();
+  const src = srcIn(root, 'paper.txt');
+  const { convert, calls } = convertStub();
+
+  await assert.rejects(
+    () => ingest(src, { root, convert }), // no distill → defaultDistill
+    /distillation|ingest skill/i
+  );
+  assert.equal(calls.length, 0, 'convert ran before the distill boundary was validated');
+  assert.ok(!fs.existsSync(path.join(root, '.wrxn', 'raw')), 'raw zone created on the pure-error path');
+});
+
+// ── LOW: unbounded note count is capped ──────────────────────────────────────────
+
+test('a distillation with too many notes is rejected', async () => {
+  const root = tmpRoot();
+  const src = srcIn(root, 'paper.txt');
+  const notes = Array.from({ length: 101 }, (_, i) => ({ slug: `note-${i}`, body: 'x' }));
+  const flood = { summary: { slug: 'sum', body: 'x' }, notes };
+  await assert.rejects(
+    () => ingest(src, { root, convert: convertStub().convert, distill: distillStub(flood).distill }),
+    /notes/i
+  );
+});
+
+// ── LOW: symlinked source is refused ─────────────────────────────────────────────
+
+test('a symlinked source is refused (no arbitrary file copied into the raw zone)', async () => {
+  const root = tmpRoot();
+  const secret = srcIn(root, 'secret.txt', 'SECRET');
+  const link = path.join(root, 'link.txt');
+  fs.symlinkSync(secret, link);
+
+  await assert.rejects(
+    () => ingest(link, { root, convert: convertStub().convert, distill: distillStub(PAGES).distill }),
+    /symlink/i
+  );
+  assert.ok(!fs.existsSync(path.join(root, '.wrxn', 'raw')), 'raw zone created for a symlinked source');
 });
