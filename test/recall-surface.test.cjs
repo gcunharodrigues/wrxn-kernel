@@ -14,6 +14,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const net = require('net');
+const http = require('http');
 const path = require('path');
 const { execFileSync, spawnSync } = require('child_process');
 
@@ -32,11 +33,16 @@ function installRoot(prefix) {
   return root;
 }
 
-// Write the recon-wrxn serve-door discovery file.
+// Write the recon-wrxn serve-door discovery file. Chmod 0600 to model a properly-secured producer:
+// the hook refuses a group/world-writable discovery file (it could have been planted), so a trusted
+// fixture must be tightly permissioned. The endpoint path is returned so a test can loosen it.
 function writeEndpoint(root, body) {
   const dir = path.join(root, '.recon-wrxn');
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, 'serve-endpoint.json'), typeof body === 'string' ? body : JSON.stringify(body));
+  const file = path.join(dir, 'serve-endpoint.json');
+  fs.writeFileSync(file, typeof body === 'string' ? body : JSON.stringify(body));
+  fs.chmodSync(file, 0o600);
+  return file;
 }
 
 // A guaranteed-dead pid: spawnSync waits for exit + reap, so the pid is freed.
@@ -126,6 +132,16 @@ test('decideRecall: cosine exactly 0.4 qualifies; 0.39 (no consensus) abstains',
   assert.equal(recall.decideRecall([hit({ sources: ['semantic'], semanticScore: 0.39 })]), null, 'just below the floor abstains');
 });
 
+test('qualifies: a semanticScore WITHOUT "semantic" in sources does NOT clear the floor (producer-drift defense)', () => {
+  // The floor clause requires the dense arm to actually be present — not just a stray cosine number.
+  // Today these always co-occur; this guards against a future producer emitting a score without the
+  // source tag, which must not be trusted as a dense-arm relevance signal.
+  const drift = hit({ sources: ['bm25'], semanticScore: 0.9, score: 0.5 });
+  assert.equal(recall.qualifies(drift), false, 'a high cosine with no semantic source is not a floor pass');
+  assert.equal(recall.decideRecall([drift]), null, 'and it does not surface');
+  assert.equal(recall.qualifies(hit({ sources: ['semantic'], semanticScore: 0.9 })), true, 'with the dense arm present it qualifies');
+});
+
 test('decideRecall: injects at most 3 hits and stays <= 600 chars', () => {
   const many = Array.from({ length: 6 }, (_, i) =>
     hit({
@@ -173,7 +189,7 @@ test('recallFromDoor: a warm door returns qualifying prose hits → injects the 
   // Cross-repo contract pins (slice 03 / QA): endpoint port, find path, body shape, trimmed query.
   assert.equal(seen.path, '/api/tools/recon_find', 'POSTs the recon_find door');
   assert.equal(seen.port, 65001, 'uses the port from serve-endpoint.json');
-  assert.equal(seen.body.limit, 3, 'asks for the top 3');
+  assert.equal(seen.body.limit, 15, 'fetches WIDER than the TOP_N it injects, so prose below code hits is not truncated pre-filter');
   assert.equal(seen.body.query, 'how does brain door discovery work', 'the prompt is trimmed');
   assert.ok(!('type' in seen.body), 'sends NO type — prose scope is a post-filter, not a request field');
 });
@@ -224,6 +240,103 @@ test('recallFromDoor: a dead-pid endpoint → null, and the transport is NEVER c
   const res = await recall.recallFromDoor(root, 'a prompt about kubernetes networking', { transport: spy });
   assert.equal(res, null, 'a dead pid means the brain is not warm');
   assert.equal(called, false);
+});
+
+test('recallFromDoor: fetches WIDER than TOP_N so prose ranked below the code hits still surfaces', async () => {
+  // Repro of the prose under-recall bug: the door ranks code in the top slots; a qualifying prose page
+  // sits at rank 5. A narrow limit:3 fetch truncated it away BEFORE the prose post-filter (a spurious
+  // Abstain). The fix fetches wide, THEN prose-filters + gates, THEN caps at TOP_N.
+  const root = installRoot('wrxn-recall-wide-');
+  writeEndpoint(root, { pid: process.pid, port: 65013 });
+  const corpus = [
+    { id: 'c1', name: 'doA', type: 'Function', file: 'lib/a.cjs', line: 1, sources: ['bm25', 'semantic'], semanticScore: 0.9 },
+    { id: 'c2', name: 'doB', type: 'Function', file: 'lib/b.cjs', line: 1, sources: ['bm25', 'semantic'], semanticScore: 0.9 },
+    { id: 'c3', name: 'doC', type: 'Function', file: 'lib/c.cjs', line: 1, sources: ['bm25', 'semantic'], semanticScore: 0.9 },
+    { id: 'p4', name: 'Unrelated note', type: 'Page', file: '.wrxn/wiki/concepts/unrelated.md', line: 1, sources: ['bm25'], semanticScore: 0.1 },
+    { id: 'p5', name: 'Deploy runbook', type: 'Page', file: '.wrxn/wiki/concepts/deploy-runbook.md', line: 1, sources: ['semantic'], semanticScore: 0.7 },
+  ];
+  // A transport that, like the real door, RESPECTS the requested limit (truncates to body.limit).
+  const transport = async ({ body }) => ({ statusCode: 200, body: JSON.stringify({ result: '', hits: corpus.slice(0, body.limit) }) });
+  const block = await recall.recallFromDoor(root, 'how do we deploy the runbook to prod', { transport });
+  assert.ok(block, 'the qualifying prose at rank 5 surfaces (no spurious Abstain)');
+  assert.match(block, /deploy-runbook/, 'the rank-5 prose page is the one injected');
+});
+
+// ── ownership/permission guard on the discovery file (a planted/loose file is not warm) ─────
+
+test('recallFromDoor: a group/world-writable endpoint is refused (not warm), transport NEVER called', async () => {
+  const root = installRoot('wrxn-recall-wwrite-');
+  const file = writeEndpoint(root, { pid: process.pid, port: 65010 });
+  fs.chmodSync(file, 0o666); // an attacker could rewrite host/port → prompt exfil / context injection
+  let called = false;
+  const spy = async () => { called = true; return { statusCode: 200, body: '{"hits":[]}' }; };
+  assert.equal(await recall.recallFromDoor(root, 'a prompt long enough to query the door', { transport: spy }), null);
+  assert.equal(called, false, 'no network POST to a discovery file an attacker could have planted');
+});
+
+test('recallFromDoor: a foreign-owned endpoint (uid mismatch) is refused, transport NEVER called', async () => {
+  const root = installRoot('wrxn-recall-foreign-');
+  writeEndpoint(root, { pid: process.pid, port: 65011 }); // 0600, but pretend a different user owns it
+  const realGetuid = process.getuid;
+  process.getuid = () => realGetuid.call(process) + 1;
+  try {
+    let called = false;
+    const spy = async () => { called = true; return { statusCode: 200, body: '{"hits":[]}' }; };
+    assert.equal(await recall.recallFromDoor(root, 'a prompt long enough to query the door', { transport: spy }), null);
+    assert.equal(called, false);
+  } finally {
+    process.getuid = realGetuid;
+  }
+});
+
+test('discoverEndpoint: a well-owned 0600 endpoint is trusted (warm)', () => {
+  const root = installRoot('wrxn-recall-owned-');
+  writeEndpoint(root, { pid: process.pid, port: 65012 });
+  assert.deepEqual(recall.discoverEndpoint(root), { pid: process.pid, port: 65012 }, 'a tightly-owned file is warm');
+});
+
+// ── httpTransport: wall-clock deadline + response-body cap (the real transport) ──────
+
+test('httpTransport: an idle-evading trickle response is bounded by the wall-clock (no hang)', async () => {
+  // The idle req.setTimeout never fires against a dribble; the independent wall-clock must still bound
+  // the request so a trickle can't delay a prompt past the hook budget.
+  let iv = null, liveRes = null;
+  const server = http.createServer((req, res) => {
+    liveRes = res;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    iv = setInterval(() => { try { res.write('x'); } catch {} }, 20);
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const port = server.address().port;
+  try {
+    const start = Date.now();
+    const outcome = await Promise.race([
+      recall.httpTransport({ port, path: '/x', body: {}, timeoutMs: 100 }).then(() => 'resolved', (e) => 'rejected:' + e.message),
+      new Promise((r) => setTimeout(() => r('watchdog'), 1500)),
+    ]);
+    assert.match(outcome, /^rejected:.*timeout/i, 'the wall-clock rejected the stalled request (not hung, not resolved)');
+    assert.ok(Date.now() - start < 1400, 'rejected well within the watchdog window');
+  } finally {
+    if (iv) clearInterval(iv);
+    if (liveRes) { try { liveRes.destroy(); } catch {} }
+    server.close();
+  }
+});
+
+test('httpTransport: a response body over the cap is aborted, not buffered unbounded', async () => {
+  const huge = Buffer.alloc(300 * 1024, 0x78); // 300KB > the ~256KB cap
+  const server = http.createServer((req, res) => { res.writeHead(200); res.end(huge); });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const port = server.address().port;
+  try {
+    await assert.rejects(
+      () => recall.httpTransport({ port, path: '/x', body: {}, timeoutMs: 2000 }),
+      /too large|cap|exceed/i,
+      'an over-cap body is rejected rather than accumulated'
+    );
+  } finally {
+    server.close();
+  }
 });
 
 test('recallFromDoor: the query is capped at 512 chars', async () => {

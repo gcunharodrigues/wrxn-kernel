@@ -30,10 +30,15 @@ function tmp(prefix) {
 }
 
 // Write the recon-wrxn serve-door discovery file under <root>/.recon-wrxn/serve-endpoint.json.
+// Chmod 0600 to model a properly-secured producer: the discovery contract refuses a group/world-
+// writable file (it could have been planted), so a trusted fixture must be tightly permissioned.
 function writeEndpoint(root, body) {
   const dir = path.join(root, '.recon-wrxn');
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, 'serve-endpoint.json'), typeof body === 'string' ? body : JSON.stringify(body));
+  const file = path.join(dir, 'serve-endpoint.json');
+  fs.writeFileSync(file, typeof body === 'string' ? body : JSON.stringify(body));
+  fs.chmodSync(file, 0o600);
+  return file;
 }
 
 // A guaranteed-dead pid: spawnSync waits for exit + reap, so the pid is freed.
@@ -155,20 +160,26 @@ test('query: --neighbors fetches each hit\'s 1-hop via recon_explain (name+file)
   assert.equal(res.hits[0].neighbors[0].name, 'login');
 });
 
-test('query: --neighbors tolerates the relationship-bucket explain shape', async () => {
-  const hits = [fhit({ name: 'authFlow', file: 'lib/auth.cjs' })];
+test('query+format: --neighbors consumes the REAL {result, neighbors[]} explain shape and renders [relationship]', async () => {
+  // The door's recon_explain now returns a structured { result, neighbors: NeighborHit[] } with
+  // NeighborHit = { name, type, file, line, relationship } (relationship ∈ caller|callee|import|…).
+  // The CLI consumes that shape directly — no invented relationship-bucket tolerance.
+  const hits = [fhit({ name: 'authFlow', file: 'lib/auth.cjs', line: 10 })];
   const transport = fakeTransport({
-    find: () => ({ hits }),
+    find: () => ({ result: '## hits', hits }),
     explain: () => ({
-      callers: [{ name: 'login', type: 'Function', file: 'lib/login.cjs', line: 3 }],
-      callees: [{ name: 'hash', type: 'Function', file: 'lib/hash.cjs', line: 8 }],
+      result: '## neighbors',
+      neighbors: [
+        { name: 'login', type: 'Function', file: 'lib/login.cjs', line: 3, relationship: 'caller' },
+        { name: 'hash', type: 'Function', file: 'lib/hash.cjs', line: 8, relationship: 'callee' },
+      ],
     }),
   });
   const res = await brain.query('q', { neighbors: true }, { discover: warmDiscover, transport });
-  const names = res.hits[0].neighbors.map((n) => n.name).sort();
-  assert.deepEqual(names, ['hash', 'login']);
-  const rels = res.hits[0].neighbors.map((n) => n.relationship).sort();
-  assert.deepEqual(rels, ['callees', 'callers'], 'bucket name becomes the relationship tag');
+  assert.deepEqual(res.hits[0].neighbors.map((n) => n.name).sort(), ['hash', 'login']);
+  assert.deepEqual(res.hits[0].neighbors.map((n) => n.relationship).sort(), ['callee', 'caller'], 'the real relationship survives');
+  const out = brain.formatHits(res.hits, { neighbors: true });
+  assert.match(out, /^ {4}- login · Function · lib\/login\.cjs:3 \[caller\]$/m, 'neighbor rendered indented with its [relationship]');
 });
 
 test('query: without --neighbors, recon_explain is never called', async () => {
@@ -214,6 +225,39 @@ test('query: a dead-pid endpoint file ⇒ not warm ⇒ a clear error (real disco
   await assert.rejects(() => brain.query('q', {}, { root }), /not warm|recon serve/i);
 });
 
+// ── ownership/permission guard on the discovery file (a planted/loose file is not warm) ─────
+
+test('query: a group/world-writable endpoint file ⇒ not warm (refused), and the door is NEVER called', async () => {
+  const root = tmp('wrxn-brain-wwrite-');
+  const file = writeEndpoint(root, { pid: process.pid, port: 5 });
+  fs.chmodSync(file, 0o666); // group + world writable: an attacker could rewrite host/port → exfil
+  let called = false;
+  const transport = async () => { called = true; return { statusCode: 200, body: '{"hits":[]}' }; };
+  await assert.rejects(() => brain.query('q', {}, { root, transport }), /not warm|recon serve/i);
+  assert.equal(called, false, 'no door request to a discovery file an attacker could have planted');
+});
+
+test('query: a foreign-owned endpoint file (uid mismatch) ⇒ not warm, door NEVER called', async () => {
+  const root = tmp('wrxn-brain-foreign-');
+  writeEndpoint(root, { pid: process.pid, port: 5 }); // 0600, but we pretend a different user owns it
+  const realGetuid = process.getuid;
+  process.getuid = () => realGetuid.call(process) + 1;
+  try {
+    let called = false;
+    const transport = async () => { called = true; return { statusCode: 200, body: '{"hits":[]}' }; };
+    await assert.rejects(() => brain.query('q', {}, { root, transport }), /not warm|recon serve/i);
+    assert.equal(called, false);
+  } finally {
+    process.getuid = realGetuid;
+  }
+});
+
+test('discoverEndpoint: a well-owned 0600 endpoint is trusted (warm)', () => {
+  const root = tmp('wrxn-brain-owned-');
+  writeEndpoint(root, { pid: process.pid, port: 5 });
+  assert.deepEqual(brain.discoverEndpoint(root), { pid: process.pid, port: 5, root }, 'a tightly-owned file is warm');
+});
+
 // ── AC-5: malformed / non-200 door response ⇒ a clean error, not a crash ─────────────
 
 test('query: a malformed (non-JSON) door body ⇒ a clean error', async () => {
@@ -235,6 +279,50 @@ test('query: an empty hits array is a valid success (no results), not an error',
   const transport = fakeTransport({ find: () => ({ result: 'none', hits: [] }) });
   const res = await brain.query('q', {}, { discover: warmDiscover, transport });
   assert.deepEqual(res.hits, []);
+});
+
+// ── httpTransport: wall-clock deadline + response-body cap (the real transport) ──────
+
+test('httpTransport: an idle-evading trickle response is bounded by the wall-clock (no hang)', async () => {
+  // The idle req.setTimeout never fires against a dribble; an independent wall-clock must still bound
+  // the request so a trickle attacker can't hang the caller indefinitely.
+  let iv = null, liveRes = null;
+  const server = http.createServer((req, res) => {
+    liveRes = res;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    iv = setInterval(() => { try { res.write('x'); } catch {} }, 20);
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const port = server.address().port;
+  try {
+    const start = Date.now();
+    const outcome = await Promise.race([
+      brain.httpTransport({ port, path: '/x', body: {}, timeoutMs: 120 }).then(() => 'resolved', (e) => 'rejected:' + e.message),
+      new Promise((r) => setTimeout(() => r('watchdog'), 1500)),
+    ]);
+    assert.match(outcome, /^rejected:.*timeout/i, 'the wall-clock rejected the stalled request (not hung, not resolved)');
+    assert.ok(Date.now() - start < 1400, 'rejected well within the watchdog window');
+  } finally {
+    if (iv) clearInterval(iv);
+    if (liveRes) { try { liveRes.destroy(); } catch {} }
+    server.close();
+  }
+});
+
+test('httpTransport: a response body over the cap is aborted, not buffered unbounded', async () => {
+  const huge = Buffer.alloc(300 * 1024, 0x78); // 300KB > the ~256KB cap
+  const server = http.createServer((req, res) => { res.writeHead(200); res.end(huge); });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const port = server.address().port;
+  try {
+    await assert.rejects(
+      () => brain.httpTransport({ port, path: '/x', body: {}, timeoutMs: 2000 }),
+      /too large|cap|exceed/i,
+      'an over-cap body is rejected rather than accumulated'
+    );
+  } finally {
+    server.close();
+  }
 });
 
 // ── discoverEndpoint / pidAlive (the cross-repo discovery contract) ──────────────────

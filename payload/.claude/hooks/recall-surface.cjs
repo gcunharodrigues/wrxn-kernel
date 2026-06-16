@@ -26,9 +26,11 @@ const path = require('path');
 
 const MIN_PROMPT_LEN = 8;          // skip trivial prompts ("ok", "yes")
 const MAX_QUERY_CHARS = 512;       // trim the prompt before querying the door
-const QUERY_LIMIT = 3;             // ask the door for the top 3
+const FETCH_LIMIT = 15;            // ask the door WIDE — fetch is decoupled from inject so prose ranked
+                                   // below the whole-brain code hits is not truncated before we filter
 const TIMEOUT_MS = 150;            // hard client budget — never delay a prompt past this
-const TOP_N = 3;                   // inject at most 3 hits
+const MAX_RESPONSE_BYTES = 256 * 1024; // hard cap on an accumulated door response body (anti-flood)
+const TOP_N = 3;                   // inject at most 3 hits (the wide fetch is post-filtered down to this)
 const MAX_BLOCK_CHARS = 600;       // injection size cap (ADR 0002: inject little, high-signal)
 const SEMANTIC_FLOOR = 0.4;        // dense cosine floor (reused from P1.5)
 const PROSE_TYPES = new Set(['Page', 'Section']); // prose scope — drop code symbols
@@ -66,11 +68,15 @@ function hasConsensus(hit) {
 }
 
 // Qualify on the PER-ARM signal only: the semantic cosine floor OR consensus. NEVER the fused
-// `score` (RRF is a rank-based consensus, not a relevance magnitude — ADR 0002). An absent/NaN
-// semanticScore can never clear the floor; only consensus can rescue such a hit.
+// `score` (RRF is a rank-based consensus, not a relevance magnitude — ADR 0002). The floor clause
+// requires the dense arm to actually be PRESENT in `sources` (not just a stray semanticScore) —
+// today these co-occur, but this is a defense against a future producer emitting a score without the
+// 'semantic' tag. An absent/NaN semanticScore can never clear the floor; only consensus rescues it.
 function qualifies(hit) {
   const sem = Number(hit && hit.semanticScore);
-  const floorOk = Number.isFinite(sem) && sem >= SEMANTIC_FLOOR;
+  const s = hit && hit.sources;
+  const hasSemantic = Array.isArray(s) && s.includes('semantic');
+  const floorOk = Number.isFinite(sem) && sem >= SEMANTIC_FLOOR && hasSemantic;
   return floorOk || hasConsensus(hit);
 }
 
@@ -137,14 +143,34 @@ function pidAlive(pid) {
   }
 }
 
+// Refuse a discovery file another user could have planted, or that is group/world-writable — trusting
+// it would let a hostile workspace point the door host/port at an exfil/injection sink (the hook feeds
+// the door's response into the prompt context). lstat (not stat) so a symlink's OWN ownership/mode is
+// judged. A platform without getuid skips the uid check but still enforces the mode check. Any fault →
+// not trusted (treated as not-warm).
+function endpointTrusted(file) {
+  let st;
+  try {
+    st = fs.lstatSync(file);
+  } catch {
+    return false;
+  }
+  if (typeof process.getuid === 'function' && st.uid !== process.getuid()) return false; // foreign owner
+  if ((st.mode & 0o022) !== 0) return false; // group/world-writable
+  return true;
+}
+
 // Discover the warm serve door from <root>/.recon-wrxn/serve-endpoint.json = {pid,port}. Returns
-// {pid,port} only when the file is present, well-formed, and the pid is alive — else null (not warm).
+// {pid,port} only when the file is well-owned (not planted), present, well-formed, and the pid is
+// alive — else null (not warm).
 function discoverEndpoint(root) {
+  const file = path.join(root, ENDPOINT_REL);
+  if (!endpointTrusted(file)) return null; // absent, foreign-owned, or loose perms → not warm
   let raw;
   try {
-    raw = fs.readFileSync(path.join(root, ENDPOINT_REL), 'utf8');
+    raw = fs.readFileSync(file, 'utf8');
   } catch {
-    return null; // absent
+    return null; // absent (race)
   }
   let obj;
   try {
@@ -165,6 +191,15 @@ function discoverEndpoint(root) {
 function httpTransport({ port, path: reqPath, body, timeoutMs }) {
   return new Promise((resolve, reject) => {
     const payload = Buffer.from(JSON.stringify(body));
+    const deadline = timeoutMs || TIMEOUT_MS;
+    let settled = false;
+    let wall = null;
+    const done = (fn, arg) => {
+      if (settled) return;
+      settled = true;
+      if (wall) clearTimeout(wall);
+      fn(arg);
+    };
     const req = http.request(
       {
         host: '127.0.0.1',
@@ -175,13 +210,21 @@ function httpTransport({ port, path: reqPath, body, timeoutMs }) {
       },
       (res) => {
         const chunks = [];
-        res.on('data', (c) => chunks.push(c));
-        res.on('end', () => resolve({ statusCode: res.statusCode, body: Buffer.concat(chunks).toString('utf8') }));
-        res.on('error', reject);
+        let total = 0;
+        res.on('data', (c) => {
+          total += c.length;
+          if (total > MAX_RESPONSE_BYTES) { req.destroy(new Error('recall door response too large')); return; }
+          chunks.push(c);
+        });
+        res.on('end', () => done(resolve, { statusCode: res.statusCode, body: Buffer.concat(chunks).toString('utf8') }));
+        res.on('error', (e) => done(reject, e));
       }
     );
-    req.on('error', reject);
-    req.setTimeout(timeoutMs, () => req.destroy(new Error('recall door timeout')));
+    req.on('error', (e) => done(reject, e));
+    // Idle timeout (no bytes for `deadline`) AND an independent wall-clock: the latter bounds a trickle
+    // attacker that dribbles bytes to keep the idle timer from ever firing past the hook budget.
+    req.setTimeout(deadline, () => req.destroy(new Error('recall door timeout')));
+    wall = setTimeout(() => req.destroy(new Error('recall door wall-clock timeout')), deadline);
     req.write(payload);
     req.end();
   });
@@ -200,7 +243,7 @@ async function recallFromDoor(root, prompt, { transport, timeoutMs } = {}) {
     resp = await (transport || httpTransport)({
       port: door.port,
       path: FIND_PATH,
-      body: { query, limit: QUERY_LIMIT },
+      body: { query, limit: FETCH_LIMIT },
       timeoutMs: timeoutMs || TIMEOUT_MS,
     });
   } catch {
