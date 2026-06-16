@@ -168,6 +168,23 @@ test('an unsupported extension throws', async () => {
   await assert.rejects(() => convert(src, { run: runStub(() => OK('x')).run }), /unsupported/i);
 });
 
+// ── missing source: a clean error BEFORE any spawn (multiformat-distill-08) ──────
+// Mirror lib/ingest.cjs's source-not-found guard: a missing file must never reach the converter
+// subprocess, whose Python traceback (markitdown/docling) would otherwise leak to the user verbatim.
+
+test('a missing source throws a clean "source not found" error before any converter spawn', async () => {
+  const missing = path.join(os.tmpdir(), 'wrxn-convert-missing-xyz', 'nope.html');
+  // Simulate the real markitdown leaking a Python traceback on a bad path — the pre-check must fire
+  // first so this run is NEVER reached (and the traceback never surfaces).
+  const traceback = 'Traceback (most recent call last):\n  File "<venv>/bin/markitdown", line 6, in <module>\n    sys.exit(main())';
+  const { run, calls } = runStub(() => ({ ok: false, error: { code: 'EXIT', status: 1, message: traceback } }));
+  await assert.rejects(
+    () => convert(missing, { run, floor: floorStub().floor }),
+    (err) => /source not found/i.test(err.message) && !/traceback/i.test(err.message),
+  );
+  assert.equal(calls.length, 0, 'pre-check must reject before any converter spawn');
+});
+
 // ── CLI: wrxn convert <file> prints the markdown (txt path is zero-dep, real) ────
 
 test('CLI: wrxn convert <txt> prints the file content', () => {
