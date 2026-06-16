@@ -11,6 +11,7 @@ const worktree = require('../lib/worktree.cjs');
 const executor = require('../lib/executor.cjs');
 const onboard = require('../lib/onboard.cjs');
 const connect = require('../lib/connect.cjs');
+const brain = require('../lib/brain.cjs');
 const statusline = require('../lib/statusline.cjs');
 const { convert } = require('../lib/convert.cjs');
 const { ingest } = require('../lib/ingest.cjs');
@@ -58,6 +59,10 @@ function parseArgs(argv) {
       args.flags.probe = argv[++i];
     } else if (a === '--distillation') {
       args.flags.distillation = argv[++i];
+    } else if (a === '--limit') {
+      args.flags.limit = argv[++i];
+    } else if (a === '--type') {
+      args.flags.type = argv[++i];
     } else if (a === '--check-report') {
       args.flags['check-report'] = true;
     } else if (a.startsWith('--')) {
@@ -108,6 +113,17 @@ Usage:
                                  never the secret (registry is per-install state, never shipped).
       list                       print all registered connections (agent-readable JSON)
       get <name>                 print one connection by name
+
+  wrxn brain query "<q>" [--json] [--limit <n>] [--type <prose|code|NodeType>] [--neighbors] [--root <dir>]
+                                 ask the warm Brain (recon-wrxn's code+prose graph) from the terminal.
+                                 WHOLE-BRAIN by default. Discovers the live serve door via
+                                 .recon-wrxn/serve-endpoint.json and POSTs the query; prints ranked
+                                 hits (name · type · file:line). If the Brain is not warm (no live
+                                 serve), prints a clear error and exits non-zero — no cold load.
+                                 --json emits the structured hits · --limit asks the door for top n ·
+                                 --type post-filters (prose=Page/Section, code=the rest, or an exact
+                                 NodeType) · --neighbors expands each hit to its 1-hop graph neighbors
+                                 (callers/callees/relationships via recon_explain).
 
   wrxn statusline [--inject [--path <script>]]
                                  SYNAPSE live-window writer. With no flag: report whether a statusline
@@ -402,6 +418,32 @@ async function main(argv) {
       }
       process.stderr.write(`wrxn: unknown connect subcommand "${sub || ''}"\n\n${USAGE}\n`);
       return 2;
+    } catch (err) {
+      process.stderr.write(`wrxn: ${err.message}\n`);
+      return 2;
+    }
+  }
+
+  if (cmd === 'brain') {
+    const sub = args._[1];
+    if (sub !== 'query') {
+      process.stderr.write(`wrxn: unknown brain subcommand "${sub || ''}" (expected: query)\n\n${USAGE}\n`);
+      return 2;
+    }
+    const q = args._[2];
+    if (!q) { process.stderr.write('wrxn: brain query requires "<query>"\n'); return 2; }
+    const opts = { json: !!args.flags.json, neighbors: !!args.flags.neighbors };
+    if (args.flags.limit != null) {
+      const n = parseInt(args.flags.limit, 10);
+      if (!Number.isInteger(n) || n <= 0) { process.stderr.write('wrxn: --limit requires a positive integer\n'); return 2; }
+      opts.limit = n;
+    }
+    if (args.flags.type) opts.type = String(args.flags.type);
+    const root = path.resolve(args.flags.root || process.cwd());
+    try {
+      const res = await brain.query(q, opts, { root });
+      process.stdout.write(brain.formatHits(res.hits, opts) + '\n');
+      return 0;
     } catch (err) {
       process.stderr.write(`wrxn: ${err.message}\n`);
       return 2;
