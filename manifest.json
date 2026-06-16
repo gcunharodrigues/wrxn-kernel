@@ -149,6 +149,11 @@
       "profile": "project"
     },
     {
+      "path": ".claude/skills/ingest/SKILL.md",
+      "class": "managed",
+      "profile": "project"
+    },
+    {
       "path": ".claude/skills/memory/SKILL.md",
       "class": "managed",
       "profile": "project"
@@ -395,6 +400,11 @@
     },
     {
       "path": ".wrxn/history/.gitkeep",
+      "class": "state",
+      "profile": "project"
+    },
+    {
+      "path": ".wrxn/raw/.gitkeep",
       "class": "state",
       "profile": "project"
     },

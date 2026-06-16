@@ -13,6 +13,7 @@ const onboard = require('../lib/onboard.cjs');
 const connect = require('../lib/connect.cjs');
 const statusline = require('../lib/statusline.cjs');
 const { convert } = require('../lib/convert.cjs');
+const { ingest } = require('../lib/ingest.cjs');
 
 const PKG_ROOT = path.join(__dirname, '..');
 
@@ -55,6 +56,8 @@ function parseArgs(argv) {
       args.flags.owner = argv[++i];
     } else if (a === '--probe') {
       args.flags.probe = argv[++i];
+    } else if (a === '--distillation') {
+      args.flags.distillation = argv[++i];
     } else if (a === '--check-report') {
       args.flags['check-report'] = true;
     } else if (a.startsWith('--')) {
@@ -117,6 +120,15 @@ Usage:
                                  markitdown (html/docx/txt/pptx/xlsx) · docling (pdf, with automatic
                                  CPU fallback on a GPU arch-crash) · pure-JS floor when Python is
                                  absent. --cpu forces docling onto CPU from the first attempt.
+
+  wrxn ingest <file> [--distillation <result.json>] [--root <dir>]
+                                 distill a source into the memory wiki: convert (slice 05) → an LLM
+                                 (the ingest skill) produces a summary + N note pages → write them
+                                 to .wrxn/wiki/, each stamped derived_from the raw source, which is
+                                 kept under .wrxn/raw/. ADDITIVE-ONLY: an existing page is never
+                                 overwritten (re-runs are safe). --distillation feeds the skill's
+                                 result JSON (summary,notes); without it, the harness points you at
+                                 the ingest skill.
 
   wrxn onboard [--root <dir>]    scaffold the Day-1 operator file set under context/ from a filled
                                  aios-intake.md (the deterministic half of the onboard skill;
@@ -306,6 +318,30 @@ async function main(argv) {
     try {
       const md = await convert(path.resolve(file), { gpu: args.flags.cpu ? false : undefined });
       process.stdout.write(md.endsWith('\n') ? md : md + '\n');
+      return 0;
+    } catch (err) {
+      process.stderr.write(`wrxn: ${err.message}\n`);
+      return 2;
+    }
+  }
+
+  if (cmd === 'ingest') {
+    const file = args._[1];
+    if (!file) { process.stderr.write('wrxn: ingest requires <file>\n'); return 2; }
+    const root = path.resolve(args.flags.root || process.cwd());
+    // The distillation is the LLM step (the `ingest` skill). The CLI feeds its structured result via
+    // --distillation <result.json>; without one, the harness's defaultDistill points back to the skill.
+    let distill;
+    if (args.flags.distillation) {
+      const dpath = path.resolve(args.flags.distillation);
+      distill = () => JSON.parse(fs.readFileSync(dpath, 'utf8'));
+    }
+    try {
+      const report = await ingest(path.resolve(file), { root, ...(distill ? { distill } : {}) });
+      process.stdout.write(`wrxn ingest ${report.source} → raw ${report.raw}\n`);
+      for (const p of report.written) process.stdout.write(`  wrote   ${p}\n`);
+      for (const p of report.skipped) process.stdout.write(`  skipped ${p} (exists — additive-only, never clobbered)\n`);
+      process.stdout.write(`${report.written.length} written, ${report.skipped.length} skipped.\n`);
       return 0;
     } catch (err) {
       process.stderr.write(`wrxn: ${err.message}\n`);
