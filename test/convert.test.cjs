@@ -52,6 +52,7 @@ function floorStub() {
 const OK = (md) => ({ ok: true, markdown: md });
 const ENOENT = { ok: false, error: { code: 'ENOENT', message: 'not installed' } };
 const CRASH = { ok: false, error: { code: 'CRASH', status: 1, message: 'CUDA error: no kernel image is available for execution on the device (sm_61)' } };
+const EXIT = { ok: false, error: { code: 'EXIT', status: 1, message: 'docling: failed to parse malformed PDF' } };
 
 // ── routing: markitdown-primary formats ────────────────────────────────────────
 
@@ -128,6 +129,21 @@ test('docling crash → CPU retry → CPU ENOENT degrades to the floor', async (
   const md = await convert(src, { run, floor });
   assert.equal(md, 'FLOOR:pdf');
   assert.deepEqual(calls.map((c) => c.fmt), ['pdf']);
+});
+
+test('docling EXIT (non-crash, non-ENOENT — e.g. malformed PDF) throws, no CPU retry', async () => {
+  const src = tmpFile('paper.pdf', '%PDF');
+  const { run, calls } = runStub(() => EXIT);
+  await assert.rejects(() => convert(src, { run, floor: floorStub().floor }), /docling/i);
+  assert.equal(calls.length, 1, 'EXIT is not an arch-crash → no CPU retry');
+});
+
+test('gpu:false + CPU attempt crashes → no retry loop, convert rejects (final throw)', async () => {
+  const src = tmpFile('paper.pdf', '%PDF');
+  const { run, calls } = runStub(() => CRASH); // forced-CPU first attempt crashes
+  await assert.rejects(() => convert(src, { run, floor: floorStub().floor, gpu: false }), /docling/i);
+  assert.equal(calls.length, 1, 'firstDevice is already cpu → CRASH branch is skipped, no retry');
+  assert.equal(calls[0].device, 'cpu');
 });
 
 test('gpu:false forces CPU on the first docling attempt (no GPU probe)', async () => {
