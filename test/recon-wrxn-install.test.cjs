@@ -16,7 +16,7 @@ const PKG_ROOT = path.join(__dirname, '..');
 const { init, RECEIPT } = require('../lib/install.cjs');
 const { loadManifest } = require('../lib/manifest.cjs');
 
-const RECON_VERSION = '6.0.0-wrxn.2';
+const RECON_VERSION = '6.0.0-wrxn.3';
 
 function tmp(p) {
   return fs.mkdtempSync(path.join(os.tmpdir(), p));
@@ -46,8 +46,20 @@ test('init lays .recon-wrxn.json matching recon-wrxn initConfig shape', () => {
   const target = tmp('wrxn-recon-cfg-');
   init({ pkgRoot: PKG_ROOT, target, profile: 'project' });
   const cfg = JSON.parse(fs.readFileSync(path.join(target, '.recon-wrxn.json'), 'utf8'));
-  // recon-wrxn's INIT_TEMPLATE: { projects:[], embeddings:false, watch:true, ignore:[] }
-  assert.deepEqual(cfg, { projects: [], embeddings: false, watch: true, ignore: [] });
+  // recon-wrxn's INIT_TEMPLATE (6.0.0-wrxn.3): { projects:[], embeddings:false, serveEmbed:true,
+  // serveHttp:false, watch:true, ignore:[] } — with serveHttp deliberately flipped to true so a
+  // session serve opens the concurrent read-only HTTP find door the warm-brain Recall hook and
+  // `wrxn brain query` reach (recon-wrxn ADR 0003). serveHttp/serveEmbed are real ReconConfig
+  // fields, so this is a chosen value on a real field, not an invented surface (No-Invention).
+  assert.deepEqual(cfg, { projects: [], embeddings: false, serveEmbed: true, serveHttp: true, watch: true, ignore: [] });
+});
+
+// the door bit specifically — maps to the AC "the seed enables the concurrent HTTP door"
+test('init lays a .recon-wrxn.json with the warm HTTP door enabled (serveHttp:true)', () => {
+  const target = tmp('wrxn-recon-door-');
+  init({ pkgRoot: PKG_ROOT, target, profile: 'project' });
+  const cfg = JSON.parse(fs.readFileSync(path.join(target, '.recon-wrxn.json'), 'utf8'));
+  assert.equal(cfg.serveHttp, true, 'the seed opens the concurrent HTTP find door on a session serve');
 });
 
 test('.recon-wrxn.json carries NO index.outputDir (hard No-Invention — the field does not exist)', () => {
