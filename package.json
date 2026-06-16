@@ -16,7 +16,7 @@
     "test": "node --test"
   },
   "dependencies": {
-    "recon-wrxn": "6.0.0-wrxn.1"
+    "recon-wrxn": "6.0.0-wrxn.2"
   },
   "engines": {
     "node": ">=20"
