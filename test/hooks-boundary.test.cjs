@@ -20,10 +20,17 @@ function tmp(p) {
 }
 
 function runHook(hookPath, event, env) {
+  // Hook contract tests must be deterministic regardless of the developer's shell. The hooks read
+  // operator config from WRXN_* env vars (WRXN_PUSH_RANGE, WRXN_REVIEW_MARKERS_DIR, WRXN_ACTIVE_AGENT,
+  // WRXN_TEST_CMD, …); a leaked ambient value (e.g. a devops session's WRXN_PUSH_RANGE=HEAD..HEAD)
+  // would hijack the hook under test. Strip all ambient WRXN_* first; each test re-adds exactly the
+  // vars it intends via `env`.
+  const base = { ...process.env };
+  for (const k of Object.keys(base)) if (k.startsWith('WRXN_')) delete base[k];
   const out = execFileSync('node', [hookPath], {
     input: JSON.stringify(event),
     encoding: 'utf8',
-    env: { ...process.env, ...env },
+    env: { ...base, ...env },
   });
   return out.trim() ? JSON.parse(out) : {};
 }
