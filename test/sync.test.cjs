@@ -460,3 +460,109 @@ test('DEMO: stale doc → propose → confirm → reconciled + re-stamped; re-ru
   assert.equal(fs.readFileSync(doc, 'utf8'), snapshot, 'round 2 declined → file unchanged');
   assert.equal(readWatermark(doc), 'NEW0002', 'round 2 declined → watermark unchanged');
 });
+
+// ── kernel-wave review fixes: M1 (current write-channel) · L2 (symlink) · L3 (body cap) ──
+// Three findings from .scratch/sync/SECURITY-kernel-wave.md. The `body` channel was well-gated; these
+// close the parallel holes: `current` is a SECOND write channel (it lands verbatim in the synced_to:
+// frontmatter at confirm), the lexical path check follows a planted symlink, and propose had no body cap.
+
+// M1(b): a secret in `current` is refused at propose (current is scanned now, not only body).
+test('M1 propose: a secret in "current" is REFUSED before staging — current is a second write channel', () => {
+  const t = freshInstall('wrxn-sync-cur-secret-');
+  const doc = writeStaleDoc(t, '.wrxn/wiki/concepts/auth-flow.md', {});
+  const before = fs.readFileSync(doc, 'utf8');
+  let err;
+  try {
+    // AKIA… is a clean fingerprint SHAPE that is also an AWS key — it must be caught by the secret-scan.
+    runCli(t, ['propose', writeJson(t, 'p.json', proseProposal({ current: 'AKIAIOSFODNN7EXAMPLE' }))]);
+  } catch (e) { err = e; }
+  assert.ok(err, 'propose exited non-zero on a secret in current');
+  assert.match(String(err.stderr || ''), /credential|secret/i);
+  assert.ok(!fs.existsSync(path.join(t, '.wrxn', 'sync', 'staged.jsonl')), 'nothing staged');
+  assert.equal(fs.readFileSync(doc, 'utf8'), before, 'doc untouched');
+});
+
+// M1(a): a newline/colon in `current` would inject frontmatter/markdown — rejected as malformed at propose.
+test('M1 propose: a "current" with a newline or colon is rejected as malformed (kills frontmatter injection)', () => {
+  const t = freshInstall('wrxn-sync-cur-malformed-');
+  const doc = writeStaleDoc(t, '.wrxn/wiki/concepts/auth-flow.md', {});
+  const before = fs.readFileSync(doc, 'utf8');
+  for (const bad of ['FP\nINJECTED: x', 'has:colon', 'FP\n---\n\n# evil body']) {
+    let err;
+    try {
+      runCli(t, ['propose', writeJson(t, 'p.json', proseProposal({ current: bad }))]);
+    } catch (e) { err = e; }
+    assert.ok(err, `propose refused a malformed current ${JSON.stringify(bad)}`);
+    assert.match(String(err.stderr || ''), /fingerprint|token|malformed/i);
+  }
+  assert.ok(!fs.existsSync(path.join(t, '.wrxn', 'sync', 'staged.jsonl')), 'nothing staged');
+  assert.equal(fs.readFileSync(doc, 'utf8'), before, 'doc untouched');
+});
+
+// M1(b) at the write boundary: a seeded staged record (bypassing propose) can't smuggle a secret in current.
+test('M1 confirm: a seeded staged record with a secret in "current" is re-scanned and refused — no write, watermark unchanged', () => {
+  const t = freshInstall('wrxn-sync-confirm-cur-secret-');
+  const doc = writeStaleDoc(t, '.wrxn/wiki/concepts/auth-flow.md', { synced_to: 'a1b2c3d4' });
+  const before = fs.readFileSync(doc, 'utf8');
+  const docRel = '.wrxn/wiki/concepts/auth-flow.md';
+  const body = '# Auth flow\n\nclean reconciling prose';
+  const current = 'AKIAIOSFODNN7EXAMPLE'; // clean shape, but an AWS key
+  seedStaged(t, [{ ts: 'x', op: 'propose', doc: docRel, synced_to: 'a1b2c3d4', current, body, hash: sync.proposalHash({ doc: docRel, current, body }) }]);
+  const out = confirm(t, [docRel]);
+  assert.equal(out.written.length, 0, 'the secret in current blocked the write at the boundary');
+  assert.equal(out.skipped[0].reason, 'contains_secret');
+  assert.equal(fs.readFileSync(doc, 'utf8'), before, 'no write');
+  assert.equal(readWatermark(doc), 'a1b2c3d4', 'watermark unchanged');
+});
+
+// M1(a) at the write boundary: the exact frontmatter-injection payload from the security record is blocked.
+test('M1 confirm: a seeded staged record with a newline-injecting "current" is refused — no frontmatter injected', () => {
+  const t = freshInstall('wrxn-sync-confirm-cur-inject-');
+  const doc = writeStaleDoc(t, '.wrxn/wiki/concepts/auth-flow.md', { synced_to: 'a1b2c3d4' });
+  const before = fs.readFileSync(doc, 'utf8');
+  const docRel = '.wrxn/wiki/concepts/auth-flow.md';
+  const body = '# Auth flow\n\nclean prose';
+  const current = 'FP\nINJECTED_KEY: AKIAIOSFODNN7EXAMPLE'; // the security-record exploit: a 2nd frontmatter line
+  seedStaged(t, [{ ts: 'x', op: 'propose', doc: docRel, synced_to: 'a1b2c3d4', current, body, hash: sync.proposalHash({ doc: docRel, current, body }) }]);
+  const out = confirm(t, [docRel]);
+  assert.equal(out.written.length, 0, 'the malformed current blocked the write');
+  assert.equal(out.skipped[0].reason, 'malformed_current');
+  assert.equal(fs.readFileSync(doc, 'utf8'), before, 'file byte-identical — no injected frontmatter line');
+  assert.equal(readWatermark(doc), 'a1b2c3d4', 'watermark unchanged');
+});
+
+// L2: resolveSafeDoc is lexical; confirm must refuse a planted symlink so read+write can't follow it OUT.
+test('SECURITY L2: confirm refuses a doc that resolves to a SYMLINK under .wrxn/wiki/ — the link target is untouched', () => {
+  const t = freshInstall('wrxn-sync-symlink-');
+  // a frontmatter-bearing target OUTSIDE the wiki (so without the fix the symlinked write would escape it)
+  const outside = path.join(t, 'outside-target.md');
+  const outsideBefore = ['---', 'name: outside', 'synced_to: KEEP', '---', '', '# Outside', '', 'must not be overwritten', ''].join('\n');
+  fs.writeFileSync(outside, outsideBefore);
+  const linkRel = '.wrxn/wiki/concepts/link.md';
+  const linkAbs = path.join(t, linkRel);
+  fs.mkdirSync(path.dirname(linkAbs), { recursive: true });
+  fs.symlinkSync(outside, linkAbs); // git preserves symlinks → a hostile branch can plant this
+  const body = '# Pwned\n\ninjected body';
+  const current = 'NEWFP';
+  seedStaged(t, [{ ts: 'x', op: 'propose', doc: linkRel, synced_to: 'KEEP', current, body, hash: sync.proposalHash({ doc: linkRel, current, body }) }]);
+  const out = confirm(t, [linkRel]);
+  assert.equal(out.written.length, 0, 'no write followed the symlink');
+  assert.equal(out.skipped[0].reason, 'symlink_target');
+  assert.equal(fs.readFileSync(outside, 'utf8'), outsideBefore, 'the symlink target OUTSIDE the wiki is byte-identical (confinement held)');
+});
+
+// L3: propose caps the body at dream's BODY_MAX (32000) — dream parity, reject oversize at stage time.
+test("L3 propose: a body larger than dream's BODY_MAX is rejected (body_too_large parity)", () => {
+  const t = freshInstall('wrxn-sync-bodymax-');
+  const doc = writeStaleDoc(t, '.wrxn/wiki/concepts/auth-flow.md', {});
+  const before = fs.readFileSync(doc, 'utf8');
+  const huge = '# Auth flow\n\n' + 'x'.repeat(32001); // > 32000-char cap
+  let err;
+  try {
+    runCli(t, ['propose', writeJson(t, 'p.json', proseProposal({ body: huge }))]);
+  } catch (e) { err = e; }
+  assert.ok(err, 'propose refused an over-cap body');
+  assert.match(String(err.stderr || ''), /body_too_large|cap|too large|exceed/i);
+  assert.ok(!fs.existsSync(path.join(t, '.wrxn', 'sync', 'staged.jsonl')), 'nothing staged');
+  assert.equal(fs.readFileSync(doc, 'utf8'), before, 'doc untouched');
+});

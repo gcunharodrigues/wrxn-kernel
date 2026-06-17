@@ -43,6 +43,7 @@ const SYNC_DIR = ['.wrxn', 'sync'];
 const WIKI_REL = ['.wrxn', 'wiki']; // prose docs live here; a reconciling edit may target ONLY this subtree.
 const STAGED_FILE = 'staged.jsonl'; // the proposed-but-unconfirmed reconciling edits (full body, by-reference).
 const AUDIT_FILE = 'audit.jsonl'; // append-only outcome log (propose + confirm events).
+const BODY_MAX = 32000; // size cap (chars) — a durable reconciling edit, not a transcript dump (dream parity).
 
 // ── install-root resolution (mirrors wiki.cjs / dream.cjs / recall-surface.cjs) ─
 function findInstallRoot(start) {
@@ -243,6 +244,21 @@ function secretScan(text) {
   return null;
 }
 
+// ── watermark fingerprint validation (security M1) ───────────────────────────────
+// `current` is written VERBATIM into the doc's `synced_to:` frontmatter at confirm (restampDoc), so it is
+// a SECOND write channel the body-only secret-scan missed: a newline/colon injects arbitrary
+// frontmatter/markdown, and a credential hardens unscanned into a recall-ingested page (defeats AC4).
+// `synced_to` is operator/LLM-supplied too. Both must be a single fingerprint/commit token; `current` must
+// additionally pass the secret-scan. proposalHash covers `current`, so the integrity gate does NOT catch
+// this. Returns a problem code (the propose fail reason / the confirm skip reason) or null.
+const FINGERPRINT_RE = /^[A-Za-z0-9._-]{1,128}$/;
+
+function fingerprintProblem(rec) {
+  if (typeof rec.current !== 'string' || !FINGERPRINT_RE.test(rec.current)) return 'malformed_current';
+  if (rec.synced_to != null && (typeof rec.synced_to !== 'string' || !FINGERPRINT_RE.test(rec.synced_to))) return 'malformed_synced_to';
+  return secretScan(rec.current); // 'contains_secret' (current is a write channel) or null
+}
+
 // ── shared helpers (mirror dream.cjs) ────────────────────────────────────────────
 // The first positional after the subcommand (the JSON file path), up to the first --flag.
 function positionalFile() {
@@ -351,11 +367,18 @@ function runPropose() {
   const p = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
   if (!resolveSafeDoc(root, p.doc)) fail('propose needs a "doc" path inside .wrxn/wiki/ ending in .md');
   if (typeof p.body !== 'string' || !p.body.trim()) fail('propose needs a non-empty "body" — the reconciling edit the skill drafted');
+  if (p.body.length > BODY_MAX) fail(`propose rejected — body exceeds the ${BODY_MAX}-char cap (body_too_large); a durable reconciling edit, not a transcript dump`); // L3: dream parity
   if (typeof p.current !== 'string' || !p.current.trim()) {
     fail('propose needs "current" — the source fingerprint to advance the watermark to (from the drift report, never re-derived here)');
   }
   const sec = secretScan(p.body); // AC4: secret-scan BEFORE staging
   if (sec) fail(`propose rejected — the drafted edit contains a credential (${sec}); never reconcile a session secret into prose`);
+  // M1: `current` becomes the doc's synced_to watermark verbatim at confirm — a second write channel the
+  // body-only scan missed. Shape-validate current + synced_to (no newline/colon → no frontmatter injection)
+  // and secret-scan current, at propose AND again at the confirm write boundary.
+  const fp = fingerprintProblem(p);
+  if (fp === 'contains_secret') fail('propose rejected — "current" contains a credential; never write a session secret into the doc watermark');
+  if (fp) fail(`propose rejected — "${fp === 'malformed_synced_to' ? 'synced_to' : 'current'}" must be a fingerprint token matching ${FINGERPRINT_RE} (no newline/colon) — it is written verbatim into the doc watermark`);
 
   const dir = syncDir(root);
   const ts = new Date().toISOString();
@@ -382,9 +405,22 @@ function runConfirm() {
     if (!rec) { skipped.push({ doc: key, reason: 'not_staged' }); continue; }
     const sec = secretScan(rec.body); // re-scan at the write boundary
     if (sec) { skipped.push({ doc: key, reason: sec }); continue; }
+    // M1: re-gate the `current` write channel at the boundary too (a seeded staged.jsonl bypasses propose).
+    const fp = fingerprintProblem(rec);
+    if (fp) { skipped.push({ doc: key, reason: fp }); continue; }
     if (proposalHash(rec) !== rec.hash) { skipped.push({ doc: key, reason: 'integrity_mismatch' }); continue; } // tamper → refuse
     const abs = resolveSafeDoc(root, rec.doc);
     if (!abs) { skipped.push({ doc: key, reason: 'unsafe_target' }); continue; }
+    // L2: resolveSafeDoc is lexical — refuse a pre-existing symlink so the read+write can't FOLLOW it out of
+    // the wiki subtree (git preserves symlinks; a hostile branch/clone can plant one). lstat → the link's
+    // own type; fail closed (skip, no write), mirroring unsafe_target / missing_target.
+    let lst;
+    try {
+      lst = fs.lstatSync(abs);
+    } catch {
+      skipped.push({ doc: key, reason: 'missing_target' }); continue; // the doc vanished since staging
+    }
+    if (lst.isSymbolicLink()) { skipped.push({ doc: key, reason: 'symlink_target' }); continue; }
     let content;
     try {
       content = fs.readFileSync(abs, 'utf8');
