@@ -429,6 +429,16 @@
       "profile": "project"
     },
     {
+      "path": ".wrxn/harvest.cjs",
+      "class": "managed",
+      "profile": "project"
+    },
+    {
+      "path": ".wrxn/harvest/.gitkeep",
+      "class": "state",
+      "profile": "project"
+    },
+    {
       "path": ".wrxn/wiki.cjs",
       "class": "managed",
       "profile": "project"
