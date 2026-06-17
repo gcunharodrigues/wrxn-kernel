@@ -210,6 +210,19 @@ test('write-page --force is refused for any tier other than _slots (the lone upd
   assert.match(fs.readFileSync(path.join(target, '.wrxn', 'wiki', 'concepts', 'pinned.md'), 'utf8'), /curated original/);
 });
 
+test('write-page --force is refused for a non-current-focus slug even inside _slots (path-scoped, not tier-scoped) [dream-qa-07]', () => {
+  const { target } = freshInstall('wrxn-wiki-force-slug-');
+  assert.throws(
+    () => runAdapter(target, ['write-page', '_slots', 'probe-slot', '--force', '--body', 'forged slot']),
+    /only permitted for the _slots\/current-focus/
+  );
+  // no forged page was laid in the _slots tier
+  assert.ok(
+    !fs.existsSync(path.join(target, '.wrxn', 'wiki', '_slots', 'probe-slot.md')),
+    'a forged _slots slug must not be created via --force'
+  );
+});
+
 test('.wrxn/wiki/_slots/.gitkeep is classified state in the manifest', () => {
   const manifest = loadManifest(path.join(PKG_ROOT, 'manifest.json'));
   const entry = manifest.files.find((f) => f.path === '.wrxn/wiki/_slots/.gitkeep');

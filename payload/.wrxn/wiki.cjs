@@ -25,8 +25,10 @@ const path = require('path');
 // `_slots` (dream-04) holds the durable standing-focus page (`_slots/current-focus.md`) — the LONE
 // wiki page that may be overwritten in place, and only via `write-page --force`.
 const TIERS = ['concepts', 'decisions', 'gotchas', 'sessions', '_rules', '_slots'];
-// The one tier whose pages `--force` may overwrite — every other tier stays create-only / refuse-overwrite.
+// The one page `--force` may overwrite — `_slots/current-focus.md`, the durable focus slot. Every other
+// page (any other tier, or any other slug in `_slots`) stays create-only / refuse-overwrite.
 const OVERWRITABLE_TIER = '_slots';
+const OVERWRITABLE_SLUG = 'current-focus';
 
 // ── install-root resolution (walk up to the wrxn.install.json receipt) ────────
 // Mirrors payload/.claude/hooks/enforce-managed-guard.cjs findInstallRoot.
@@ -129,11 +131,12 @@ function runWritePage() {
   if (!/^[a-z0-9][a-z0-9-]*$/.test(slug)) fail(`slug must be kebab-case ([a-z0-9-]): "${slug}"`);
 
   // `--force` is the LONE overwrite-exception (dream-04): it overwrites a page in place, and ONLY for
-  // the `_slots` focus slot. Every normal write-page (no `--force`, any other tier) still refuses to
-  // clobber — so the wiki stays additive/curated and only the standing-focus slot may be updated.
+  // the single `_slots/current-focus` slot. Every other write-page (no `--force`, any other tier, or any
+  // other slug in `_slots`) still refuses to clobber — so the wiki stays additive/curated and only the
+  // one standing-focus page may be updated (dream-qa-07: path-scoped, not tier-scoped).
   const force = process.argv.includes('--force');
-  if (force && tier !== OVERWRITABLE_TIER) {
-    fail(`--force overwrite is only permitted for the ${OVERWRITABLE_TIER} focus slot (the lone update-exception), not "${tier}"`);
+  if (force && (tier !== OVERWRITABLE_TIER || slug !== OVERWRITABLE_SLUG)) {
+    fail(`--force overwrite is only permitted for the ${OVERWRITABLE_TIER}/${OVERWRITABLE_SLUG} focus slot (the lone update-exception), not "${tier}/${slug}"`);
   }
 
   const root = wikiRoot();
