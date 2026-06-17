@@ -294,6 +294,11 @@
       "profile": "project"
     },
     {
+      "path": ".claude/skills/sync/SKILL.md",
+      "class": "managed",
+      "profile": "project"
+    },
+    {
       "path": ".claude/skills/tdd/SKILL.md",
       "class": "managed",
       "profile": "project"
@@ -421,6 +426,11 @@
     {
       "path": ".wrxn/dream/.gitkeep",
       "class": "state",
+      "profile": "project"
+    },
+    {
+      "path": ".wrxn/sync.cjs",
+      "class": "managed",
       "profile": "project"
     },
     {
