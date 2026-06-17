@@ -33,6 +33,8 @@
 const fs = require('fs');
 const http = require('http');
 const path = require('path');
+const crypto = require('crypto');
+const { execFileSync } = require('child_process');
 
 // The harvest curation scope (8-decision grill: scope = the 4 knowledge tiers). NOTE this DIFFERS from
 // wiki-lint's TIERS: harvest scans `_rules` (the dream-written tier) and never scans the retired
@@ -41,6 +43,13 @@ const HARVEST_TIERS = ['concepts', 'decisions', 'gotchas', '_rules'];
 const REQUIRED_KEYS = ['name', 'description', 'tier']; // wiki-lint's malformed-frontmatter contract.
 
 const HARVEST_DIR = ['.wrxn', 'harvest'];
+// merge (harvest-03) staging trail — mirrors sync's .wrxn/sync/. NON-.md so recon's prose ingestion (which
+// walks all of .wrxn and reads *.md) never recalls a staged-but-unconfirmed merge. Coexists with check's
+// timestamped <ts>.jsonl reports in the same dir (distinct fixed names, no collision).
+const STAGED_FILE = 'staged.jsonl'; // the proposed-but-unconfirmed merges (survivor body + absorbed, by-reference).
+const AUDIT_FILE = 'audit.jsonl'; // append-only outcome log (stage + commit events).
+const BODY_MAX = 32000; // survivor body cap (chars) — a durable merged page, not a dump (dream/sync parity).
+const WIKI_REL = ['.wrxn', 'wiki']; // all merge targets confine under <root>/.wrxn/wiki/<knowledge-tier>/.
 const ENDPOINT_REL = path.join('.recon-wrxn', 'serve-endpoint.json');
 const FIND_PATH = '/api/tools/recon_find'; // the recon serve door recall-surface/brain query.
 const PROSE_TYPES = new Set(['Page', 'Section']); // prose scope — code symbols are never near-dup targets.
@@ -516,13 +525,296 @@ async function runCheck() {
   process.exit(0);
 }
 
+// ════════════════════════════════════════════════════════════════════════════════
+// MERGE (harvest-03 / H3) — the ONE sanctioned hard-delete: fold N near-dups into one survivor, then
+// delete the absorbed. The SKILL (LLM) drafts the survivor (union of facts + union of evidence); THIS
+// adapter GATES + writes. Reuses sync's propose→confirm by-reference spine (secret-scan, sha256 integrity,
+// path-confinement) and dream's wiki-bridge indirection (the absorbed delete goes through wiki.cjs).
+// ════════════════════════════════════════════════════════════════════════════════
+
+// ── shared CLI/IO helpers (mirror sync.cjs / dream.cjs) ──────────────────────────
+// The first positional after the subcommand (the JSON file path), up to the first --flag.
+function positionalFile() {
+  for (let i = 3; i < process.argv.length; i++) {
+    if (process.argv[i].startsWith('--')) break;
+    return process.argv[i];
+  }
+  fail('missing <file.json> argument');
+  return undefined;
+}
+
+function readJson(file) {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (err) {
+    fail(`cannot read JSON from "${file}": ${err.message}`);
+    return undefined;
+  }
+}
+
+function appendLine(file, obj) {
+  fs.appendFileSync(file, JSON.stringify(obj) + '\n');
+}
+
+function isObj(x) {
+  return !!x && typeof x === 'object' && !Array.isArray(x);
+}
+
+// A wiki slug — the same kebab contract wiki.cjs enforces. A non-kebab absorbed slug would (a) inject a
+// newline/colon into the survivor's `merged_from:` frontmatter and (b) fail wiki.cjs delete-page — reject it.
+function isKebab(s) {
+  return typeof s === 'string' && /^[a-z0-9][a-z0-9-]*$/.test(s);
+}
+
+// ── credential / secret scan (reused from dream.cjs / sync.cjs, security M2) ─────
+// A merged survivor must never harden a session secret into recalled prose. Same patterns + case-sensitive
+// scope as dream/sync — replicated because each install-only adapter is self-contained (node stdlib only).
+const SECRET_PATTERNS = [
+  /AKIA[0-9A-Z]{16}/,                    // AWS access key id
+  /gh[pousr]_[A-Za-z0-9]{36}/,           // GitHub token (ghp_/gho_/ghu_/ghs_/ghr_)
+  /npm_[A-Za-z0-9]{36}/,                 // npm automation token
+  /sk-[A-Za-z0-9]{20,}/,                 // OpenAI-style secret key
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----/,  // PEM private-key header
+];
+
+function secretScan(text) {
+  const s = String(text || ''); // NOT lowercased — the token shapes are case-sensitive.
+  for (const re of SECRET_PATTERNS) if (re.test(s)) return 'contains_secret';
+  return null;
+}
+
+// ── path safety: a merge target may address ONLY a .md page under a KNOWLEDGE tier ─
+// The survivor + every absorbed path is LLM/operator-controlled, so it is the trust boundary. This is
+// sync's resolveSafeDoc TIGHTENED to the curation scope: the path must resolve to exactly
+// .wrxn/wiki/<tier>/<slug>.md where tier ∈ HARVEST_TIERS (concepts/decisions/gotchas/_rules) — not the
+// retired sessions tier, not the _slots focus slot, not anything outside the wiki subtree. Returns the
+// abs path or null. Lexical (path.resolve never follows a symlink) — a planted symlink's STRING is judged.
+function resolveSafeHarvestDoc(root, doc) {
+  if (typeof doc !== 'string' || !doc.trim()) return null;
+  const wikiRoot = path.join(root, ...WIKI_REL);
+  const abs = path.resolve(root, doc);
+  const rel = path.relative(wikiRoot, abs);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return null; // escapes .wrxn/wiki/
+  if (!abs.endsWith('.md')) return null; // prose pages only
+  const parts = rel.split(path.sep);
+  if (parts.length !== 2) return null; // must be exactly <tier>/<slug>.md — no nesting
+  if (!HARVEST_TIERS.includes(parts[0])) return null; // not a knowledge tier (sessions / _slots / other)
+  return abs;
+}
+
+// The integrity fingerprint captured at stage over the fields that DETERMINE the write+deletes (survivor
+// target, its description+body, the absorbed set). Recomputed at the write boundary and compared to the
+// staged value → a record whose body/target/absorbed-list was altered after staging cannot write or delete
+// (AC2 tamper-refusal). absorbed is sorted so the hash is order-independent (mirrors sync's proposalHash).
+function mergeHash(p) {
+  const absorbed = (Array.isArray(p.absorbed) ? p.absorbed.map(String) : []).slice().sort();
+  const canon = JSON.stringify({ survivor: String(p.survivor || ''), description: String(p.description || ''), body: String(p.body || ''), absorbed });
+  return crypto.createHash('sha256').update(canon).digest('hex');
+}
+
+// ── the survivor page (PURE) — the net-new write transform ───────────────────────
+// Compose a well-formed knowledge page (passes lintPage: name/description/tier) stamped with
+// `merged_from: [<absorbed slugs>]` — the provenance lands on the SURVIVING page, NEVER on the deleted
+// ones (you cannot stamp a deleted page). `superseded_by:` is H4's non-destructive op, not merge's. The
+// absorbed slugs are kebab-validated before they reach here, so the inline list cannot inject frontmatter.
+function composeSurvivor({ tier, slug, description, body, mergedFrom }) {
+  return [
+    '---',
+    `name: ${slug}`,
+    `description: ${description || ''}`,
+    `tier: ${tier}`,
+    'source: harvest-merge',
+    `merged_from: [${mergedFrom.join(', ')}]`,
+    '---',
+    '',
+    body,
+    '',
+  ].join('\n');
+}
+
+// ── the wiki delete bridge (dream.cjs indirection contract) ──────────────────────
+function wikiAdapter() {
+  return path.join(__dirname, 'wiki.cjs'); // sibling in the same install .wrxn/ dir
+}
+
+// Guard the harvest→wiki bridge against argv flag-injection (dream's security M3): a `--`-leading value
+// would be parsed by wiki.cjs's flag scan as a flag. tier/slug are allowlisted/kebab so this is the
+// defense-in-depth backstop at the exec boundary.
+function guardArgv(values) {
+  for (const v of values) {
+    if (typeof v === 'string' && v.startsWith('--')) {
+      throw new Error(`flag-injection guard: refusing a --leading value at the wiki bridge: ${JSON.stringify(v.slice(0, 32))}`);
+    }
+  }
+}
+
+// Delete an absorbed page VIA the wiki adapter's delete-by-reference path (the indirection contract — we
+// never unlink a .md directly). wiki.cjs confines the delete to the wiki subtree (tier allowlist + kebab
+// slug); harvest has ALREADY confined to the knowledge tiers via resolveSafeHarvestDoc — defense in depth.
+function wikiDeletePage(root, tier, slug) {
+  guardArgv([tier, slug]);
+  const args = [wikiAdapter(), 'delete-page', tier, slug, '--root', root];
+  return JSON.parse(execFileSync('node', args, { encoding: 'utf8' }));
+}
+
+// ── stage / commit by-reference (mirror sync's propose/confirm) ──────────────────
+// Read .wrxn/harvest/staged.jsonl into a survivor → staged-record map (last staged wins). Malformed lines
+// skip. A record needs a survivor key, a string body, and an absorbed array to be a usable merge.
+function readStaged(root) {
+  const map = new Map();
+  let txt;
+  try {
+    txt = fs.readFileSync(path.join(root, ...HARVEST_DIR, STAGED_FILE), 'utf8');
+  } catch {
+    return map; // no staging trail yet → nothing to confirm by reference
+  }
+  for (const line of txt.split('\n')) {
+    const s = line.trim();
+    if (!s) continue;
+    try {
+      const rec = JSON.parse(s);
+      if (rec && rec.survivor && typeof rec.body === 'string' && Array.isArray(rec.absorbed)) map.set(rec.survivor, rec);
+    } catch {
+      /* skip a malformed staging line */
+    }
+  }
+  return map;
+}
+
+// Normalize commit input into the operator-approved SURVIVOR list (["survivor-path"…] or { approved:[…] }).
+// An EMPTY list is the DECLINE — commit writes nothing, deletes nothing (AC3).
+function approvedSurvivors(input) {
+  if (Array.isArray(input)) return input.map(String);
+  if (input && typeof input === 'object' && Array.isArray(input.approved)) return input.approved.map(String);
+  return [];
+}
+
+// stage (PROPOSE): validate the drafted survivor + the absorbed cluster, secret-scan, then record the
+// proposal by-reference under .wrxn/harvest/staged.jsonl with an integrity fingerprint. NEVER touches a
+// knowledge page (the survivor is not written, the absorbed are not deleted) — mirrors sync's propose.
+function runStage() {
+  const input = readJson(positionalFile());
+  const root = installRoot();
+  const p = isObj(input) ? input : {};
+
+  const survAbs = resolveSafeHarvestDoc(root, p.survivor);
+  if (!survAbs) fail('stage needs a "survivor" path under .wrxn/wiki/<knowledge-tier>/ ending in .md');
+  if (!isKebab(slugOfPath(p.survivor))) fail('the survivor slug must be kebab-case ([a-z0-9-])');
+  if (typeof p.body !== 'string' || !p.body.trim()) fail('stage needs a non-empty "body" — the synthesised survivor the skill drafted');
+  if (p.body.length > BODY_MAX) fail(`stage rejected — body exceeds the ${BODY_MAX}-char cap (body_too_large); a durable merged page, not a dump`);
+
+  const absorbed = Array.isArray(p.absorbed) ? p.absorbed.map(String) : [];
+  if (absorbed.length === 0) fail('stage needs a non-empty "absorbed" list — the near-dup slugs folded into the survivor');
+  for (const a of absorbed) {
+    if (!resolveSafeHarvestDoc(root, a)) fail(`absorbed target escapes the knowledge tiers (must be .wrxn/wiki/<knowledge-tier>/<slug>.md): ${JSON.stringify(a)}`);
+    if (!isKebab(slugOfPath(a))) fail(`absorbed slug must be kebab-case: ${JSON.stringify(a)}`);
+    if (a === p.survivor) fail('the survivor cannot also be an absorbed (delete) target');
+  }
+
+  const description = p.description ? String(p.description) : '';
+  const sec = secretScan(`${description}\n${p.body}`); // AC1: secret-scan BEFORE staging
+  if (sec) fail(`stage rejected — the drafted survivor contains a credential (${sec}); never fold a session secret into knowledge`);
+
+  const dir = harvestDir(root);
+  const ts = new Date().toISOString();
+  const record = {
+    ts, op: 'stage',
+    survivor: p.survivor, tier: tierOfPath(p.survivor), slug: slugOfPath(p.survivor),
+    description, body: p.body, absorbed,
+    hash: mergeHash({ survivor: p.survivor, description, body: p.body, absorbed }),
+  };
+  appendLine(path.join(dir, STAGED_FILE), record);
+  appendLine(path.join(dir, AUDIT_FILE), { ts, op: 'stage', survivor: p.survivor, absorbed });
+  return print({ staged: 1, survivor: p.survivor, absorbed, stagedFile: path.relative(root, path.join(dir, STAGED_FILE)) });
+}
+
+// commitOne: the write-boundary re-gate for ONE approved survivor. RE-VALIDATE (secret-scan → integrity →
+// path-confine survivor AND every absorbed → survivor is new) BEFORE any mutation, so a tampered/altered
+// proposal cannot write or delete (AC2). Then — and only then — WRITE THE SURVIVOR FIRST (knowledge
+// preserved), THEN delete each absorbed (AC4 survivor-before-delete). Atomic on validation: if ANY target
+// is unsafe the whole merge is refused (no partial delete). Returns { ok, ... } | { ok:false, reason }.
+function commitOne(root, rec) {
+  const description = rec.description ? String(rec.description) : '';
+  const sec = secretScan(`${description}\n${rec.body}`); // re-scan at the write boundary
+  if (sec) return { ok: false, reason: sec };
+  if (mergeHash(rec) !== rec.hash) return { ok: false, reason: 'integrity_mismatch' }; // tamper → refuse
+
+  const survAbs = resolveSafeHarvestDoc(root, rec.survivor);
+  if (!survAbs) return { ok: false, reason: 'unsafe_survivor' };
+  if (!isKebab(slugOfPath(rec.survivor))) return { ok: false, reason: 'unsafe_survivor' };
+  // additive / refuse-overwrite: the survivor is a NEW page. lstat (not existsSync) so a planted symlink or
+  // any pre-existing entry is caught — never clobber a curated page. This check runs BEFORE any delete, so a
+  // refused survivor write means nothing is deleted (the structural proof of survivor-before-delete).
+  try {
+    fs.lstatSync(survAbs);
+    return { ok: false, reason: 'survivor_exists' };
+  } catch {
+    /* nothing there → safe to create */
+  }
+
+  // confine + validate EVERY absorbed target up front (atomic) — one unsafe target refuses the whole merge.
+  const targets = [];
+  for (const a of rec.absorbed.map(String)) {
+    const abs = resolveSafeHarvestDoc(root, a);
+    if (!abs || !isKebab(slugOfPath(a))) return { ok: false, reason: 'unsafe_absorbed' };
+    if (a === rec.survivor) return { ok: false, reason: 'survivor_in_absorbed' }; // never delete the survivor
+    targets.push({ rel: a, tier: tierOfPath(a), slug: slugOfPath(a) });
+  }
+
+  // WRITE THE SURVIVOR FIRST — the merged knowledge exists on disk before any page is deleted (AC4).
+  const mergedFrom = targets.map((t) => t.slug).slice().sort();
+  const page = composeSurvivor({ tier: rec.tier, slug: rec.slug, description, body: rec.body, mergedFrom });
+  fs.mkdirSync(path.dirname(survAbs), { recursive: true });
+  fs.writeFileSync(survAbs, page);
+
+  // THEN delete each absorbed — ONLY the staged cluster members (no free-form delete path) (AC4).
+  const deleted = [];
+  const deleteFailed = [];
+  for (const t of targets) {
+    try {
+      wikiDeletePage(root, t.tier, t.slug);
+      deleted.push(t.rel);
+    } catch (e) {
+      // the survivor is already written (knowledge preserved); a failed delete leaves a harmless leftover,
+      // recorded for the operator — it never undoes the merge.
+      deleteFailed.push({ target: t.rel, reason: String((e && e.message) || 'delete_failed').split('\n')[0] });
+    }
+  }
+  return { ok: true, survivor: rec.survivor, merged_from: mergedFrom, deleted, deleteFailed };
+}
+
+// commit (CONFIRM): for each operator-approved survivor, look up its staged merge and run commitOne. An
+// empty approval is the decline (nothing changes, AC3). Then append the outcome to the audit log.
+function runCommit() {
+  const input = readJson(positionalFile());
+  const root = installRoot();
+  const approved = approvedSurvivors(input);
+  const staged = readStaged(root);
+  const merged = [];
+  const skipped = [];
+  for (const ref of approved) {
+    const key = String(ref);
+    const rec = staged.get(key);
+    if (!rec) { skipped.push({ survivor: key, reason: 'not_staged' }); continue; }
+    const res = commitOne(root, rec);
+    if (res.ok) merged.push({ survivor: res.survivor, merged_from: res.merged_from, deleted: res.deleted, deleteFailed: res.deleteFailed });
+    else skipped.push({ survivor: key, reason: res.reason });
+  }
+  appendLine(path.join(harvestDir(root), AUDIT_FILE), { ts: new Date().toISOString(), op: 'commit', merged: merged.map((m) => m.survivor), skipped });
+  return print({ merged, skipped });
+}
+
 async function main() {
   const cmd = process.argv[2];
   switch (cmd) {
     case 'check':
       return runCheck();
+    case 'stage':
+      return runStage();
+    case 'commit':
+      return runCommit();
     default:
-      process.stdout.write('Usage: node .wrxn/harvest.cjs check [--root <dir>]\n');
+      process.stdout.write('Usage: node .wrxn/harvest.cjs <check [--root <dir>] | stage <proposal.json> | commit <approved.json>> [--root <dir>]\n');
       process.exit(cmd ? 2 : 0);
   }
 }
@@ -550,6 +842,12 @@ module.exports = {
   httpTransport,
   pidAlive,
   findInstallRoot,
+  // merge (harvest-03) — pure gate primitives
+  secretScan,
+  resolveSafeHarvestDoc,
+  mergeHash,
+  composeSurvivor,
+  isKebab,
   // constants
   HARVEST_TIERS,
   NEAR_DUP_THRESHOLD,

@@ -13,6 +13,9 @@
 //   recall <text...>             alias of query (page-level recall; same substring engine)
 //   write-page <tier> <slug>     create <tier>/<slug>.md (refuses to overwrite); prints the path.
 //                                --force overwrites in place, but ONLY for the `_slots` focus slot.
+//   delete-page <tier> <slug>    delete <tier>/<slug>.md (harvest-03 merge: the absorbed-page removal).
+//                                Confined to the wiki tiers BY CONSTRUCTION (tier ∈ TIERS + kebab slug),
+//                                so the path can never escape .wrxn/wiki/. Errors if the page is absent.
 //
 // Flags: --tier <concepts|decisions|gotchas|sessions|_rules|_slots|all> (default all) · --limit <N> (default 20)
 //        --force (write-page only; overwrite the `_slots` slot in place) · --root <dir> (test override)
@@ -168,6 +171,28 @@ function runWritePage() {
   process.stdout.write(JSON.stringify({ written: path.relative(root, dest), tier }, null, 2) + '\n');
 }
 
+// ── delete-page (harvest-03) ────────────────────────────────────────────────────
+// The delete-by-reference path for harvest's merge: remove an absorbed near-dup page after the survivor
+// is written. Confinement is structural — the page is addressed by <tier>/<slug>, where tier is checked
+// against the TIERS allowlist and slug must be kebab-case (no `/`, no `..`, no `.`), so the constructed
+// path can never traverse out of .wrxn/wiki/. Errors on a missing page (the symmetric inverse of
+// write-page refusing an existing one), so a no-op delete is observable to the caller.
+function runDeletePage() {
+  const [tier, slug] = positionals();
+  if (!tier || !slug) {
+    process.stdout.write('Usage: node .wrxn/wiki.cjs delete-page <tier> <slug>\n');
+    process.exit(2);
+  }
+  if (!TIERS.includes(tier)) fail(`unknown tier "${tier}" — one of ${TIERS.join(', ')}`);
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(slug)) fail(`slug must be kebab-case ([a-z0-9-]): "${slug}"`);
+
+  const root = wikiRoot();
+  const dest = path.join(root, tier, `${slug}.md`);
+  if (!fs.existsSync(dest)) fail(`page does not exist, nothing to delete: ${path.relative(root, dest)}`);
+  fs.unlinkSync(dest);
+  process.stdout.write(JSON.stringify({ deleted: path.relative(root, dest), tier }, null, 2) + '\n');
+}
+
 function main() {
   const cmd = process.argv[2];
   switch (cmd) {
@@ -176,8 +201,10 @@ function main() {
       return runQuery();
     case 'write-page':
       return runWritePage();
+    case 'delete-page':
+      return runDeletePage();
     default:
-      process.stdout.write('Usage: node .wrxn/wiki.cjs <query|recall|write-page> ...\n');
+      process.stdout.write('Usage: node .wrxn/wiki.cjs <query|recall|write-page|delete-page> ...\n');
       process.exit(cmd ? 2 : 0);
   }
 }

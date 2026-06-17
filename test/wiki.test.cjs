@@ -238,6 +238,40 @@ test('the laid receipt classifies the _slots tier gitkeep as state', () => {
   assert.equal(gitkeep.class, 'state');
 });
 
+// ── delete-page (harvest-03): the merge absorbed-page removal — delete-by-reference, confined ──
+// wiki.cjs had write/read but no delete. harvest's MERGE needs to delete the absorbed near-dups after the
+// survivor is written. delete-page <tier> <slug> removes <tier>/<slug>.md, confined to the wiki tiers by
+// construction (tier ∈ TIERS allowlist + kebab slug → the constructed path can never escape .wrxn/wiki/).
+
+test('delete-page removes an existing page from its tier', () => {
+  const { target } = freshInstall('wrxn-wiki-delete-');
+  runAdapter(target, ['write-page', 'concepts', 'absorbed', '--body', 'a near-dup to be folded']);
+  const page = path.join(target, '.wrxn', 'wiki', 'concepts', 'absorbed.md');
+  assert.ok(fs.existsSync(page), 'page exists before delete');
+  const out = JSON.parse(runAdapter(target, ['delete-page', 'concepts', 'absorbed']));
+  assert.match(out.deleted, /concepts\/absorbed\.md$/, 'reports the deleted relpath');
+  assert.ok(!fs.existsSync(page), 'page removed after delete');
+});
+
+test('delete-page rejects an unknown tier (cannot escape the wiki subtree via the tier)', () => {
+  const { target } = freshInstall('wrxn-wiki-delete-badtier-');
+  assert.throws(() => runAdapter(target, ['delete-page', 'nope', 'x']), /unknown tier/);
+});
+
+test('delete-page rejects a traversal / non-kebab slug (cannot escape the wiki subtree via the slug)', () => {
+  const { target } = freshInstall('wrxn-wiki-delete-traversal-');
+  // plant a file OUTSIDE the wiki that a traversal slug would target
+  const outside = path.join(target, 'secret.md');
+  fs.writeFileSync(outside, 'must not be deleted');
+  assert.throws(() => runAdapter(target, ['delete-page', 'concepts', '../../secret']), /kebab|slug/i);
+  assert.ok(fs.existsSync(outside), 'the out-of-wiki file was never reached');
+});
+
+test('delete-page on a missing page errors (symmetry with write-page refusing an existing page)', () => {
+  const { target } = freshInstall('wrxn-wiki-delete-missing-');
+  assert.throws(() => runAdapter(target, ['delete-page', 'concepts', 'ghost']), /does not exist|nothing to delete/i);
+});
+
 // ── AC-2: .recon-wrxn.json is laid (seeded); optional live recon-wrxn index+query ──
 
 test('.recon-wrxn.json is laid into a fresh install and is valid JSON', () => {
