@@ -87,6 +87,38 @@ test('write-page rejects an unknown tier', () => {
   assert.throws(() => runAdapter(target, ['write-page', 'nope', 'x', '--body', 'y']), /unknown tier/);
 });
 
+// ── single-H1 fix (qa-finding dream-06): write-page must not stack a second H1 ──
+// The dream gate mandates a proposal body open with its own "# Title" H1; write-page used to ALWAYS
+// prepend "# <slug>" too, so every dream-committed page rendered TWO stacked H1s. write-page now
+// prepends "# <slug>" ONLY when the body does not already open with an H1 (backward-compatible: a
+// heading-less or empty body still gets "# <slug>" exactly as before).
+
+test('write-page: a body that already opens with an H1 does not get a stacked # <slug> heading', () => {
+  const { target } = freshInstall('wrxn-wiki-onehead-');
+  runAdapter(target, ['write-page', 'concepts', 'cache-layer-design', '--body', '# My Title\n\nstuff']);
+  const txt = fs.readFileSync(path.join(target, '.wrxn', 'wiki', 'concepts', 'cache-layer-design.md'), 'utf8');
+  const h1s = txt.match(/^# .*/gm) || [];
+  assert.equal(h1s.length, 1, `exactly one H1 (got ${h1s.length}: ${JSON.stringify(h1s)})`);
+  assert.equal(h1s[0], '# My Title', "the body's own H1 is the sole H1");
+  assert.doesNotMatch(txt, /^# cache-layer-design$/m, 'the slug heading is NOT prepended when the body has its own H1');
+});
+
+test('write-page: a heading-less body still gets the # <slug> heading (backward-compat)', () => {
+  const { target } = freshInstall('wrxn-wiki-slughead-');
+  runAdapter(target, ['write-page', 'concepts', 'memory-tiers', '--body', 'the wiki has four tiers']);
+  const txt = fs.readFileSync(path.join(target, '.wrxn', 'wiki', 'concepts', 'memory-tiers.md'), 'utf8');
+  assert.match(txt, /^# memory-tiers$/m, 'a heading-less body still gets the slug H1 (unchanged behavior)');
+  const h1s = txt.match(/^# .*/gm) || [];
+  assert.equal(h1s.length, 1, 'exactly one H1 — the prepended slug heading');
+});
+
+test('write-page: an empty body still gets the # <slug> heading (backward-compat)', () => {
+  const { target } = freshInstall('wrxn-wiki-emptybody-');
+  runAdapter(target, ['write-page', 'gotchas', 'placeholder']);
+  const txt = fs.readFileSync(path.join(target, '.wrxn', 'wiki', 'gotchas', 'placeholder.md'), 'utf8');
+  assert.match(txt, /^# placeholder$/m, 'an empty body still gets the slug heading (unchanged behavior)');
+});
+
 // ── AC-3: the wiki tiers are classified `state` ───────────────────────────────
 
 test('every wiki tier .gitkeep is classified state in the manifest', () => {

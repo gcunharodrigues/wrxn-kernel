@@ -458,6 +458,26 @@ test('commit writes an approved rule to _rules/<slug>.md via wiki.cjs (indexable
   assert.match(fs.readFileSync(page, 'utf8'), /rebase feature branches onto main/);
 });
 
+// ── single H1 on a committed page (qa-finding dream-06) ───────────────────────
+// The gate mandates the proposal body open with its own "# Title" H1; wiki.cjs write-page must NOT
+// stack a second "# <slug>" heading on top of it. Every dream-committed page therefore carries
+// exactly one H1 — the proposal title — closing qa-06 end-to-end through stage → commit.
+
+test('a committed page has exactly ONE H1 — the proposal title, not a stacked # <slug> (qa-06)', () => {
+  const t = freshInstall('dream-one-h1-');
+  const p = validProposal({
+    kind: 'concept', tier: 'concepts', slug: 'cache-layer-design',
+    title: 'Cache layer design', body: '# Cache layer design\n\nThe cache sits in front of the store.',
+  });
+  stage(t, [p]);
+  commit(t, ['cache-layer-design']);
+  const txt = fs.readFileSync(path.join(t, '.wrxn', 'wiki', 'concepts', 'cache-layer-design.md'), 'utf8');
+  const h1s = txt.match(/^# .*/gm) || [];
+  assert.equal(h1s.length, 1, `exactly one H1 on the committed page (got ${h1s.length}: ${JSON.stringify(h1s)})`);
+  assert.equal(h1s[0], '# Cache layer design', 'the sole H1 is the proposal title');
+  assert.doesNotMatch(txt, /^# cache-layer-design$/m, 'no stacked slug H1 from the template');
+});
+
 // ── manifest / receipt classes (mirror wiki.test.cjs) ─────────────────────────
 
 test('the dream adapter is classified managed in the manifest and laid into a fresh install', () => {

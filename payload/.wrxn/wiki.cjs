@@ -144,6 +144,10 @@ function runWritePage() {
 
   const description = flag('description') || '';
   const body = flag('body') || '';
+  // Prepend the `# <slug>` heading ONLY when the body does not already open with its own H1. The dream
+  // gate mandates every proposal body start with `# Title`, so an always-prepend would stack two H1s on
+  // committed pages (qa-finding dream-06). A heading-less or empty body still gets `# <slug>` (backward-compat).
+  const heading = body.trimStart().startsWith('# ') ? [] : [`# ${slug}`, ''];
   const page = [
     '---',
     `name: ${slug}`,
@@ -152,8 +156,7 @@ function runWritePage() {
     'source: wiki-cli-write-page',
     '---',
     '',
-    `# ${slug}`,
-    '',
+    ...heading,
     body,
     '',
   ].join('\n');
