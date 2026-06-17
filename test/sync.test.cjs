@@ -78,7 +78,7 @@ function driftBody(driftOver) {
 
 // The raw recon DriftReport stale entry the door now sends inside `drift.stale[]` (camelCase, sync-08).
 const DOOR_STALE = {
-  page: '.wrxn/wiki/concepts/auth-flow.md',
+  page: 'Auth Flow', // recon's `page` is the human TITLE, distinct from the file path — doc must come from pageFile
   pageFile: '.wrxn/wiki/concepts/auth-flow.md',
   symbol: 'login',
   symbolFile: 'src/auth.ts',
@@ -90,7 +90,7 @@ const DOOR_STALE = {
 // usable as a propose seed (doc / symbol / synced_to / current). The door-only fields are dropped.
 const NORM_STALE = { doc: '.wrxn/wiki/concepts/auth-flow.md', symbol: 'login', synced_to: 'a1b2c3d4', current: 'e5f6a7b8' };
 // an unwatermarked door entry carries NO watermark (no syncedTo/current) → normalizes to { doc, symbol }.
-const DOOR_UW = { page: '.wrxn/wiki/concepts/db.md', pageFile: '.wrxn/wiki/concepts/db.md', symbol: 'connect', symbolFile: 'src/db.ts', symbolLine: 5 };
+const DOOR_UW = { page: 'Database Layer', pageFile: '.wrxn/wiki/concepts/db.md', symbol: 'connect', symbolFile: 'src/db.ts', symbolLine: 5 };
 const NORM_UW = { doc: '.wrxn/wiki/concepts/db.md', symbol: 'connect' };
 
 function runCli(target, args) {
@@ -104,7 +104,7 @@ test('summarizeDrift: a real-door stale entry → status "drift", normalized to 
   assert.equal(out.status, 'drift');
   assert.equal(out.stale.length, 1);
   // the camelCase door entry is normalized to the kernel report contract; door-only fields are dropped.
-  assert.deepEqual(out.stale[0], NORM_STALE, 'page→doc, syncedTo→synced_to, symbol/current kept, pageFile/symbolFile/symbolLine dropped');
+  assert.deepEqual(out.stale[0], NORM_STALE, 'pageFile→doc (the path, not the title), syncedTo→synced_to, symbol/current kept, page/symbolFile/symbolLine dropped');
 });
 
 test('summarizeDrift: an empty drift.stale array → status "synced", no manufactured rows (AC3)', () => {

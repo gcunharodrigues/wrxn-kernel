@@ -94,11 +94,13 @@ function isEntry(e) {
 
 // Normalize a raw recon DriftReport entry (camelCase page/pageFile/symbol/symbolFile/symbolLine/syncedTo/
 // current) into the kernel's external report contract (doc/symbol/synced_to/current) — the shape `propose`
-// seeds from and the report's consumers read. The door-only fields (pageFile/symbolFile/symbolLine) are
-// dropped; an unwatermarked entry (no syncedTo/current) normalizes to { doc, symbol }.
+// seeds from and the report's consumers read. `doc` is the FILE PATH (recon's `pageFile`), not the page
+// title (`page`): `propose`/`confirm` feed `doc` to resolveSafeDoc, which requires a path under .wrxn/wiki/
+// ending in .md — the title would never resolve. The door-only fields (page title/symbolFile/symbolLine)
+// are dropped; an unwatermarked entry (no syncedTo/current) normalizes to { doc, symbol }.
 function normEntry(e) {
   const out = {};
-  if (e.page !== undefined) out.doc = e.page;
+  if (e.pageFile !== undefined) out.doc = e.pageFile;
   if (e.symbol !== undefined) out.symbol = e.symbol;
   if (e.syncedTo !== undefined) out.synced_to = e.syncedTo;
   if (e.current !== undefined) out.current = e.current;
