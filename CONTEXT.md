@@ -31,3 +31,43 @@ _Avoid_: empty result, no-op (those read as error, not a deliberate gate).
 The per-prompt context engine that injects the constitution (L0), always-on rules (L1), and
 keyword-recall domains (L6). Distinct from Recall: SYNAPSE injects *rules*, Recall injects *knowledge*.
 _Avoid_: conflating SYNAPSE rule-injection with Brain knowledge-recall.
+
+**dream**:
+The consolidation skill — run deliberately in a session, it reflects on the live conversation,
+distills durable knowledge, and (after the operator confirms) writes net-new pages into the wiki's
+semantic tiers. Consolidation, not capture; a skill, not a daemon.
+_Avoid_: daemon, background job, summarizer (it is a deliberate, operator-confirmed skill).
+
+**Consolidation**:
+dream's act — turning one session's experience into durable decisions/gotchas/rules/concepts in the
+wiki, each candidate gated by validation. Distinct from **Capture** (session-end's mechanical
+breadcrumb page).
+_Avoid_: capture, summarization.
+
+**Proposal**:
+A validated candidate page dream stages for operator confirmation before any write. It carries a
+target tier, a one-line rationale, a confidence, and **evidence** — a verbatim quote from the session
+that grounds it. Nothing is written without confirmation (writes are additive + dedup-skip).
+_Avoid_: draft, suggestion (a proposal is evidence-backed, gated, and auditable).
+
+**Validation gate**:
+The deterministic keep-or-discard check dream runs on every proposal — confidence floor, mandatory
+evidence, dedup against existing pages, restraint (no durable insight ⇒ write nothing), and the
+anti-superstition negative filters. The skill *proposes*; the gate *judges*. "Bad memory is worse
+than no memory."
+_Avoid_: filter, lint (lint is the later harvest health-check, not the write gate).
+
+**_rules** (tier):
+Durable always/never project conventions, written by dream as **recalled knowledge** (surfaced by
+Recall, like concepts/gotchas). Distinct from **SYNAPSE** rules: SYNAPSE injects a small curated set
+every prompt; `_rules` pages are many and situational. Promoting a `_rules` page into SYNAPSE is a
+separate deliberate act, never dream.
+_Avoid_: conflating `_rules` knowledge with SYNAPSE rule-injection.
+
+**Focus slot** (`_slots/current-focus.md`):
+The durable, pinned page describing the project's standing focus — recall-surfaced, and the one path
+dream may UPDATE (the lone exception to additive + dedup-skip). Disjoint from the **continuity baton**:
+the baton (`.wrxn/continuity/latest.md`) is single-writer (the handoff skill), ephemeral cross-session
+resume; the focus slot is durable standing context. Keeping their paths and writers disjoint preserves
+the continuity doctrine.
+_Avoid_: merging the focus slot with the handoff baton.
