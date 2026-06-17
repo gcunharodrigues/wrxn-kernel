@@ -146,6 +146,43 @@ function normalizeTitle(t) {
   return String(t == null ? '' : t).toLowerCase().replace(/\s+/g, ' ').trim();
 }
 
+// ── importance stamp — the decay-weight PRODUCER (harvest-10) ──────────────────
+// dream already scores each page (`confidence`, gate floor 0.75) but never PERSISTED it, so recon
+// D1/D3's `recency × importance` recall weight collapsed to `recency × tier-prior`. On commit we persist
+// that EXISTING score as a single `importance:` frontmatter scalar — we do NOT recompute or invent a new
+// model. Clamped to [0,1] and rendered through Number() so it is one bare scalar that cannot inject a
+// newline/colon (AC4, same discipline as sync.cjs's `synced_to:` watermark).
+function clamp01(score) {
+  const n = Number(score);
+  if (Number.isNaN(n)) return 0; // a non-numeric/garbage score floors to 0 — never a raw string in the page
+  return Math.max(0, Math.min(1, n));
+}
+
+// PURE in-place stamp (mirrors sync.cjs restampDoc): update `importance:` when present (no duplicate key),
+// else append one frontmatter line; the body after the closing fence is preserved byte-for-byte (no churn).
+// A page with no frontmatter fence is returned unchanged (defensive — wiki pages always carry one).
+function stampImportance(content, score) {
+  const text = String(content);
+  const m = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text);
+  if (!m) return text;
+  const lines = m[1].split(/\r?\n/);
+  const value = clamp01(score);
+  let found = false;
+  for (let i = 0; i < lines.length; i++) {
+    if (/^importance:\s*/.test(lines[i])) { lines[i] = `importance: ${value}`; found = true; break; }
+  }
+  if (!found) lines.push(`importance: ${value}`);
+  // splice ONLY the frontmatter fence back; the body after the closing --- is byte-for-byte preserved.
+  return text.slice(0, m.index) + ['---', lines.join('\n'), '---'].join('\n') + text.slice(m.index + m[0].length);
+}
+
+// Stamp the just-written wiki page in place (read → stampImportance → write). The page is reached by its
+// tier+slug under .wrxn/wiki/ — the same page wiki.cjs just wrote — so the stamp never re-routes the write.
+function stampPageImportance(root, tier, slug, score) {
+  const file = path.join(root, '.wrxn', 'wiki', tier, `${slug}.md`);
+  fs.writeFileSync(file, stampImportance(fs.readFileSync(file, 'utf8'), score));
+}
+
 // ── anti-superstition negative filters ────────────────────────────────────────
 // A mechanical backstop to the dream skill's prompt (the skill is the primary semantic filter; this is
 // "reinforced where mechanical"). Each pattern catches a class of transient/false "memory" that, if
@@ -407,6 +444,7 @@ function runCommit() {
     }
     try {
       const r = wikiWritePage(root, p.tier, p.slug, p.title, p.body);
+      stampPageImportance(root, p.tier, p.slug, p.confidence); // persist dream's score as importance: (harvest-10)
       written.push({ slug: p.slug, tier: p.tier, file: r.written });
     } catch (err) {
       // wiki.cjs write-page does process.exit(2) on an existing page — catch the non-zero exit so a
@@ -465,4 +503,8 @@ function main() {
   }
 }
 
-main();
+if (require.main === module) {
+  main();
+}
+
+module.exports = { stampImportance };

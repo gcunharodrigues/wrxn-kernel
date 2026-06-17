@@ -15,6 +15,7 @@ const { execFileSync } = require('child_process');
 const PKG_ROOT = path.join(__dirname, '..');
 const { init } = require('../lib/install.cjs');
 const { loadManifest } = require('../lib/manifest.cjs');
+const { stampImportance } = require('../payload/.wrxn/dream.cjs'); // the pure decay-weight stamp (harvest-10)
 
 const DREAM = '.wrxn/dream.cjs';
 const WIKI = '.wrxn/wiki.cjs';
@@ -615,4 +616,77 @@ test('the knowledge gate does NOT gain _slots — a proposal targeting _slots is
   const t = freshInstall('dream-slots-gate-');
   const v = checkOne(t, validProposal({ kind: 'concept', tier: '_slots', slug: 'current-focus', title: 'x', body: '# x\n\ny' }));
   assert.equal(v.reason, 'unsupported_tier');
+});
+
+// ── importance: stamp — the decay-weight PRODUCER (harvest-10) ─────────────────
+// dream computes a 0–1 per-page score (`confidence`, gate floor 0.75) but never PERSISTED it, so recon
+// D1/D3's `recency × importance` collapsed to `recency × tier-prior`. Commit now stamps that score as a
+// single `importance:` frontmatter scalar (the restampDoc-style in-place stamp), clamped to [0,1].
+
+test('AC1: commit stamps importance: <dream score> on the written page', () => {
+  const t = freshInstall('dream-importance-');
+  const p = validProposal({ kind: 'concept', tier: 'concepts', slug: 'imp-concept', title: 'Imp concept', body: '# Imp concept\n\nbody.', confidence: 0.84 });
+  stage(t, [p]);
+  commit(t, ['imp-concept']);
+  const txt = fs.readFileSync(path.join(t, '.wrxn', 'wiki', 'concepts', 'imp-concept.md'), 'utf8');
+  assert.match(txt, /^importance: 0.84$/m, 'the committed page carries dream\'s score as importance:');
+  assert.equal((txt.match(/^importance:/gm) || []).length, 1, 'exactly one importance line');
+});
+
+test('AC3: an out-of-range (>1) confidence is clamped to importance: 1 through the real commit path', () => {
+  const t = freshInstall('dream-importance-clamp-');
+  // confidence 1.5 still passes the gate (>= 0.75, a number) → reaches the write → clamped at the stamp
+  const p = validProposal({ slug: 'over-one', title: 'Over one', body: '# Over\n\nbody.', confidence: 1.5 });
+  stage(t, [p]);
+  commit(t, ['over-one']);
+  const txt = fs.readFileSync(path.join(t, '.wrxn', 'wiki', 'decisions', 'over-one.md'), 'utf8');
+  assert.match(txt, /^importance: 1$/m, 'a confidence above 1 is clamped to 1');
+});
+
+test('AC2/AC3: the stamp leaves the committed page body + single H1 unchanged (no body churn)', () => {
+  const t = freshInstall('dream-importance-body-');
+  const body = '# Cache design\n\nThe cache sits in front of the store.\nSecond paragraph stays put.';
+  const p = validProposal({ kind: 'concept', tier: 'concepts', slug: 'cache-design', title: 'Cache design', body });
+  stage(t, [p]);
+  commit(t, ['cache-design']);
+  const txt = fs.readFileSync(path.join(t, '.wrxn', 'wiki', 'concepts', 'cache-design.md'), 'utf8');
+  assert.match(txt, /^importance: 0.9$/m, 'the stamp is present (validProposal default confidence 0.9)');
+  assert.ok(txt.includes(body), 'the proposal body is present verbatim after the stamp (no churn)');
+  assert.equal((txt.match(/^# .*/gm) || []).length, 1, 'still exactly one H1 (qa-06 invariant holds)');
+});
+
+test('AC2 backward-safe: a pre-existing importance-less page is dedup-skipped, never stamped', () => {
+  const t = freshInstall('dream-importance-backward-');
+  // stage BEFORE any page exists (so the proposal validates + stages), mirroring the dedup-skip test
+  stage(t, [validProposal({ slug: 'legacy', title: 'Legacy', body: '# Legacy\n\nWOULD-CLOBBER' })]);
+  // a curated importance-less page is THEN laid by hand at the same slug
+  wiki(t, ['write-page', 'decisions', 'legacy', '--description', 'Legacy', '--body', '# Legacy\n\noriginal body']);
+  const page = path.join(t, '.wrxn', 'wiki', 'decisions', 'legacy.md');
+  const before = fs.readFileSync(page, 'utf8');
+  assert.doesNotMatch(before, /^importance:/m, 'the curated page carries no importance: (this slice must not add one)');
+  // committing the staged slug is re-gate dedup-SKIPPED → the page is not rewritten/stamped
+  const out = commit(t, ['legacy']);
+  assert.equal(out.skipped[0].reason, 'duplicate_existing_path');
+  assert.equal(fs.readFileSync(page, 'utf8'), before, 'the importance-less page is byte-for-byte untouched (D1 tier-priors it)');
+});
+
+test('AC2 (pure): stampImportance updates importance in place on re-stamp — no duplicate key, body unchanged', () => {
+  const page = '---\nname: x\ndescription: X\ntier: concepts\nsource: wiki-cli-write-page\n---\n\n# X\n\nbody line one.\nbody line two.\n';
+  const once = stampImportance(page, 0.8);
+  assert.match(once, /^importance: 0.8$/m);
+  const twice = stampImportance(once, 0.6); // re-stamp the SAME page
+  assert.equal((twice.match(/^importance:/gm) || []).length, 1, 'exactly one importance key after re-stamp');
+  assert.match(twice, /^importance: 0.6$/m, 'updated in place to the new value');
+  assert.ok(twice.includes('# X\n\nbody line one.\nbody line two.'), 'the body is untouched across re-stamps');
+});
+
+test('AC4 (pure): the stamp is shape-safe — a malicious score cannot inject frontmatter/newlines', () => {
+  const page = '---\nname: x\ndescription: X\ntier: concepts\nsource: wiki-cli-write-page\n---\n\n# X\n\nbody.\n';
+  const out = stampImportance(page, '0.5\nevil: pwned'); // Number("0.5\nevil…") → NaN → clamp → 0
+  assert.equal((out.match(/^importance:/gm) || []).length, 1, 'a single importance line, no injected scalar');
+  assert.doesNotMatch(out, /evil:/, 'no injected frontmatter key');
+  assert.match(out, /^importance: 0$/m, 'a non-numeric score coerces to 0, never a raw string');
+  // and an out-of-range numeric is clamped both ways
+  assert.match(stampImportance(page, 1.5), /^importance: 1$/m);
+  assert.match(stampImportance(page, -0.3), /^importance: 0$/m);
 });
