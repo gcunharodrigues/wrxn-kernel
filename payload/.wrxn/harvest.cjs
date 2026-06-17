@@ -13,8 +13,9 @@
 //                     prose page we query the door with its body; other harvest-tier pages whose dense
 //                     cosine clears the threshold are near-dup neighbours. Pairwise edges are collapsed
 //                     into connected-component CLUSTERS (so an A↔B match is reported once, not twice).
-//   · decay_candidate orphaned (its `derived_from:` source FILE is gone) OR superseded (it carries a
-//                     `superseded_by:` forward-link). Both are LOCAL frontmatter scans — no door.
+//   · decay_candidate an orphaned page (its `derived_from:` source FILE is gone) that is NOT yet annotated.
+//                     A page already carrying `stale:` or `superseded_by:` is RESOLVED (the curated end
+//                     state) and excluded, so a fully-curated tree reads clean. A LOCAL scan — no door.
 //   · malformed       bad frontmatter — the existing wiki-lint signal (kernel-11), over the 4 tiers.
 //
 // This is LAYER 1 of harvest: detection only. The report is the SOLE input to the destructive curation
@@ -165,8 +166,8 @@ function parseDerivedFrom(content) {
   return out;
 }
 
-// The `superseded_by:` forward-link, or null. (The supersession convention H4 writes; here it is a
-// report-only signal — a page already marked superseded is a decay candidate.)
+// The `superseded_by:` forward-link, or null — the supersession convention H4 writes. Exported pure helper;
+// NOT consulted by scanLocal, which treats a `superseded_by:` page as the RESOLVED end state, not debt.
 function parseSupersededBy(content) {
   const fm = frontmatter(content);
   if (!fm) return null;
@@ -258,6 +259,13 @@ function scanLocal(root) {
       const reason = lintPage(text);
       if (reason) malformed.push({ type: 'malformed', slug, path: rel, tier, reason });
 
+      // An already-annotated page (carries stale: or superseded_by:) is RESOLVED — its decay was already
+      // actioned: a superseded_by: forward-link is the desired end state (PRD US3, "forward-linked, not
+      // deleted"), and a stale: stamp is the resolution harvest offers for an orphan. Re-emitting it as a
+      // decay_candidate would re-arm the handoff debt nudge over a fully-curated tree forever (harvest-05
+      // AC2/AC8: clean set → silent). Skip the decay scan for it (the malformed lint above still applies).
+      if (hasFrontmatterKey(text, 'stale') || hasFrontmatterKey(text, 'superseded_by')) continue;
+
       // orphaned — a declared derived_from source FILE no longer exists on disk (a moved SYMBOL in an
       // existing file is drift, sync's job, not orphaning; we strip the #anchor and test the FILE).
       for (const raw of parseDerivedFrom(text)) {
@@ -268,10 +276,6 @@ function scanLocal(root) {
           decay.push({ type: 'decay_candidate', subtype: 'orphaned', slug, path: rel, tier, reason: `derived_from source missing: ${relTo(root, raw)}`, missing_source: relTo(root, raw) });
         }
       }
-
-      // superseded — already carries a forward-link to its replacement.
-      const sup = parseSupersededBy(text);
-      if (sup) decay.push({ type: 'decay_candidate', subtype: 'superseded', slug, path: rel, tier, reason: `superseded_by: ${sup}`, superseded_by: sup });
     }
   }
   return { malformed, decay };
@@ -631,6 +635,19 @@ function mergeHash(p) {
   return crypto.createHash('sha256').update(canon).digest('hex');
 }
 
+// ── the survivor frontmatter write-channel sanitiser (PURE) ──────────────────────
+// composeSurvivor interpolates the LLM/operator-drafted `description` VERBATIM as `description: <value>`
+// on one frontmatter line. A newline injects an arbitrary extra frontmatter key (e.g. a poisoned
+// `importance:` that hijacks decay-weighted recall — harvest never stamps importance: itself); a colon
+// creates YAML mapping ambiguity. Reject both — the same write-channel discipline decay's
+// annotationValueProblem applies, here WITHOUT its path-length cap + non-empty check (a description is
+// optional free prose). name/tier/merged_from in the same fence are kebab/allowlist-validated already, so
+// `description` is the lone free-text frontmatter field. Returns a problem code or null.
+function descriptionProblem(value) {
+  if (/[\r\n:]/.test(String(value == null ? '' : value))) return 'malformed_description';
+  return null;
+}
+
 // ── the survivor page (PURE) — the net-new write transform ───────────────────────
 // Compose a well-formed knowledge page (passes lintPage: name/description/tier) stamped with
 // `merged_from: [<absorbed slugs>]` — the provenance lands on the SURVIVING page, NEVER on the deleted
@@ -733,6 +750,7 @@ function runStage() {
   const description = p.description ? String(p.description) : '';
   const sec = secretScan(`${description}\n${p.body}`); // AC1: secret-scan BEFORE staging
   if (sec) fail(`stage rejected — the drafted survivor contains a credential (${sec}); never fold a session secret into knowledge`);
+  if (descriptionProblem(description)) fail('stage rejected — the survivor description must not contain a newline or colon (frontmatter-injection guard)');
 
   const dir = harvestDir(root);
   const ts = new Date().toISOString();
@@ -756,6 +774,7 @@ function commitOne(root, rec) {
   const description = rec.description ? String(rec.description) : '';
   const sec = secretScan(`${description}\n${rec.body}`); // re-scan at the write boundary
   if (sec) return { ok: false, reason: sec };
+  if (descriptionProblem(description)) return { ok: false, reason: 'malformed_description' }; // re-check the frontmatter write channel — a tampered staged record (valid hash) can't smuggle an injected key through
   if (mergeHash(rec) !== rec.hash) return { ok: false, reason: 'integrity_mismatch' }; // tamper → refuse
 
   const survAbs = resolveSafeHarvestDoc(root, rec.survivor);
@@ -1058,6 +1077,12 @@ function decayConfirmOne(root, rec) {
   } catch {
     return { ok: false, reason: 'missing_page' };
   }
+  // AC4 re-check at the write boundary: a page that became reinforced (surfaced by Recall) in the
+  // propose→confirm window is live knowledge and must never be flagged stale/superseded. The integrity
+  // hash covers page/key/value only, so it cannot catch a reinforce-state change — re-read the sidecar,
+  // mirroring the propose-side reinforcedSet check.
+  const rel = wikiRelOf(rec.page);
+  if (rel && reinforcedSet(root).has(rel)) return { ok: false, reason: 'reinforced' };
   if (hasFrontmatterKey(content, rec.key)) return { ok: false, reason: 'already_annotated' }; // AC5: idempotent no-op, no churn
   const next = annotateFrontmatter(content, rec.key, rec.value);
   if (next == null) return { ok: false, reason: 'no_frontmatter' };
@@ -1137,6 +1162,7 @@ module.exports = {
   secretScan,
   resolveSafeHarvestDoc,
   mergeHash,
+  descriptionProblem,
   composeSurvivor,
   isKebab,
   // decay (harvest-04) — pure gate + annotation primitives

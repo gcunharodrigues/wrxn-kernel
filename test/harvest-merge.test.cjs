@@ -146,6 +146,15 @@ test('secretScan: flags an AWS key, passes clean prose', () => {
   assert.equal(harvest.secretScan('# Notes\n\nplain merged prose'), null);
 });
 
+// ── PURE: descriptionProblem — the survivor frontmatter write-channel sanitiser (Fix1) ──
+
+test('descriptionProblem: rejects a newline + a colon (frontmatter-injection guard); passes clean prose / empty', () => {
+  assert.equal(harvest.descriptionProblem('how widget pagination works'), null, 'a clean one-line description passes');
+  assert.equal(harvest.descriptionProblem(''), null, 'an empty description is allowed (description is optional)');
+  assert.equal(harvest.descriptionProblem('legit\nimportance: 1.0'), 'malformed_description', 'a newline injects an extra frontmatter key');
+  assert.equal(harvest.descriptionProblem('has a: colon'), 'malformed_description', 'a colon (YAML mapping ambiguity) is refused — decay\'s discipline');
+});
+
 test('composeSurvivor: the survivor page carries merged_from provenance + name/tier and the body', () => {
   const page = harvest.composeSurvivor({ tier: 'concepts', slug: 'widget-pagination', description: 'desc', body: '# Widget\n\nunion', mergedFrom: ['alpha', 'beta'] });
   assert.match(page, /^merged_from: \[alpha, beta\]$/m, 'provenance lands on the survivor (the merged_from stamp)');
@@ -213,6 +222,22 @@ test('stage: an empty absorbed list is REFUSED (a merge folds at least one page)
   let err;
   try { runCli(t, ['stage', writeJson(t, 'p.json', mergeProposal({ absorbed: [] }))]); } catch (e) { err = e; }
   assert.ok(err, 'stage refused an empty absorbed list');
+});
+
+test('stage (Fix1): a survivor description containing a newline OR a colon is REFUSED (frontmatter-injection guard)', () => {
+  const t = freshInstall('wrxn-harvest-merge-stage-desc-');
+  plantCluster(t);
+  // a newline injects an arbitrary extra frontmatter key into the survivor (the medium-severity vector)
+  let errNl;
+  try { runCli(t, ['stage', writeJson(t, 'p1.json', mergeProposal({ description: 'legit\nimportance: 1.0' }))]); } catch (e) { errNl = e; }
+  assert.ok(errNl, 'stage refused a newline in the description');
+  assert.match(String(errNl.stderr || ''), /description.*(newline|colon|injection)/i);
+  // a colon alone is also refused — the same write-channel discipline decay's annotationValueProblem applies
+  let errColon;
+  try { runCli(t, ['stage', writeJson(t, 'p2.json', mergeProposal({ description: 'has a: colon' }))]); } catch (e) { errColon = e; }
+  assert.ok(errColon, 'stage refused a colon in the description');
+  // nothing was staged by either rejected attempt
+  assert.ok(!fs.existsSync(path.join(t, '.wrxn', 'harvest', 'staged.jsonl')), 'no proposal was staged');
 });
 
 // ── AC2 + AC4 + AC5: the headline DEMO — commit writes the survivor (merged_from) BEFORE deleting the absorbed ──
@@ -340,6 +365,25 @@ test('AC2/AC4 path-confine: a seeded staged record whose absorbed target escapes
   assert.ok(!pageExists(t, survRel), 'no survivor written when any target is unsafe');
   assert.ok(pageExists(t, '.wrxn/wiki/concepts/alpha.md'), 'the legit absorbed page was NOT deleted (atomic refusal)');
   assert.equal(fs.readFileSync(path.join(t, victimRel), 'utf8'), '# keep\n\nmust survive', 'the out-of-tier victim is byte-identical');
+});
+
+test('AC2 frontmatter-injection (Fix1): a staged record whose description injects a frontmatter line (VALID hash) is refused at commit — no write, no delete', () => {
+  const t = freshInstall('wrxn-harvest-merge-confirm-desc-inject-');
+  plantCluster(t);
+  const survRel = '.wrxn/wiki/concepts/widget-pagination.md';
+  const absorbed = ['.wrxn/wiki/concepts/alpha.md', '.wrxn/wiki/concepts/beta.md'];
+  const body = '# Widget\n\nclean union body';
+  // the description injects an importance: line — harvest never stamps importance:, so the injected value
+  // would be the sole importance source on the merged page (a decay-weighted-recall poisoning amplifier)
+  const description = 'legit desc\nimportance: 1.0';
+  // honest hash over the malicious record so integrity PASSES — proving the description guard is an INDEPENDENT gate
+  seedStaged(t, [{ ts: 'x', op: 'stage', survivor: survRel, tier: 'concepts', slug: 'widget-pagination', description, body, absorbed, hash: harvest.mergeHash({ survivor: survRel, description, body, absorbed }) }]);
+
+  const out = commit(t, [survRel]);
+  assert.equal(out.merged.length, 0, 'the injected-description proposal was blocked at the write boundary');
+  assert.equal(out.skipped[0].reason, 'malformed_description');
+  assert.ok(!pageExists(t, survRel), 'no survivor written');
+  assert.ok(pageExists(t, '.wrxn/wiki/concepts/alpha.md') && pageExists(t, '.wrxn/wiki/concepts/beta.md'), 'no absorbed deleted');
 });
 
 test('commit: approving a survivor that was never staged is skipped (not_staged), nothing changes', () => {

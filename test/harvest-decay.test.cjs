@@ -286,6 +286,31 @@ test('AC4 reinforced-exclusion: an orphaned-but-reinforced page is never propose
   assert.ok(pages.includes('.wrxn/wiki/concepts/orphan-cold.md'), 'a non-reinforced orphan IS proposed');
 });
 
+// ── AC4 re-check at the write boundary: a page reinforced in the propose→confirm window is skipped ──
+
+test('AC4 (Fix3): a page reinforced AFTER propose but before confirm is skipped at confirm (live knowledge never flagged)', () => {
+  const t = freshInstall('wrxn-harvest-decay-reinf-confirm-');
+  const pageRel = '.wrxn/wiki/concepts/orphan-page.md';
+  writePage(t, 'concepts', 'orphan-page', { derived_from: 'src/gone.ts' }, '# orphan-page\n\nbody');
+  const before = read(t, pageRel);
+
+  // propose with NO reinforce.json yet → the orphan IS staged (it is not reinforced at propose time)
+  const prop = decayPropose(t);
+  assert.ok(prop.staged.some((s) => s.page === pageRel), 'the orphan was staged at propose (not yet reinforced)');
+
+  // the page is surfaced by Recall in the propose→confirm window → it becomes reinforced (live knowledge)
+  fs.writeFileSync(
+    path.join(t, '.wrxn', 'reinforce.json'),
+    JSON.stringify({ 'concepts/orphan-page.md': dayStr(new Date()) })
+  );
+
+  // confirm must RE-READ the reinforced set and skip the now-live page (AC4 re-validated at the write boundary)
+  const out = decayConfirm(t, [pageRel]);
+  assert.equal(out.annotated.length, 0, 'the now-reinforced page is not annotated at confirm');
+  assert.equal(out.skipped[0].reason, 'reinforced', 'skipped because it became live knowledge in the propose→confirm window');
+  assert.equal(read(t, pageRel), before, 'the page is byte-identical (no write)');
+});
+
 // ── AC5 idempotency (propose): an already-annotated page is not re-proposed ──
 
 test('AC5 idempotency (propose): a page already carrying stale: is skipped, not re-proposed', () => {

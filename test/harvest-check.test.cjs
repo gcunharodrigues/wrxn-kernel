@@ -178,14 +178,26 @@ test('scanLocal: orphaned = a page whose derived_from source FILE is gone; an ex
   assert.equal(orphaned[0].missing_source, 'src/missing.ts', 'records the missing source (anchor stripped) for the downstream proposal');
 });
 
-test('scanLocal: superseded = a page carrying a superseded_by forward-link', () => {
+test('scanLocal (Fix2): a page carrying superseded_by: is RESOLVED (the desired end state) — NOT a decay_candidate', () => {
   const root = installRoot('wrxn-harvest-superseded-');
   writePage(root, 'decisions', 'old', { superseded_by: 'decisions/new.md' }, '# old\n\nreplaced');
   const { decay } = harvest.scanLocal(root);
-  const sup = decay.filter((d) => d.subtype === 'superseded');
-  assert.equal(sup.length, 1);
-  assert.equal(sup[0].slug, 'old');
-  assert.equal(sup[0].superseded_by, 'decisions/new.md');
+  // a superseded_by: forward-link IS the curated end state (PRD US3: forward-linked, not deleted) — re-
+  // flagging it as debt would nudge harvest forever over a fully-curated tree (harvest-05 AC2/AC8).
+  assert.equal(decay.length, 0, 'a superseded_by: page is resolved, never re-emitted as a decay_candidate');
+});
+
+test('scanLocal (Fix2): an orphaned page already carrying stale: is RESOLVED — not re-emitted; a still-un-annotated orphan IS', () => {
+  const root = installRoot('wrxn-harvest-annotated-orphan-');
+  // orphaned (derived_from source gone) AND already annotated stale: → the decay was already actioned
+  writePage(root, 'concepts', 'done', { derived_from: 'src/gone.ts', stale: 'src/gone.ts' }, '# done\n\nalready curated');
+  // a still-pending orphan (no stale: yet) → MUST still be detected (the debt signal is not broken)
+  writePage(root, 'concepts', 'pending', { derived_from: 'src/also-gone.ts' }, '# pending\n\nnot yet curated');
+  const { decay } = harvest.scanLocal(root);
+  assert.ok(!decay.some((d) => d.slug === 'done'), 'an already-stale orphan is not a decay_candidate (resolved)');
+  const pending = decay.filter((d) => d.slug === 'pending');
+  assert.equal(pending.length, 1, 'a still-un-annotated orphan IS still detected');
+  assert.equal(pending[0].subtype, 'orphaned');
 });
 
 test('scanLocal: malformed pages are flagged with their slug/path/tier and a reason', () => {
@@ -379,6 +391,28 @@ test('check AC4: a cold door degrades near_dup to "unavailable" while malformed 
   assert.equal(records.filter((r) => r.type === 'decay_candidate').length, 1, 'the orphaned scan still ran');
   assert.equal(records.filter((r) => r.type === 'malformed').length, 1, 'the malformed scan still ran');
   assert.equal(res.summary.nearDupStatus, 'unavailable');
+});
+
+test('check (Fix2): after a page is annotated (decay confirm), a re-check no longer lists it → the debt signal goes clean', async () => {
+  const root = freshInstall('wrxn-harvest-debt-clean-');
+  // the ONLY curation debt in the tree: one orphaned page
+  writePage(root, 'concepts', 'orphan', { derived_from: 'src/gone.ts' }, '# orphan\n\nx');
+
+  // first check: the orphan IS a decay_candidate (real, un-curated debt)
+  await harvest.check(root, {});
+  assert.equal(readReport(root).filter((r) => r.type === 'decay_candidate').length, 1, 'the orphan is flagged before curation');
+
+  // curate it in place exactly as `decay confirm` would — append a stale: frontmatter key
+  const file = path.join(root, '.wrxn', 'wiki', 'concepts', 'orphan.md');
+  fs.writeFileSync(file, harvest.annotateFrontmatter(fs.readFileSync(file, 'utf8'), 'stale', 'src/gone.ts'));
+
+  // clear the prior report so readReport sees exactly the fresh one
+  const dir = path.join(root, '.wrxn', 'harvest');
+  for (const f of fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl'))) fs.rmSync(path.join(dir, f));
+
+  // a fresh check over the now-curated tree lists NO decay_candidate → the handoff debt-gate falls silent
+  await harvest.check(root, {});
+  assert.equal(readReport(root).filter((r) => r.type === 'decay_candidate').length, 0, 'a fully-curated tree reads clean — no decay debt re-reported');
 });
 
 // ── black-box CLI ───────────────────────────────────────────────────────────────
