@@ -47,9 +47,18 @@ const HARVEST_DIR = ['.wrxn', 'harvest'];
 // walks all of .wrxn and reads *.md) never recalls a staged-but-unconfirmed merge. Coexists with check's
 // timestamped <ts>.jsonl reports in the same dir (distinct fixed names, no collision).
 const STAGED_FILE = 'staged.jsonl'; // the proposed-but-unconfirmed merges (survivor body + absorbed, by-reference).
-const AUDIT_FILE = 'audit.jsonl'; // append-only outcome log (stage + commit events).
+const AUDIT_FILE = 'audit.jsonl'; // append-only outcome log (stage + commit + decay events).
+const DECAY_STAGED_FILE = 'decay-staged.jsonl'; // harvest-04: proposed-but-unconfirmed decay annotations (by-reference). Distinct fixed name from merge's staged.jsonl; both non-.md so recon never recalls a staged-but-unconfirmed op.
 const BODY_MAX = 32000; // survivor body cap (chars) — a durable merged page, not a dump (dream/sync parity).
 const WIKI_REL = ['.wrxn', 'wiki']; // all merge targets confine under <root>/.wrxn/wiki/<knowledge-tier>/.
+const WIKI_PREFIX = '.wrxn/wiki/'; // stripped to form the reinforce.json wiki-rel join key (recall-surface parity).
+const REINFORCE_REL = path.join('.wrxn', 'reinforce.json'); // the coalesced access-recency sidecar (harvest-08 / D2) — STATE.
+// The reinforced-exclusion window (AC4). 30 days is the project's established staleness boundary (the
+// ai-memory briefing buckets activity at 7d/30d and treats >30d as stale): a page surfaced in Recall
+// within the last month is demonstrably LIVE knowledge and must never be flagged stale/superseded, while a
+// page un-surfaced for over a month is fair game for a decay annotation. Day-granular (the sidecar's grain).
+const REINFORCE_WINDOW_DAYS = 30;
+const VALUE_MAX = 256; // cap on a decay annotation VALUE (a path) — a frontmatter write channel, not a body.
 const ENDPOINT_REL = path.join('.recon-wrxn', 'serve-endpoint.json');
 const FIND_PATH = '/api/tools/recon_find'; // the recon serve door recall-surface/brain query.
 const PROSE_TYPES = new Set(['Page', 'Section']); // prose scope — code symbols are never near-dup targets.
@@ -543,6 +552,16 @@ function positionalFile() {
   return undefined;
 }
 
+// The first positional at-or-after `start` (up to the first --flag), or undefined when none. Used by the
+// two-word `decay propose|confirm` grammar (the sub-verb is argv[3], so its file argument starts at argv[4]).
+function positionalAfter(start) {
+  for (let i = start; i < process.argv.length; i++) {
+    if (process.argv[i].startsWith('--')) break;
+    return process.argv[i];
+  }
+  return undefined;
+}
+
 function readJson(file) {
   try {
     return JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -804,6 +823,271 @@ function runCommit() {
   return print({ merged, skipped });
 }
 
+// ════════════════════════════════════════════════════════════════════════════════
+// DECAY / SUPERSESSION (harvest-04 / H4) — the NON-destructive curation op: ANNOTATE a superseded or
+// orphaned page so Recall + the operator know its status, WITHOUT ever deleting it (provenance survives —
+// Letta eviction-not-delete). Two annotation kinds, each landing as ONE forward-link key in the page
+// FRONTMATTER (the body is never touched):
+//   · stale: <missing-source-path>   — an orphaned page whose `derived_from:` source FILE is gone. Auto-
+//                                       derived from H2's scanLocal (mechanical — no judgment needed).
+//   · superseded_by: <path>          — a page replaced by another. A skill/operator JUDGMENT drafted into
+//                                       a proposal file (auto-scan cannot invent the replacement target).
+// Reuses sync-06 / merge's propose→confirm by-reference spine (secret-scan, sha256 integrity, path-
+// confinement) and the sync restampDoc spirit (an in-place single-key frontmatter stamp that preserves all
+// other frontmatter). There is NO delete path here — decay only annotates (delete is H3 alone).
+// ════════════════════════════════════════════════════════════════════════════════
+
+// ── the reinforced-exclusion reader (AC4) — read the coalesced recency sidecar ────
+// A day-granular UTC stamp (YYYY-MM-DD) — the reinforce.json grain (recall-surface.cjs dayStamp parity).
+// Injectable clock so the window is deterministic under test.
+function dayStamp(now) {
+  const d = now instanceof Date ? now : new Date(now == null ? Date.now() : now);
+  return d.toISOString().slice(0, 10);
+}
+
+// The window cutoff: today minus REINFORCE_WINDOW_DAYS, as a YYYY-MM-DD string. ISO dates sort lexically,
+// so a string `>=` against this cutoff is the within-window test.
+function cutoffDay(now) {
+  const base = now instanceof Date ? new Date(now.getTime()) : new Date(now == null ? Date.now() : now);
+  base.setUTCDate(base.getUTCDate() - REINFORCE_WINDOW_DAYS);
+  return base.toISOString().slice(0, 10);
+}
+
+// The wiki-root-relative join key for a page path: tolerate a leading './', normalize separators, strip the
+// '.wrxn/wiki/' prefix → e.g. 'concepts/foo.md'. IDENTICAL to recall-surface.cjs wikiRelPath (the reinforce
+// sidecar is keyed this way on the writer side — a slug-vs-path mismatch would silently break the exclusion).
+function wikiRelOf(file) {
+  const f = String(file || '').replace(/\\/g, '/').replace(/^\.\//, '');
+  const i = f.indexOf(WIKI_PREFIX);
+  if (i === -1) return null;
+  return f.slice(i + WIKI_PREFIX.length) || null;
+}
+
+// Read <root>/.wrxn/reinforce.json → the Set of wiki-rel paths surfaced within the window (AC4). Wholly
+// graceful: an absent sidecar (the common case — D2 may not have run yet), a corrupt body, or a non-map
+// shape all yield an EMPTY set (nothing treated as reinforced) and NEVER throw.
+function reinforcedSet(root, now) {
+  const out = new Set();
+  let raw;
+  try {
+    raw = fs.readFileSync(path.join(root, REINFORCE_REL), 'utf8');
+  } catch {
+    return out; // absent sidecar → nothing reinforced (graceful)
+  }
+  let map;
+  try {
+    map = JSON.parse(raw);
+  } catch {
+    return out; // corrupt → nothing reinforced (never clobber, never throw)
+  }
+  if (!map || typeof map !== 'object' || Array.isArray(map)) return out; // not a map → nothing reinforced
+  const cutoff = cutoffDay(now);
+  for (const [key, val] of Object.entries(map)) {
+    if (typeof val !== 'string') continue;
+    const day = val.slice(0, 10);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(day) && day >= cutoff) out.add(key); // within the window (inclusive)
+  }
+  return out;
+}
+
+// ── the annotation value sanitiser (write-channel safety, sync's fingerprintProblem analog) ──
+// The value lands VERBATIM as `<key>: <value>` on one frontmatter line — a write channel the page-confine
+// gate doesn't cover. Reject a newline (frontmatter injection), a colon (YAML mapping ambiguity — and a
+// legit stale/superseded_by value is a plain POSIX path with neither), empty, oversize; then secret-scan
+// (a credential must never harden into recalled frontmatter). Returns a problem code or null.
+function annotationValueProblem(value) {
+  if (typeof value !== 'string' || !value.trim()) return 'malformed_value';
+  if (/[\r\n:]/.test(value)) return 'malformed_value'; // newline → injection; colon → YAML ambiguity
+  if (value.length > VALUE_MAX) return 'malformed_value';
+  return secretScan(value); // 'contains_secret' (value is a write channel) | null
+}
+
+// The integrity fingerprint over the fields that DETERMINE the write (the page target, the annotation key,
+// and the value). Recomputed at the write boundary and compared to the staged value → a record whose
+// page/key/value was altered after staging cannot write (AC2 tamper-refusal). The reason is operator-facing
+// metadata only (never written into the page), so it is deliberately OUT of the hash.
+function decayHash(p) {
+  const canon = JSON.stringify({ page: String(p.page || ''), key: String(p.key || ''), value: String(p.value || '') });
+  return crypto.createHash('sha256').update(canon).digest('hex');
+}
+
+// ── the in-place frontmatter annotation (PURE) — the sync restampDoc spirit ───────
+// True when the page's frontmatter ALREADY carries `<key>:` — the idempotency probe (AC5). No fence → false.
+function hasFrontmatterKey(content, key) {
+  const m = /^---\r?\n([\s\S]*?)\r?\n---/.exec(String(content));
+  if (!m) return false;
+  return new RegExp(`^${key}:\\s*`, 'm').test(m[1]);
+}
+
+// Append `<key>: <value>` to the page's frontmatter, preserving every other frontmatter line AND the body
+// BYTE-FOR-BYTE (the body is sliced off the original and re-appended unchanged — decay never rewrites it).
+// A page with no frontmatter fence cannot carry a forward-link → returns null (the caller skips it). The
+// caller MUST hasFrontmatterKey-guard first (idempotency) — this function unconditionally appends.
+function annotateFrontmatter(content, key, value) {
+  const src = String(content);
+  const m = /^---\r?\n([\s\S]*?)\r?\n---/.exec(src);
+  if (!m) return null; // no frontmatter fence → not annotatable
+  return `---\n${m[1]}\n${key}: ${value}\n---${src.slice(m[0].length)}`; // m[0] excludes the trailing newline → body verbatim
+}
+
+// ── propose-side candidate assembly (PURE-ish: scanLocal reads fs) ────────────────
+// Auto-derive a `stale:` proposal for each ORPHANED decay candidate (H2's scanLocal — the same detection
+// H2 reports, re-run fresh so a since-fixed page never lingers from a stale report). superseded is a
+// JUDGMENT (which page replaced which) auto-scan cannot make → those arrive via the drafted proposal file.
+function autoStaleProposals(root) {
+  const { decay } = scanLocal(root);
+  const out = [];
+  const seen = new Set();
+  for (const d of decay) {
+    if (d.subtype !== 'orphaned' || seen.has(d.path)) continue; // one stale annotation per page (first missing source)
+    seen.add(d.path);
+    out.push({ page: d.path, key: 'stale', value: d.missing_source, reason: d.reason });
+  }
+  return out;
+}
+
+// Normalize the OPTIONAL skill-drafted proposal file into a {page,key,value,reason}[] (a single object, an
+// array, or { proposals:[…] }). The skill drafts these from H2's report — chiefly superseded_by judgments.
+function normalizeDraftProposals(input) {
+  let arr;
+  if (Array.isArray(input)) arr = input;
+  else if (input && Array.isArray(input.proposals)) arr = input.proposals;
+  else if (isObj(input)) arr = [input];
+  else arr = [];
+  return arr
+    .filter(isObj)
+    .map((p) => ({ page: String(p.page || ''), key: String(p.key || ''), value: p.value == null ? '' : String(p.value), reason: p.reason ? String(p.reason) : '' }));
+}
+
+// Read .wrxn/harvest/decay-staged.jsonl into a page → staged-record map (last proposed wins). Malformed
+// lines skip. A usable record needs a page, a key, and a string value.
+function readStagedDecay(root) {
+  const map = new Map();
+  let txt;
+  try {
+    txt = fs.readFileSync(path.join(root, ...HARVEST_DIR, DECAY_STAGED_FILE), 'utf8');
+  } catch {
+    return map; // no decay staging trail yet → nothing to confirm by reference
+  }
+  for (const line of txt.split('\n')) {
+    const s = line.trim();
+    if (!s) continue;
+    try {
+      const rec = JSON.parse(s);
+      if (rec && rec.page && rec.key && typeof rec.value === 'string') map.set(rec.page, rec);
+    } catch {
+      /* skip a malformed staging line */
+    }
+  }
+  return map;
+}
+
+// Normalize confirm input into the operator-approved PAGE list (["page"…] or { approved:[…] }). An EMPTY
+// list is the DECLINE — confirm annotates nothing (AC3).
+function approvedPages(input) {
+  if (Array.isArray(input)) return input.map(String);
+  if (input && typeof input === 'object' && Array.isArray(input.approved)) return input.approved.map(String);
+  return [];
+}
+
+// decay propose (STAGE): assemble candidates (auto-scanned orphaned → stale + the optional skill-drafted
+// proposals), then GATE each — page path-confined to a knowledge tier + present, key allowlisted, value
+// sanitised + secret-scanned, the page NOT reinforced (AC4), the page NOT already annotated (AC5) — and
+// record the survivors by-reference with an integrity hash. NEVER touches a knowledge page (mirrors merge's
+// stage / sync's propose).
+function runDecayPropose() {
+  const root = installRoot();
+  const fileArg = positionalAfter(4); // optional proposal file (absent → auto-scan only)
+  const drafted = fileArg ? normalizeDraftProposals(readJson(fileArg)) : [];
+
+  // skill-drafted entries override the auto-scanned one for the same page (the operator's judgment wins).
+  const byPage = new Map();
+  for (const p of autoStaleProposals(root)) byPage.set(p.page, p);
+  for (const p of drafted) byPage.set(p.page, p);
+
+  const reinforced = reinforcedSet(root); // wiki-rel paths surfaced within the window
+  const staged = [];
+  const skipped = [];
+  for (const p of byPage.values()) {
+    if (p.key !== 'stale' && p.key !== 'superseded_by') { skipped.push({ page: p.page, reason: 'bad_key' }); continue; }
+    const abs = resolveSafeHarvestDoc(root, p.page);
+    if (!abs || !isKebab(slugOfPath(p.page))) { skipped.push({ page: p.page, reason: 'unsafe_page' }); continue; }
+    const vp = annotationValueProblem(p.value);
+    if (vp) { skipped.push({ page: p.page, reason: vp }); continue; }
+    let content;
+    try {
+      content = fs.readFileSync(abs, 'utf8');
+    } catch {
+      skipped.push({ page: p.page, reason: 'missing_page' }); continue; // annotate only an existing page
+    }
+    const rel = wikiRelOf(p.page);
+    if (rel && reinforced.has(rel)) { skipped.push({ page: p.page, reason: 'reinforced' }); continue; } // AC4: live knowledge is never flagged
+    if (hasFrontmatterKey(content, p.key)) { skipped.push({ page: p.page, reason: 'already_annotated' }); continue; } // AC5
+    staged.push({ page: p.page, tier: tierOfPath(p.page), slug: slugOfPath(p.page), key: p.key, value: p.value, reason: p.reason || '', hash: decayHash(p) });
+  }
+
+  const dir = harvestDir(root);
+  const ts = new Date().toISOString();
+  const stagedFile = path.join(dir, DECAY_STAGED_FILE);
+  for (const rec of staged) appendLine(stagedFile, Object.assign({ ts, op: 'decay-propose' }, rec));
+  appendLine(path.join(dir, AUDIT_FILE), { ts, op: 'decay-propose', staged: staged.map((s) => ({ page: s.page, key: s.key, value: s.value })), skipped });
+  return print({ staged, skipped, stagedFile: path.relative(root, stagedFile) });
+}
+
+// decayConfirmOne: the write-boundary re-gate for ONE approved page. RE-VALIDATE (key → value sanitise +
+// secret-scan → integrity → path-confine + kebab → page present + not a symlink → not already annotated)
+// BEFORE any write, so a tampered/seeded/declined record cannot write (AC2). Then — and only then — the
+// in-place single-key frontmatter stamp (body preserved verbatim). NEVER deletes. Returns { ok, … }.
+function decayConfirmOne(root, rec) {
+  if (rec.key !== 'stale' && rec.key !== 'superseded_by') return { ok: false, reason: 'bad_key' };
+  const vp = annotationValueProblem(rec.value); // re-sanitise + re-secret-scan at the write boundary
+  if (vp) return { ok: false, reason: vp };
+  if (decayHash(rec) !== rec.hash) return { ok: false, reason: 'integrity_mismatch' }; // tamper → refuse
+  const abs = resolveSafeHarvestDoc(root, rec.page);
+  if (!abs || !isKebab(slugOfPath(rec.page))) return { ok: false, reason: 'unsafe_page' };
+  let lst;
+  try {
+    lst = fs.lstatSync(abs);
+  } catch {
+    return { ok: false, reason: 'missing_page' }; // the page vanished since staging
+  }
+  if (lst.isSymbolicLink()) return { ok: false, reason: 'symlink_page' }; // refuse following a planted symlink out of the tree
+  let content;
+  try {
+    content = fs.readFileSync(abs, 'utf8');
+  } catch {
+    return { ok: false, reason: 'missing_page' };
+  }
+  if (hasFrontmatterKey(content, rec.key)) return { ok: false, reason: 'already_annotated' }; // AC5: idempotent no-op, no churn
+  const next = annotateFrontmatter(content, rec.key, rec.value);
+  if (next == null) return { ok: false, reason: 'no_frontmatter' };
+  fs.writeFileSync(abs, next); // the in-place annotation — body byte-identical, page never deleted
+  return { ok: true, page: rec.page, key: rec.key, value: rec.value };
+}
+
+// decay confirm (COMMIT-by-reference): for each operator-approved page, look up its staged decay record and
+// run decayConfirmOne. An empty approval is the decline (nothing changes, AC3). Then audit the outcome.
+function runDecayConfirm() {
+  const fileArg = positionalAfter(4);
+  if (!fileArg) fail('decay confirm needs <approved.json> — the page path(s) the operator confirms');
+  const input = readJson(fileArg);
+  const root = installRoot();
+  const approved = approvedPages(input);
+  const staged = readStagedDecay(root);
+  const annotated = [];
+  const skipped = [];
+  for (const ref of approved) {
+    const key = String(ref);
+    const rec = staged.get(key);
+    if (!rec) { skipped.push({ page: key, reason: 'not_staged' }); continue; }
+    const res = decayConfirmOne(root, rec);
+    if (res.ok) annotated.push({ page: res.page, key: res.key, value: res.value });
+    else skipped.push({ page: key, reason: res.reason });
+  }
+  appendLine(path.join(harvestDir(root), AUDIT_FILE), { ts: new Date().toISOString(), op: 'decay-confirm', annotated: annotated.map((a) => a.page), skipped });
+  return print({ annotated, skipped });
+}
+
 async function main() {
   const cmd = process.argv[2];
   switch (cmd) {
@@ -813,8 +1097,15 @@ async function main() {
       return runStage();
     case 'commit':
       return runCommit();
+    case 'decay': {
+      const sub = process.argv[3];
+      if (sub === 'propose') return runDecayPropose();
+      if (sub === 'confirm') return runDecayConfirm();
+      process.stdout.write('Usage: node .wrxn/harvest.cjs decay <propose [proposal.json] | confirm <approved.json>> [--root <dir>]\n');
+      return process.exit(2); // a bare/unknown sub-verb is an incomplete command, not a help request
+    }
     default:
-      process.stdout.write('Usage: node .wrxn/harvest.cjs <check [--root <dir>] | stage <proposal.json> | commit <approved.json>> [--root <dir>]\n');
+      process.stdout.write('Usage: node .wrxn/harvest.cjs <check [--root <dir>] | stage <proposal.json> | commit <approved.json> | decay <propose [proposal.json]|confirm <approved.json>>> [--root <dir>]\n');
       process.exit(cmd ? 2 : 0);
   }
 }
@@ -848,8 +1139,19 @@ module.exports = {
   mergeHash,
   composeSurvivor,
   isKebab,
+  // decay (harvest-04) — pure gate + annotation primitives
+  reinforcedSet,
+  dayStamp,
+  cutoffDay,
+  wikiRelOf,
+  annotationValueProblem,
+  decayHash,
+  hasFrontmatterKey,
+  annotateFrontmatter,
+  autoStaleProposals,
   // constants
   HARVEST_TIERS,
   NEAR_DUP_THRESHOLD,
   FIND_PATH,
+  REINFORCE_WINDOW_DAYS,
 };
