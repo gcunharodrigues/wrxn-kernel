@@ -56,6 +56,29 @@ anti-superstition negative filters. The skill *proposes*; the gate *judges*. "Ba
 than no memory."
 _Avoid_: filter, lint (lint is the later harvest health-check, not the write gate).
 
+**harvest**:
+The curation / close-out loop, sibling to **dream** (additive) and **sync** (drift): at handoff
+(debt-gated) or on demand, it health-checks the knowledge tiers and, through operator-confirmed proposals,
+**merges** near-duplicates into one survivor, **forward-links** superseded pages, and **flags** orphans.
+Merge-then-delete is its only sanctioned knowledge deletion.
+_Avoid_: prune, garbage-collect, cleanup (harvest is gated + evidence-grounded, not a sweep).
+
+**Health-check**:
+harvest's auto, non-destructive detection pass — writes a durable report of near-dups, decay-candidates,
+and malformed pages to `.wrxn/harvest/<ts>.jsonl`; the input to curation. The "lint" the Validation-gate
+term names.
+_Avoid_: the Validation gate (that is dream's *write* gate; the health-check only *reports*).
+
+**Decay**:
+A page's **down-weighting in Recall** by recency × importance — never a deletion; reinforced pages stay
+fresh. Distinct from **drift** (sync: a doc out of step with its source).
+_Avoid_: delete, expire.
+
+**Reinforcement**:
+What resets a page's recency — it is access-tracked (Recall surfaces the page), stamped coalesced into
+`.wrxn/reinforce.json` (at most one write per page per day). Reinforcement is *use*, not authoring.
+_Avoid_: edit, modify (a write is dream/harvest; reinforcement is mere access).
+
 **_rules** (tier):
 Durable always/never project conventions, written by dream as **recalled knowledge** (surfaced by
 Recall, like concepts/gotchas). Distinct from **SYNAPSE** rules: SYNAPSE injects a small curated set

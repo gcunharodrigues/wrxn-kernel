@@ -124,6 +124,11 @@
       "profile": "project"
     },
     {
+      "path": ".claude/skills/harvest/SKILL.md",
+      "class": "managed",
+      "profile": "project"
+    },
+    {
       "path": ".claude/skills/improve-codebase-architecture/DEEPENING.md",
       "class": "managed",
       "profile": "project"
