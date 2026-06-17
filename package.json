@@ -13,7 +13,7 @@
     "manifest.json"
   ],
   "scripts": {
-    "test": "node --test"
+    "test": "node --test --require ./test/setup.cjs"
   },
   "dependencies": {
     "recon-wrxn": "6.0.0-wrxn.3"
