@@ -99,6 +99,11 @@
       "profile": "project"
     },
     {
+      "path": ".claude/skills/dream/SKILL.md",
+      "class": "managed",
+      "profile": "project"
+    },
+    {
       "path": ".claude/skills/grill-me/SKILL.md",
       "class": "managed",
       "profile": "project"

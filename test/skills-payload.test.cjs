@@ -23,6 +23,7 @@ const PIPELINE_SKILLS = [
   'triage',
   'diagnose',
   'handoff',
+  'dream',
   'prototype',
   'qa-walk',
   'improve-codebase-architecture',
