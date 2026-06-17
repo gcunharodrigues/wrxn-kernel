@@ -2,7 +2,7 @@
   "mcpServers": {
     "recon-wrxn": {
       "command": "npx",
-      "args": ["-y", "recon-wrxn@6.0.0-wrxn.3", "serve"]
+      "args": ["-y", "recon-wrxn@6.0.0-wrxn.5", "serve"]
     }
   }
 }

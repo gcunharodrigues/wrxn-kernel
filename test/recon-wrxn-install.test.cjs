@@ -16,7 +16,7 @@ const PKG_ROOT = path.join(__dirname, '..');
 const { init, RECEIPT } = require('../lib/install.cjs');
 const { loadManifest } = require('../lib/manifest.cjs');
 
-const RECON_VERSION = '6.0.0-wrxn.3';
+const RECON_VERSION = '6.0.0-wrxn.5';
 
 function tmp(p) {
   return fs.mkdtempSync(path.join(os.tmpdir(), p));
@@ -46,7 +46,7 @@ test('init lays .recon-wrxn.json matching recon-wrxn initConfig shape', () => {
   const target = tmp('wrxn-recon-cfg-');
   init({ pkgRoot: PKG_ROOT, target, profile: 'project' });
   const cfg = JSON.parse(fs.readFileSync(path.join(target, '.recon-wrxn.json'), 'utf8'));
-  // recon-wrxn's INIT_TEMPLATE (6.0.0-wrxn.3): { projects:[], embeddings:false, serveEmbed:true,
+  // recon-wrxn's INIT_TEMPLATE (6.0.0-wrxn.5): { projects:[], embeddings:false, serveEmbed:true,
   // serveHttp:false, watch:true, ignore:[] } — with serveHttp deliberately flipped to true so a
   // session serve opens the concurrent read-only HTTP find door the warm-brain Recall hook and
   // `wrxn brain query` reach (recon-wrxn ADR 0003). serveHttp/serveEmbed are real ReconConfig
