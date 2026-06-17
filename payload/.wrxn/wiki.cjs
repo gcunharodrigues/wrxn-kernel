@@ -4,7 +4,7 @@
 // WRXN memory-wiki adapter — the install-local CLI over the file-based memory tiers.
 // Self-contained: this ships INTO an install and MUST NOT import the kernel lib (node stdlib only).
 //
-// Tiers live under <installRoot>/.wrxn/wiki/<tier>/ where tier ∈ {concepts, decisions, gotchas, sessions}.
+// Tiers live under <installRoot>/.wrxn/wiki/<tier>/ where tier ∈ {concepts, decisions, gotchas, sessions, _rules}.
 // Each page is a plain markdown file. Empty tiers are the fresh-install default — every read path
 // must return cleanly (no crash) over an empty wiki.
 //
@@ -13,13 +13,15 @@
 //   recall <text...>             alias of query (page-level recall; same substring engine)
 //   write-page <tier> <slug>     create <tier>/<slug>.md (refuses to overwrite); prints the path
 //
-// Flags: --tier <concepts|decisions|gotchas|sessions|all> (default all) · --limit <N> (default 20)
+// Flags: --tier <concepts|decisions|gotchas|sessions|_rules|all> (default all) · --limit <N> (default 20)
 //        --root <dir> (override the install-root walk-up; mainly for tests)
 
 const fs = require('fs');
 const path = require('path');
 
-const TIERS = ['concepts', 'decisions', 'gotchas', 'sessions'];
+// `_rules` is the dream-written tier (durable always/never project conventions) — recalled like the
+// prose tiers, but machine-written by the dream adapter (dream-03), hence the `_` prefix.
+const TIERS = ['concepts', 'decisions', 'gotchas', 'sessions', '_rules'];
 
 // ── install-root resolution (walk up to the wrxn.install.json receipt) ────────
 // Mirrors payload/.claude/hooks/enforce-managed-guard.cjs findInstallRoot.
@@ -83,7 +85,7 @@ function listPages(dir) {
 function runQuery() {
   const terms = positionals();
   if (terms.length === 0) {
-    process.stdout.write('Usage: node .wrxn/wiki.cjs query <search-term...> [--tier all|concepts|decisions|gotchas|sessions] [--limit N]\n');
+    process.stdout.write('Usage: node .wrxn/wiki.cjs query <search-term...> [--tier all|concepts|decisions|gotchas|sessions|_rules] [--limit N]\n');
     process.exit(2);
   }
   const needle = terms.join(' ').toLowerCase();

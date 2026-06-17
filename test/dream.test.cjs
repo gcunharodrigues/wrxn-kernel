@@ -296,6 +296,52 @@ test('commit dedup-skips an existing page WITHOUT aborting the rest of the batch
   assert.match(fs.readFileSync(path.join(t, '.wrxn', 'wiki', 'decisions', 'mid.md'), 'utf8'), /pre-existing curated page/);
 });
 
+// ── _rules tier + rule kind (dream-03) ────────────────────────────────────────
+// A `rule` is an always/never project convention; kind:"rule" MUST target tier:"_rules".
+// (The live "_rules page is recalled by the Brain" AC is a qa-walk item — it needs a running
+//  `recon serve` over an indexed wiki. Here we unit-test the MECHANICS: a rule commits to a real
+//  `_rules/<slug>.md` page under .wrxn/wiki/ so recon's prose ingestion can pick it up.)
+
+function validRule(over) {
+  return validProposal(Object.assign(
+    {
+      kind: 'rule',
+      tier: '_rules',
+      slug: 'always-rebase-before-merge',
+      title: 'Always rebase before merging',
+      body: '# Always rebase before merging\n\nThe team agreed to always rebase feature branches onto main before merging.',
+      rationale: 'A standing always/never convention future sessions must honor.',
+      evidence: [{ quote: 'always rebase before you merge', source: 'turn-7' }],
+    },
+    over || {}
+  ));
+}
+
+test('a well-formed rule (kind:"rule" → tier:"_rules") passes check', () => {
+  const t = freshInstall('dream-rule-ok-');
+  assert.deepEqual(checkOne(t, validRule()), { ok: true });
+});
+
+test('a rule proposed to a non-_rules tier → kind_tier_mismatch', () => {
+  const t = freshInstall('dream-rule-mismatch-');
+  assert.equal(checkOne(t, validRule({ tier: 'decisions' })).reason, 'kind_tier_mismatch');
+});
+
+test('a non-rule kind proposed to the _rules tier → kind_tier_mismatch', () => {
+  const t = freshInstall('dream-rules-tier-mismatch-');
+  assert.equal(checkOne(t, validRule({ kind: 'concept' })).reason, 'kind_tier_mismatch');
+});
+
+test('commit writes an approved rule to _rules/<slug>.md via wiki.cjs (indexable .md)', () => {
+  const t = freshInstall('dream-rule-commit-');
+  const out = JSON.parse(dream(t, ['commit', writeJson(t, 'approved.json', { proposals: [validRule()] })]));
+  assert.equal(out.written.length, 1);
+  assert.equal(out.skipped.length, 0);
+  const page = path.join(t, '.wrxn', 'wiki', '_rules', 'always-rebase-before-merge.md');
+  assert.ok(fs.existsSync(page), 'rule page written under .wrxn/wiki/_rules as a real .md');
+  assert.match(fs.readFileSync(page, 'utf8'), /rebase feature branches onto main/);
+});
+
 // ── manifest / receipt classes (mirror wiki.test.cjs) ─────────────────────────
 
 test('the dream adapter is classified managed in the manifest and laid into a fresh install', () => {

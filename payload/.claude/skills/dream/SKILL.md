@@ -1,6 +1,6 @@
 ---
 name: dream
-description: Consolidate the live session into durable wiki memory — reflect on this conversation, draft evidence-backed Proposals (concept/decision/gotcha), gate each through the dream adapter, and on your confirmation write net-new pages the Brain will recall next time. Use when someone says "dream", "consolidate this session", "save what we learned", or wants to capture durable memory before a handoff.
+description: Consolidate the live session into durable wiki memory — reflect on this conversation, draft evidence-backed Proposals (concept/decision/gotcha/rule), gate each through the dream adapter, and on your confirmation write net-new pages the Brain will recall next time. Use when someone says "dream", "consolidate this session", "save what we learned", or wants to capture durable memory before a handoff.
 user-invocable: true
 ---
 
@@ -64,6 +64,7 @@ Exactly one kind per Proposal; `tier` must agree with `kind`.
 | `decision` | `decisions`  | a choice of X over Y, with its rationale and consequences (why the project is the way it is) |
 | `gotcha`   | `gotchas`    | a reproducible pitfall / failure mode, its root cause, and the mitigation     |
 | `concept`  | `concepts`   | stable architecture or domain knowledge (synthesis, not a task chronology)    |
+| `rule`     | `_rules`     | an always/never project convention the session established — a standing rule, recalled like a concept (NOT a SYNAPSE always-on rule; see Boundaries) |
 
 Two unrelated insights stay **two** pages — never merge them into one. Small pages, stable
 kebab-case names (Karpathy LLM-wiki style). Cap a run at **≤ 5** proposals.
@@ -88,8 +89,8 @@ A Proposal is one JSON object. A run is a JSON **array** of them (the batch).
 
 ```jsonc
 {
-  "kind":  "concept" | "decision" | "gotcha",      // pick one
-  "tier":  "concepts" | "decisions" | "gotchas",   // = f(kind); MUST agree
+  "kind":  "concept" | "decision" | "gotcha" | "rule",      // pick one
+  "tier":  "concepts" | "decisions" | "gotchas" | "_rules", // = f(kind); MUST agree
   "slug":  "kebab-case-page-name",                  // stable name
   "title": "One-line page title",
   "body":  "# Title\n\n…markdown… ",                // MUST start with '# '
@@ -154,6 +155,9 @@ node .wrxn/wiki.cjs query "<a phrase from a page you just wrote>"
   scope (that is harvest, a later phase).
 - **Never autonomous.** dream is a deliberate, attended, operator-confirmed skill — never a background
   run, never a write without confirmation.
+- **`_rules` ≠ SYNAPSE.** A `rule` page is *recalled knowledge* — the Brain surfaces it like a concept
+  or gotcha. It is NOT a SYNAPSE always-on rule. Promoting a `_rules` page into SYNAPSE's curated
+  always-injected set (`.synapse/`) is a separate, deliberate act — **dream NEVER edits `.synapse/`**.
 
 ## Source
 

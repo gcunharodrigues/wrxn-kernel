@@ -21,18 +21,19 @@
 //
 // Flag: --root <dir> (override the install-root walk-up; mainly for tests).
 //
-// Proposal { kind:"concept"|"decision"|"gotcha"; tier:"concepts"|"decisions"|"gotchas"; slug; title;
-//            body /* starts "# " */; confidence /*0–1*/; rationale; evidence:[{quote,source?}] }
+// Proposal { kind:"concept"|"decision"|"gotcha"|"rule"; tier:"concepts"|"decisions"|"gotchas"|"_rules";
+//            slug; title; body /* starts "# " */; confidence /*0–1*/; rationale; evidence:[{quote,source?}] }
 // Verdict  { ok:boolean; reason?:string /* machine code on reject */ }
-// (The `_rules`/`_slots` tiers + the `rule` kind arrive in later slices — this slice is the three
-//  existing semantic tiers.)
+// (The `_slots` tier + its lone update-exception arrive in a later slice — this slice adds the `_rules`
+//  tier + the `rule` kind alongside the three existing semantic tiers.)
 
 const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
 
-// kind → tier is the contract; the tier must agree with the kind.
-const KIND_TIER = { concept: 'concepts', decision: 'decisions', gotcha: 'gotchas' };
+// kind → tier is the contract; the tier must agree with the kind. `rule → _rules` (dream-03) joins the
+// three semantic tiers — this single map auto-extends the tier allowlist (TIERS) and the kind↔tier gate.
+const KIND_TIER = { concept: 'concepts', decision: 'decisions', gotcha: 'gotchas', rule: '_rules' };
 const TIERS = Object.values(KIND_TIER);
 const CONFIDENCE_FLOOR = 0.75;
 const BODY_MAX = 32000; // size cap (chars) — a durable page, not a transcript dump.

@@ -114,6 +114,35 @@ test('the adapter is classified managed in the manifest', () => {
   assert.equal(entry.class, 'managed');
 });
 
+// ── _rules tier (dream-03): the machine-written tier the dream adapter targets ──
+
+test('write-page creates a page in the _rules tier and query finds it', () => {
+  const { target } = freshInstall('wrxn-wiki-rules-');
+  const out = JSON.parse(runAdapter(target, ['write-page', '_rules', 'always-rebase-before-merge', '--body', 'always rebase onto main before merging']));
+  assert.equal(out.tier, '_rules');
+  const page = path.join(target, '.wrxn', 'wiki', '_rules', 'always-rebase-before-merge.md');
+  assert.ok(fs.existsSync(page), 'page laid in the _rules tier');
+  const res = JSON.parse(runAdapter(target, ['query', 'always rebase onto main']));
+  assert.ok(res.total >= 1, 'query found the _rules page');
+  assert.equal(res.hits[0].tier, '_rules');
+  assert.match(res.hits[0].file, /_rules\/always-rebase-before-merge\.md$/);
+});
+
+test('.wrxn/wiki/_rules/.gitkeep is classified state in the manifest', () => {
+  const manifest = loadManifest(path.join(PKG_ROOT, 'manifest.json'));
+  const entry = manifest.files.find((f) => f.path === '.wrxn/wiki/_rules/.gitkeep');
+  assert.ok(entry, '.wrxn/wiki/_rules/.gitkeep in manifest');
+  assert.equal(entry.class, 'state');
+});
+
+test('the laid receipt classifies the _rules tier gitkeep as state', () => {
+  const { target } = freshInstall('wrxn-wiki-rules-receipt-');
+  const receipt = JSON.parse(fs.readFileSync(path.join(target, 'wrxn.install.json'), 'utf8'));
+  const gitkeep = receipt.files.find((f) => f.path === '.wrxn/wiki/_rules/.gitkeep');
+  assert.ok(gitkeep, '_rules tier gitkeep in receipt');
+  assert.equal(gitkeep.class, 'state');
+});
+
 // ── AC-2: .recon-wrxn.json is laid (seeded); optional live recon-wrxn index+query ──
 
 test('.recon-wrxn.json is laid into a fresh install and is valid JSON', () => {

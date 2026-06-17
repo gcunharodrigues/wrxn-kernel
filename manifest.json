@@ -454,6 +454,11 @@
       "profile": "project"
     },
     {
+      "path": ".wrxn/wiki/_rules/.gitkeep",
+      "class": "state",
+      "profile": "project"
+    },
+    {
       "path": "docs/agents/domain.md",
       "class": "seeded",
       "profile": "project"
