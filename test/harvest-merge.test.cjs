@@ -395,6 +395,70 @@ test('commit: approving a survivor that was never staged is skipped (not_staged)
   assert.ok(pageExists(t, '.wrxn/wiki/concepts/alpha.md') && pageExists(t, '.wrxn/wiki/concepts/beta.md'), 'nothing deleted');
 });
 
+// ── harvest-review: the explicit tier-resolves guard on the delete path ──────────
+// A NON-CANONICAL path (e.g. .wrxn/wiki/concepts/../concepts/x.md) COLLAPSES under path.resolve to a
+// confined wiki page, so the prefix/confinement check alone passes — yet tierOfPath() returns null on the
+// non-canonical FORM the callers stamp into the page → a malformed `tier: null` survivor. Make the
+// invariant EXPLICIT at the single chokepoint: a survivor/absorbed path must tier-resolve cleanly.
+
+test('resolveSafeHarvestDoc (harvest-review): a NON-CANONICAL path that collapses into a tier is REFUSED (explicit tier-resolves invariant)', () => {
+  const root = '/install/root';
+  assert.equal(harvest.resolveSafeHarvestDoc(root, '.wrxn/wiki/concepts/../concepts/x.md'), null, 'a ../-laden survivor path is refused (passes confinement, fails tierOfPath)');
+  assert.equal(harvest.resolveSafeHarvestDoc(root, '.wrxn/wiki/concepts/./x.md'), null, 'a ./-laden path is refused');
+  assert.ok(harvest.resolveSafeHarvestDoc(root, '.wrxn/wiki/concepts/x.md'), 'the canonical form of the same page still resolves (regression)');
+});
+
+test('stage (harvest-review): a NON-CANONICAL survivor path is REFUSED — nothing staged, no page written', () => {
+  const t = freshInstall('wrxn-harvest-merge-noncanon-stage-');
+  plantCluster(t);
+  let err;
+  try { runCli(t, ['stage', writeJson(t, 'p.json', mergeProposal({ survivor: '.wrxn/wiki/concepts/../concepts/widget-pagination.md' }))]); } catch (e) { err = e; }
+  assert.ok(err, 'stage refused a non-canonical survivor path');
+  assert.match(String(err.stderr || ''), /survivor|tier|wiki|knowledge/i);
+  assert.ok(!fs.existsSync(path.join(t, '.wrxn', 'harvest', 'staged.jsonl')), 'no proposal was staged');
+  assert.ok(!pageExists(t, '.wrxn/wiki/concepts/widget-pagination.md'), 'no survivor page written at the collapsed canonical location');
+});
+
+test('stage (harvest-review): a NON-CANONICAL absorbed target is REFUSED at the shared chokepoint', () => {
+  const t = freshInstall('wrxn-harvest-merge-noncanon-absorbed-');
+  plantCluster(t);
+  let err;
+  try { runCli(t, ['stage', writeJson(t, 'p.json', mergeProposal({ absorbed: ['.wrxn/wiki/concepts/../concepts/alpha.md', '.wrxn/wiki/concepts/beta.md'] }))]); } catch (e) { err = e; }
+  assert.ok(err, 'stage refused a non-canonical absorbed target');
+  assert.match(String(err.stderr || ''), /absorbed|tier|escape|wiki|knowledge/i);
+  assert.ok(!fs.existsSync(path.join(t, '.wrxn', 'harvest', 'staged.jsonl')), 'nothing staged');
+});
+
+test('commit (harvest-review): a seeded staged record with a NON-CANONICAL survivor (VALID hash) is refused at the write boundary — no tier:null page, no absorbed deleted', () => {
+  const t = freshInstall('wrxn-harvest-merge-noncanon-commit-');
+  plantCluster(t);
+  const noncanon = '.wrxn/wiki/concepts/../concepts/widget-pagination.md';
+  const canon = '.wrxn/wiki/concepts/widget-pagination.md';
+  const absorbed = ['.wrxn/wiki/concepts/alpha.md', '.wrxn/wiki/concepts/beta.md'];
+  const body = '# Widget\n\nclean union body';
+  // tier seeded as what the (buggy) stage would have recorded — tierOfPath(noncanon) is null. Honest hash
+  // over the record so integrity PASSES → proving the tier-resolves guard is an INDEPENDENT gate.
+  assert.equal(harvest.tierOfPath(noncanon), null, 'precondition: tierOfPath is null on the non-canonical form');
+  seedStaged(t, [{ ts: 'x', op: 'stage', survivor: noncanon, tier: harvest.tierOfPath(noncanon), slug: 'widget-pagination', description: '', body, absorbed, hash: harvest.mergeHash({ survivor: noncanon, description: '', body, absorbed }) }]);
+
+  const out = commit(t, [noncanon]);
+  assert.equal(out.merged.length, 0, 'the non-canonical survivor was blocked at the write boundary');
+  assert.equal(out.skipped[0].reason, 'unsafe_survivor');
+  assert.ok(!pageExists(t, canon), 'no survivor page written at the collapsed canonical location (so no tier:null page)');
+  assert.ok(pageExists(t, '.wrxn/wiki/concepts/alpha.md') && pageExists(t, '.wrxn/wiki/concepts/beta.md'), 'no absorbed deleted');
+});
+
+test('commit (harvest-review): a CANONICAL survivor still stages + commits and carries its real tier — never tier: null (regression)', () => {
+  const t = freshInstall('wrxn-harvest-merge-canon-ok-');
+  plantCluster(t);
+  assert.equal(stage(t, mergeProposal()).staged, 1, 'a canonical survivor stages');
+  const out = commit(t, ['.wrxn/wiki/concepts/widget-pagination.md']);
+  assert.equal(out.merged.length, 1, 'the canonical merge commits');
+  const surv = fs.readFileSync(path.join(t, '.wrxn/wiki/concepts/widget-pagination.md'), 'utf8');
+  assert.match(surv, /^tier: concepts$/m, 'the survivor carries its real tier');
+  assert.doesNotMatch(surv, /^tier:\s*null$/m, 'no malformed tier: null page is ever written');
+});
+
 // ── self-contained: node stdlib only (no kernel-lib / recon import) ──────────────
 
 test('the harvest adapter still imports nothing outside the node standard library after the merge extension', () => {

@@ -622,6 +622,13 @@ function resolveSafeHarvestDoc(root, doc) {
   const parts = rel.split(path.sep);
   if (parts.length !== 2) return null; // must be exactly <tier>/<slug>.md — no nesting
   if (!HARVEST_TIERS.includes(parts[0])) return null; // not a knowledge tier (sessions / _slots / other)
+  // EXPLICIT tier-resolves invariant (harvest-review). path.resolve above COLLAPSES `..`, so a NON-CANONICAL
+  // form like `.wrxn/wiki/concepts/../concepts/x.md` survives the confinement check yet tierOfPath() returns
+  // null on that raw string — and the merge/decay callers stamp tier/slug from this SAME string (tierOfPath/
+  // slugOfPath), yielding a malformed `tier: null` survivor page on the ONE destructive (delete) path. Require
+  // the path the callers stamp from to tier-resolve cleanly, so the page written and the recorded tier always
+  // agree. tierOfPath only matches a clean `.wrxn/wiki/<tier>/<slug>.md` → a non-canonical path is refused.
+  if (!tierOfPath(doc)) return null; // non-canonical / not tier-resolvable → fail-closed (no tier:null page, no delete)
   return abs;
 }
 
