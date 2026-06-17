@@ -60,7 +60,9 @@ report file it names. Each record carries enough to seed a proposal:
 - **`near_dup`** — a cluster of pages over the measured semantic-similarity threshold (`members[]` with
   `slug` / `path` / `tier`, the strongest-edge `score`). The merge candidates.
 - **`decay_candidate`** — `subtype: "orphaned"` (its `derived_from:` source file is gone, carries
-  `missing_source`) or `subtype: "superseded"` (already forward-linked). The decay candidates.
+  `missing_source`). The decay candidates. Pages already annotated `stale:`/`superseded_by:` are treated
+  as resolved and excluded. A supersession is raised via `decay propose` with a replacement target
+  (operator/skill judgment), not auto-detected by `check`.
 - **`malformed`** — bad frontmatter (the wiki-lint signal). Report-only here (see §4).
 
 If `nearDupStatus` is `"unavailable"`, the recon serve door was cold — near-dup detection was **skipped**
