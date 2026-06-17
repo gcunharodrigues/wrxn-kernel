@@ -19,8 +19,10 @@
 //              · status "drift"        — at least one doc is stale (stale[] names doc/symbol/synced_to/current).
 //              · status "synced"       — the warm door computed an EMPTY stale set ("all synced"; AC3 no-op,
 //                                        never manufactures stale rows).
-//              · status "unavailable"  — recon is unreachable (no warm door, a timeout, a non-200, or a
-//                                        malformed body). FAIL-SOFT: reported, NEVER thrown (AC5).
+//              · status "unavailable"  — recon is unreachable OR answered without the structured drift sidecar
+//                                        (no warm door, a timeout, a non-200, a malformed body, or a 200 whose
+//                                        body lacks an affirmative `drift.stale` array — unknown is not clean,
+//                                        sync-09). FAIL-SOFT: reported, NEVER thrown (AC5).
 //
 // Flag: --root <dir> (override the install-root walk-up; mainly for tests).
 
@@ -80,19 +82,39 @@ function print(obj) {
 }
 
 // ── the report (PURE) ──────────────────────────────────────────────────────────
-// Deterministic over the parsed recon_drift door response. Surfaces the stale set (each entry naming
-// doc / symbol / synced_to / current straight from the door) + passes the unwatermarked bucket through
-// (sync-03 AC5 — a distinct bucket, never dropped). "all synced" keys off an EMPTY stale set (AC3); it
-// never invents a row. A malformed / non-object response degrades to synced (an empty stale set), never
-// throws.
+// Deterministic over the parsed recon_drift door response { result, drift:{ stale[], unwatermarked[], … } }.
+// Reads the structured `drift` sidecar (sync-08), normalizing each camelCase entry (page→doc, syncedTo→
+// synced_to, keeping symbol/current) so a stale row directly seeds a proposal, + passes the unwatermarked
+// bucket through (sync-03 AC5 — a distinct bucket, never dropped). "all synced" keys off an EMPTY stale
+// array (AC3); it never invents a row. A response lacking an affirmative `drift.stale` array degrades to
+// "unavailable" (unknown is not clean, sync-09), never throws.
 function isEntry(e) {
   return !!e && typeof e === 'object' && !Array.isArray(e);
 }
 
+// Normalize a raw recon DriftReport entry (camelCase page/pageFile/symbol/symbolFile/symbolLine/syncedTo/
+// current) into the kernel's external report contract (doc/symbol/synced_to/current) — the shape `propose`
+// seeds from and the report's consumers read. The door-only fields (pageFile/symbolFile/symbolLine) are
+// dropped; an unwatermarked entry (no syncedTo/current) normalizes to { doc, symbol }.
+function normEntry(e) {
+  const out = {};
+  if (e.page !== undefined) out.doc = e.page;
+  if (e.symbol !== undefined) out.symbol = e.symbol;
+  if (e.syncedTo !== undefined) out.synced_to = e.syncedTo;
+  if (e.current !== undefined) out.current = e.current;
+  return out;
+}
+
 function summarizeDrift(parsed) {
   const p = isEntry(parsed) ? parsed : {};
-  const stale = Array.isArray(p.stale) ? p.stale.filter(isEntry) : [];
-  const unwatermarked = Array.isArray(p.unwatermarked) ? p.unwatermarked.filter(isEntry) : [];
+  // sync-08/09: the real recon_drift door returns { result:<markdown>, drift:{ stale[], unwatermarked[], … } }.
+  // The structured set lives under `drift` (camelCase), NOT top-level. A 200 lacking an affirmative
+  // `drift.stale` ARRAY (a markdown-only {result} body, or an older recon) is UNKNOWN, not clean — surface it
+  // as unavailable so a contract regression fails loud, never as a confident false "synced" (sync-09).
+  const d = p.drift;
+  if (!isEntry(d) || !Array.isArray(d.stale)) return unavailable();
+  const stale = d.stale.filter(isEntry).map(normEntry);
+  const unwatermarked = (Array.isArray(d.unwatermarked) ? d.unwatermarked : []).filter(isEntry).map(normEntry);
   return { status: stale.length ? 'drift' : 'synced', stale, unwatermarked };
 }
 

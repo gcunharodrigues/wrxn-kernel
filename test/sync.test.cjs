@@ -8,10 +8,15 @@
 // driftFromDoor is the IO shell with an INJECTED transport (tests never touch the network); the CLI is
 // exercised black-box (stdin/argv -> stdout). Door discovery is the recall-surface contract.
 //
+// The real recon_drift door (sync-08) returns { result:<markdown>, drift:{ stale[], unwatermarked[], … } }
+// — the structured set lives under `drift` (camelCase entries), NOT top-level. The adapter reads + normalizes
+// it; a 200 lacking the `drift` sidecar is UNKNOWN, not clean (sync-09).
+//
 // Status contract:
 //   warm door + a stale set        -> 'drift'        (AC2 — reports the stale files + moved symbol)
 //   warm door + an empty stale set -> 'synced'       (AC3 — "all synced", never manufactures output)
-//   cold/dead door, throw, non-200, malformed body -> 'unavailable' (AC5 — fail-soft, never throws)
+//   cold/dead door, throw, non-200, malformed body, OR a 200 lacking the drift sidecar (sync-09)
+//                                  -> 'unavailable'  (AC5 — fail-soft, never throws; unknown is not clean)
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
@@ -61,17 +66,32 @@ function deadPid() {
   return spawnSync(process.execPath, ['-e', 'process.exit(0)']).pid;
 }
 
-// A recon_drift door body: a stale set + an optional unwatermarked bucket (sync-03 AC4/AC5 shape).
-function driftBody(over) {
-  return JSON.stringify(Object.assign({ stale: [], unwatermarked: [] }, over || {}));
+// A REAL recon_drift door body (sync-08 contract): a markdown `result` plus the structured `drift` sidecar.
+// `driftOver` overrides the sidecar buckets; the extra sidecar fields (multiAnchor/uncomparable/fresh) are
+// present to prove the kernel ignores everything except stale/unwatermarked.
+function driftBody(driftOver) {
+  return JSON.stringify({
+    result: '# Drift Report\n\n…markdown…',
+    drift: Object.assign({ stale: [], unwatermarked: [], multiAnchor: [], uncomparable: [], fresh: 0 }, driftOver || {}),
+  });
 }
 
-const STALE = {
-  doc: '.wrxn/wiki/concepts/auth-flow.md',
-  symbol: 'src/auth.ts#login',
-  synced_to: 'a1b2c3d4',
+// The raw recon DriftReport stale entry the door now sends inside `drift.stale[]` (camelCase, sync-08).
+const DOOR_STALE = {
+  page: '.wrxn/wiki/concepts/auth-flow.md',
+  pageFile: '.wrxn/wiki/concepts/auth-flow.md',
+  symbol: 'login',
+  symbolFile: 'src/auth.ts',
+  symbolLine: 1,
+  syncedTo: 'a1b2c3d4',
   current: 'e5f6a7b8',
 };
+// what summarizeDrift normalizes DOOR_STALE INTO — the kernel external report contract (snake_case), directly
+// usable as a propose seed (doc / symbol / synced_to / current). The door-only fields are dropped.
+const NORM_STALE = { doc: '.wrxn/wiki/concepts/auth-flow.md', symbol: 'login', synced_to: 'a1b2c3d4', current: 'e5f6a7b8' };
+// an unwatermarked door entry carries NO watermark (no syncedTo/current) → normalizes to { doc, symbol }.
+const DOOR_UW = { page: '.wrxn/wiki/concepts/db.md', pageFile: '.wrxn/wiki/concepts/db.md', symbol: 'connect', symbolFile: 'src/db.ts', symbolLine: 5 };
+const NORM_UW = { doc: '.wrxn/wiki/concepts/db.md', symbol: 'connect' };
 
 function runCli(target, args) {
   return execFileSync('node', [path.join(target, SYNC_REL), ...args, '--root', target], { encoding: 'utf8' });
@@ -79,51 +99,61 @@ function runCli(target, args) {
 
 // ── summarizeDrift — the PURE report fn ───────────────────────────────────────
 
-test('summarizeDrift: a stale entry → status "drift", naming the doc + moved symbol + synced_to vs current (AC2)', () => {
-  const out = sync.summarizeDrift({ stale: [STALE], unwatermarked: [] });
+test('summarizeDrift: a real-door stale entry → status "drift", normalized to doc/symbol/synced_to/current (AC2, sync-08)', () => {
+  const out = sync.summarizeDrift({ drift: { stale: [DOOR_STALE], unwatermarked: [] } });
   assert.equal(out.status, 'drift');
   assert.equal(out.stale.length, 1);
-  assert.equal(out.stale[0].doc, '.wrxn/wiki/concepts/auth-flow.md', 'the stale doc page');
-  assert.equal(out.stale[0].symbol, 'src/auth.ts#login', 'the source symbol that moved');
-  assert.equal(out.stale[0].synced_to, 'a1b2c3d4', 'the watermark it was last reconciled at');
-  assert.equal(out.stale[0].current, 'e5f6a7b8', 'the current source fingerprint');
+  // the camelCase door entry is normalized to the kernel report contract; door-only fields are dropped.
+  assert.deepEqual(out.stale[0], NORM_STALE, 'page→doc, syncedTo→synced_to, symbol/current kept, pageFile/symbolFile/symbolLine dropped');
 });
 
-test('summarizeDrift: an empty stale set → status "synced", no manufactured rows (AC3)', () => {
-  const out = sync.summarizeDrift({ stale: [], unwatermarked: [] });
+test('summarizeDrift: an empty drift.stale array → status "synced", no manufactured rows (AC3)', () => {
+  const out = sync.summarizeDrift({ drift: { stale: [], unwatermarked: [] } });
   assert.equal(out.status, 'synced');
   assert.deepEqual(out.stale, [], 'no stale rows invented');
 });
 
-test('summarizeDrift: a malformed / non-object response does not throw and reports synced (robustness)', () => {
-  assert.equal(sync.summarizeDrift(null).status, 'synced');
-  assert.equal(sync.summarizeDrift(undefined).status, 'synced');
-  assert.equal(sync.summarizeDrift({}).status, 'synced');
-  assert.equal(sync.summarizeDrift({ stale: 'not-an-array' }).status, 'synced');
+test('summarizeDrift: a response lacking the structured drift sidecar → "unavailable", never a false "synced" (sync-09)', () => {
+  // "unknown is not clean": only an affirmative drift.stale array may report synced/drift.
+  assert.equal(sync.summarizeDrift(null).status, 'unavailable');
+  assert.equal(sync.summarizeDrift(undefined).status, 'unavailable');
+  assert.equal(sync.summarizeDrift({}).status, 'unavailable');
+  assert.equal(sync.summarizeDrift({ result: '# Drift Report\n\n**Stale:** 1 …' }).status, 'unavailable', 'the real bug: a 200 with only markdown `result`');
+  assert.equal(sync.summarizeDrift({ drift: { stale: 'not-an-array' } }).status, 'unavailable', 'drift present but stale not an array');
+  assert.equal(sync.summarizeDrift({ drift: 'not-an-object' }).status, 'unavailable', 'drift present but not an object');
 });
 
-test('summarizeDrift: passes the unwatermarked bucket through (sync-03 AC5 — distinct, not dropped)', () => {
-  const uw = { doc: '.wrxn/wiki/concepts/db.md', symbol: 'src/db.ts#connect' };
-  const out = sync.summarizeDrift({ stale: [], unwatermarked: [uw] });
-  assert.deepEqual(out.unwatermarked, [uw], 'the unwatermarked bucket survives');
+test('summarizeDrift: normalizes + passes the unwatermarked bucket through (sync-03 AC5 — distinct, not dropped)', () => {
+  const out = sync.summarizeDrift({ drift: { stale: [], unwatermarked: [DOOR_UW] } });
+  assert.deepEqual(out.unwatermarked, [NORM_UW], 'the unwatermarked bucket survives, normalized to { doc, symbol }');
 });
 
 // ── driftFromDoor — the IO shell, with an injected transport ──────────────────
 
-test('driftFromDoor: a warm door returning a stale set → "drift"; pins the recon_drift POST contract (AC2)', async () => {
+test('driftFromDoor: a warm door returning the real drift sidecar → "drift"; pins the recon_drift POST contract (AC2)', async () => {
   const root = installRoot('wrxn-sync-warm-');
   writeEndpoint(root, { pid: process.pid, port: 64101 });
   let seen;
   const transport = async (args) => {
     seen = args;
-    return { statusCode: 200, body: driftBody({ stale: [STALE] }) };
+    return { statusCode: 200, body: driftBody({ stale: [DOOR_STALE] }) };
   };
   const out = await sync.driftFromDoor(root, { transport });
   assert.equal(out.status, 'drift');
-  assert.equal(out.stale[0].symbol, 'src/auth.ts#login');
+  assert.deepEqual(out.stale[0], NORM_STALE, 'the door sidecar entry is normalized end-to-end through the IO shell');
   // cross-repo contract pins (sync-03 AC6): the recon_drift door path + the endpoint port.
   assert.equal(seen.path, '/api/tools/recon_drift', 'POSTs the recon_drift serve door');
   assert.equal(seen.port, 64101, 'uses the port from serve-endpoint.json');
+});
+
+test('driftFromDoor: a warm 200 with ONLY markdown `result` (no drift sidecar) → "unavailable", never a false "synced" (sync-08/09 regression guard)', async () => {
+  // The EXACT shipped bug: a successful 200 the kernel could not parse silently became status:"synced".
+  const root = installRoot('wrxn-sync-nosidecar-');
+  writeEndpoint(root, { pid: process.pid, port: 64107 });
+  const transport = async () => ({ statusCode: 200, body: JSON.stringify({ result: '# Drift Report\n\n**Stale:** 1 | **Unwatermarked:** 0' }) });
+  const out = await sync.driftFromDoor(root, { transport });
+  assert.equal(out.status, 'unavailable', 'a 200 lacking the structured drift sidecar is unknown, not clean');
+  assert.deepEqual(out.stale, [], 'no stale rows manufactured from an unparseable body');
 });
 
 test('driftFromDoor: a warm door returning an empty stale set → "synced" (AC3)', async () => {
