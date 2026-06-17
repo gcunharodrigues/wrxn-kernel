@@ -36,6 +36,8 @@ const SEMANTIC_FLOOR = 0.4;        // dense cosine floor (reused from P1.5)
 const PROSE_TYPES = new Set(['Page', 'Section']); // prose scope — drop code symbols
 const ENDPOINT_REL = path.join('.recon-wrxn', 'serve-endpoint.json');
 const FIND_PATH = '/api/tools/recon_find';
+const REINFORCE_REL = path.join('.wrxn', 'reinforce.json'); // coalesced access-recency sidecar (STATE)
+const WIKI_PREFIX = '.wrxn/wiki/'; // the wiki root — stripped to form the D1 join key
 
 function emit(envelope) {
   process.stdout.write(JSON.stringify(envelope));
@@ -122,12 +124,88 @@ function renderBlock(hits) {
   return block;
 }
 
+// PURE: the prose hits that clear the gate, capped at TOP_N — exactly the hits decideRecall renders
+// (and the pages reinforce stamps). Factored out so the IO shell can stamp the surfaced pages by path.
+function qualifyingHits(hits) {
+  const list = Array.isArray(hits) ? hits : [];
+  return list.filter((h) => isProse(h) && qualifies(h)).slice(0, TOP_N);
+}
+
 // PURE: prose-filter → gate → top-N → format. Returns the block string, or null (Abstain).
 function decideRecall(hits) {
-  const list = Array.isArray(hits) ? hits : [];
-  const qualified = list.filter((h) => isProse(h) && qualifies(h)).slice(0, TOP_N);
+  const qualified = qualifyingHits(hits);
   if (!qualified.length) return null;
   return renderBlock(qualified);
+}
+
+// ── reinforce: the coalesced access-recency sidecar (harvest-08 / D2) ─────────────────
+//
+// When Recall actually surfaces prose pages, stamp each page's "last used" day into
+// <root>/.wrxn/reinforce.json — a COMPACT MAP { "<wiki-rel-path>": "YYYY-MM-DD" }, NOT page frontmatter
+// (no churn) and NOT an append log (no growth). recon harvest-07/D1 reads this sidecar to compute
+// recency for decay-weighted retrieval; the join key MUST be the wiki-root-relative path on BOTH sides
+// (a slug-vs-path mismatch silently breaks recency). COALESCED to <= 1 write per page per day: when
+// every surfaced page already carries today's date the map is unchanged and NOTHING is written.
+// BEST-EFFORT + NON-BLOCKING: this is a pure side effect of recall — any fault (absent dir, malformed
+// existing sidecar, unwritable path) is swallowed so the surfacing always proceeds.
+
+// The wiki-root-relative join key for a prose hit's file: tolerate a leading './', normalize separators,
+// then strip the '.wrxn/wiki/' prefix → e.g. 'concepts/foo.md'. Returns null when the file is not under
+// the wiki root (no join key — never stamped).
+function wikiRelPath(file) {
+  const f = String(file || '').replace(/\\/g, '/').replace(/^\.\//, '');
+  const i = f.indexOf(WIKI_PREFIX);
+  if (i === -1) return null;
+  return f.slice(i + WIKI_PREFIX.length) || null;
+}
+
+// A day-granular UTC stamp (YYYY-MM-DD): the coalescing grain AND D1's recency value. Injectable clock
+// (`now` = a Date/ms/iso, default real time) so day-granularity is deterministic under test.
+function dayStamp(now) {
+  const d = now instanceof Date ? now : new Date(now == null ? Date.now() : now);
+  return d.toISOString().slice(0, 10);
+}
+
+// Stamp each surfaced prose hit's wiki-rel path → today into <root>/.wrxn/reinforce.json. Writes only
+// when the map actually changes (coalesced). Wholly best-effort: never throws, never blocks recall.
+function reinforce(root, hits, now) {
+  try {
+    const list = Array.isArray(hits) ? hits : [];
+    if (!root || !list.length) return;
+    const file = path.join(root, REINFORCE_REL);
+    let map = {};
+    let raw = null;
+    try {
+      raw = fs.readFileSync(file, 'utf8');
+    } catch {
+      raw = null; // absent → fresh map (normal, not a fault)
+    }
+    if (raw !== null) {
+      let parsed;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        return; // malformed existing sidecar → skip silently, leave it untouched (never clobber)
+      }
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return; // not a map → skip
+      map = parsed;
+    }
+    const day = dayStamp(now);
+    let changed = false;
+    for (const h of list) {
+      const key = wikiRelPath(h && h.file);
+      if (!key) continue; // not under the wiki root → no D1 join key
+      if (map[key] !== day) {
+        map[key] = day;
+        changed = true;
+      }
+    }
+    if (!changed) return; // coalesced no-op → file stays byte-identical (<= 1 write/page/day)
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(map, null, 2) + '\n');
+  } catch {
+    /* best-effort: a reinforce fault must NEVER alter or break the recall surfacing */
+  }
 }
 
 // ── the door (IO shell, injectable transport) ───────────────────────────────────────
@@ -233,7 +311,7 @@ function httpTransport({ port, path: reqPath, body, timeoutMs }) {
 // IO shell: discover the door, POST the prose query, gate the hits. Returns the block string or null.
 // `transport` is injected in tests; production uses httpTransport. Sends NO `type` (recon_find takes a
 // single NodeType, not an array) — prose scope is enforced by decideRecall's post-filter.
-async function recallFromDoor(root, prompt, { transport, timeoutMs } = {}) {
+async function recallFromDoor(root, prompt, { transport, timeoutMs, now } = {}) {
   const door = discoverEndpoint(root);
   if (!door) return null; // not warm → Abstain (silent)
   const query = String(prompt || '').trim().slice(0, MAX_QUERY_CHARS);
@@ -256,7 +334,11 @@ async function recallFromDoor(root, prompt, { transport, timeoutMs } = {}) {
   } catch {
     return null; // malformed body → silent
   }
-  return decideRecall(Array.isArray(parsed.hits) ? parsed.hits : []);
+  const hits = Array.isArray(parsed.hits) ? parsed.hits : [];
+  const block = decideRecall(hits);
+  // Side effect: stamp access-recency for the pages we actually surfaced (best-effort, never blocks).
+  if (block) reinforce(root, qualifyingHits(hits), now);
+  return block;
 }
 
 // ── entrypoint ──────────────────────────────────────────────────────────────────────
@@ -293,7 +375,11 @@ if (require.main === module) {
 
 module.exports = {
   decideRecall,
+  qualifyingHits,
   recallFromDoor,
+  reinforce,
+  wikiRelPath,
+  dayStamp,
   discoverEndpoint,
   httpTransport,
   pidAlive,

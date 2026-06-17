@@ -146,6 +146,16 @@ test('the .recon-wrxn/ gitignore line is idempotent across re-init (no duplicate
   assert.equal(count, 1, 'exactly one .recon-wrxn/ line after re-init');
 });
 
+test('init gitignores the .wrxn/reinforce.json recency sidecar (STATE, never committed — harvest-08 AC5)', () => {
+  const target = tmp('wrxn-gi-reinforce-');
+  init({ pkgRoot: PKG_ROOT, target, profile: 'project' });
+  init({ pkgRoot: PKG_ROOT, target, profile: 'project' }); // re-init: still exactly one (idempotent)
+  const gi = fs.readFileSync(path.join(target, '.gitignore'), 'utf8');
+  assert.match(gi, /^\.wrxn\/reinforce\.json$/m, '.wrxn/reinforce.json line present');
+  const count = gi.split('\n').filter((l) => l.trim() === '.wrxn/reinforce.json').length;
+  assert.equal(count, 1, 'exactly one .wrxn/reinforce.json line after re-init');
+});
+
 // ── AC-5: NO synchronous index at init (serve auto-indexes lazily) ──────────────
 
 test('init does NOT build the .recon-wrxn/ index (lazy: serve indexes on first use)', () => {

@@ -400,6 +400,157 @@ test('black-box: a warm door at a closed port fails open to {} end-to-end (real 
   assert.deepEqual(runCli(root, { prompt: 'how does brain door discovery work end to end' }), {});
 });
 
+// ── reinforce: the coalesced access-recency sidecar (harvest-08 / D2) ────────────────
+// When Recall surfaces prose pages, stamp each page's "last used" day into .wrxn/reinforce.json — a
+// compact map keyed by the page's WIKI-ROOT-RELATIVE PATH (the join key recon harvest-07/D1 reads;
+// pinned on both sides). Coalesced to <= 1 write/page/day. Best-effort: any fault is swallowed and the
+// surfacing always proceeds. Clock is injected (`now`) so day-granularity is deterministic.
+
+const REINFORCE_REL = path.join('.wrxn', 'reinforce.json');
+function readSidecar(root) {
+  return JSON.parse(fs.readFileSync(path.join(root, REINFORCE_REL), 'utf8'));
+}
+// A warm door whose recon_find returns exactly the given prose hits (all gate-clearing).
+function proseDoor(files) {
+  const hits = files.map((f, i) =>
+    hit({ id: String(i), name: `Page ${i}`, type: 'Page', file: f, sources: ['bm25', 'semantic'], semanticScore: 0.7 })
+  );
+  return async () => ({ statusCode: 200, body: JSON.stringify({ result: '', hits }) });
+}
+
+test('wikiRelPath: strips the .wrxn/wiki/ prefix to the wiki-root-relative path (the D1 join key)', () => {
+  assert.equal(recall.wikiRelPath('.wrxn/wiki/concepts/foo.md'), 'concepts/foo.md', 'prefix stripped');
+  assert.equal(recall.wikiRelPath('./.wrxn/wiki/decisions/bar.md'), 'decisions/bar.md', 'tolerates a leading ./');
+  assert.equal(recall.wikiRelPath('/abs/install/.wrxn/wiki/gotchas/baz.md'), 'gotchas/baz.md', 'tolerates an absolute path');
+  assert.equal(recall.wikiRelPath('lib/x.cjs'), null, 'a non-wiki file has no join key');
+  assert.equal(recall.wikiRelPath(''), null);
+  assert.equal(recall.wikiRelPath(undefined), null);
+});
+
+test('dayStamp: day-granular UTC (YYYY-MM-DD), intraday time ignored (the coalescing grain)', () => {
+  assert.equal(recall.dayStamp(new Date('2026-06-17T01:02:03.000Z')), '2026-06-17');
+  assert.equal(recall.dayStamp(new Date('2026-06-17T23:59:59.999Z')), '2026-06-17', 'same day regardless of time');
+  assert.equal(recall.dayStamp(new Date('2026-06-18T00:00:00.000Z')), '2026-06-18', 'rolls at the UTC day boundary');
+});
+
+test('reinforce (via recallFromDoor): surfacing page X stamps X keyed by wiki-rel path + today', async () => {
+  const root = installRoot('wrxn-reinforce-x-');
+  writeEndpoint(root, { pid: process.pid, port: 65020 });
+  const now = new Date('2026-06-17T10:00:00.000Z');
+  const block = await recall.recallFromDoor(root, 'a prompt long enough to query the door', {
+    transport: proseDoor(['.wrxn/wiki/concepts/some-page.md']),
+    now,
+  });
+  assert.ok(block, 'recall still surfaces');
+  assert.deepEqual(
+    readSidecar(root),
+    { 'concepts/some-page.md': '2026-06-17' },
+    'keyed by the wiki-root-relative path (D1 contract) with todays day'
+  );
+});
+
+test('reinforce: a second recall of X the same day is a coalesced no-op (file byte-identical)', async () => {
+  const root = installRoot('wrxn-reinforce-coalesce-');
+  writeEndpoint(root, { pid: process.pid, port: 65021 });
+  const now = new Date('2026-06-17T10:00:00.000Z');
+  const door = proseDoor(['.wrxn/wiki/concepts/x.md']);
+  await recall.recallFromDoor(root, 'surface page x for the brain once', { transport: door, now });
+  const first = fs.readFileSync(path.join(root, REINFORCE_REL));
+  await recall.recallFromDoor(root, 'surface page x for the brain again same day', { transport: door, now });
+  const second = fs.readFileSync(path.join(root, REINFORCE_REL));
+  assert.ok(first.equals(second), 'second same-day recall leaves the sidecar byte-identical (<= 1 write/page/day, no growth)');
+});
+
+test('reinforce: a recall of a different page Y adds Y (per-page coalescing, not a global daily lock)', async () => {
+  const root = installRoot('wrxn-reinforce-y-');
+  writeEndpoint(root, { pid: process.pid, port: 65022 });
+  const now = new Date('2026-06-17T10:00:00.000Z');
+  await recall.recallFromDoor(root, 'surface page x for the brain', { transport: proseDoor(['.wrxn/wiki/concepts/x.md']), now });
+  await recall.recallFromDoor(root, 'now surface page y for the brain', { transport: proseDoor(['.wrxn/wiki/gotchas/y.md']), now });
+  assert.deepEqual(
+    readSidecar(root),
+    { 'concepts/x.md': '2026-06-17', 'gotchas/y.md': '2026-06-17' },
+    'both pages tracked, each keyed by its wiki-root-relative path'
+  );
+});
+
+test('reinforce: the same page on a LATER day updates its timestamp (day-granular recency advances)', async () => {
+  const root = installRoot('wrxn-reinforce-nextday-');
+  writeEndpoint(root, { pid: process.pid, port: 65023 });
+  const door = proseDoor(['.wrxn/wiki/concepts/x.md']);
+  await recall.recallFromDoor(root, 'surface x on day one please', { transport: door, now: new Date('2026-06-17T10:00:00.000Z') });
+  await recall.recallFromDoor(root, 'surface x on day two please', { transport: door, now: new Date('2026-06-18T09:00:00.000Z') });
+  assert.deepEqual(readSidecar(root), { 'concepts/x.md': '2026-06-18' }, 'recency advanced to the later day');
+});
+
+test('reinforce: a malformed existing sidecar → recall still surfaces, stamp skipped (fail-open, untouched)', async () => {
+  const root = installRoot('wrxn-reinforce-corrupt-');
+  writeEndpoint(root, { pid: process.pid, port: 65024 });
+  fs.mkdirSync(path.join(root, '.wrxn'), { recursive: true });
+  fs.writeFileSync(path.join(root, REINFORCE_REL), 'not json{ broken');
+  const block = await recall.recallFromDoor(root, 'surface x despite a corrupt sidecar', {
+    transport: proseDoor(['.wrxn/wiki/concepts/x.md']),
+    now: new Date('2026-06-17T10:00:00.000Z'),
+  });
+  assert.ok(block, 'recall surfaces despite a corrupt sidecar (non-blocking side effect)');
+  assert.equal(
+    fs.readFileSync(path.join(root, REINFORCE_REL), 'utf8'),
+    'not json{ broken',
+    'the corrupt sidecar is left untouched — stamp skipped, never clobbered'
+  );
+});
+
+test('reinforce: an unwritable sidecar path → recall still surfaces, no throw (best-effort write)', async () => {
+  const root = installRoot('wrxn-reinforce-unwritable-');
+  writeEndpoint(root, { pid: process.pid, port: 65025 });
+  // Make the sidecar PATH a directory → readFileSync/writeFileSync on it raise EISDIR → must be swallowed.
+  fs.mkdirSync(path.join(root, '.wrxn', 'reinforce.json'), { recursive: true });
+  const block = await recall.recallFromDoor(root, 'surface x with an unwritable sidecar path here', {
+    transport: proseDoor(['.wrxn/wiki/concepts/x.md']),
+    now: new Date('2026-06-17T10:00:00.000Z'),
+  });
+  assert.ok(block, 'recall is unaffected by an unwritable sidecar (the stamp fault is swallowed)');
+});
+
+test('reinforce: never throws even on a bad root (best-effort, pure side effect)', () => {
+  const dir = tmp('wrxn-reinforce-badroot-');
+  const badRoot = path.join(dir, 'a-file-not-a-dir');
+  fs.writeFileSync(badRoot, 'x'); // root is a FILE → every fs op under it throws ENOTDIR
+  assert.doesNotThrow(() =>
+    recall.reinforce(badRoot, [hit({ file: '.wrxn/wiki/concepts/x.md' })], new Date('2026-06-17T00:00:00.000Z'))
+  );
+});
+
+test('reinforce: only PROSE pages are stamped — a code hit alongside prose is never keyed in', async () => {
+  const root = installRoot('wrxn-reinforce-prose-only-');
+  writeEndpoint(root, { pid: process.pid, port: 65027 });
+  const transport = async () => ({
+    statusCode: 200,
+    body: JSON.stringify({
+      result: '',
+      hits: [
+        { id: 'c', name: 'spawnWidget', type: 'Function', file: 'lib/widgetry.cjs', line: 1, sources: ['bm25', 'semantic'], semanticScore: 0.95 },
+        { id: 'p', name: 'Deploy runbook', type: 'Page', file: '.wrxn/wiki/concepts/deploy-runbook.md', line: 1, sources: ['semantic'], semanticScore: 0.7 },
+      ],
+    }),
+  });
+  const block = await recall.recallFromDoor(root, 'how do we deploy the runbook to prod', { transport, now: new Date('2026-06-17T10:00:00.000Z') });
+  assert.ok(block, 'the prose hit surfaces');
+  assert.deepEqual(readSidecar(root), { 'concepts/deploy-runbook.md': '2026-06-17' }, 'only the prose page is stamped; the code symbol never enters the sidecar');
+});
+
+test('reinforce: when recall ABSTAINS (nothing qualifies), no sidecar is written', async () => {
+  const root = installRoot('wrxn-reinforce-abstain-');
+  writeEndpoint(root, { pid: process.pid, port: 65026 });
+  const transport = async () => ({
+    statusCode: 200,
+    body: JSON.stringify({ result: '', hits: [hit({ file: '.wrxn/wiki/concepts/x.md', sources: ['bm25'], semanticScore: 0.1 })] }),
+  });
+  const block = await recall.recallFromDoor(root, 'a prompt that surfaces nothing qualifying at all', { transport, now: new Date('2026-06-17T10:00:00.000Z') });
+  assert.equal(block, null, 'nothing clears the gate → abstain');
+  assert.equal(fs.existsSync(path.join(root, REINFORCE_REL)), false, 'no surfacing → no recency stamp (reinforcement = recall surfacing only, AC4)');
+});
+
 // ── self-contained: node stdlib only (no kernel-lib / recon import) ──────────────────
 
 test('the hook imports nothing outside the node standard library', () => {
