@@ -72,6 +72,23 @@ function checkBatch(target, batch) {
   return JSON.parse(dream(target, ['check', writeJson(target, 'b.json', batch)]));
 }
 
+// stage a batch (the precondition for commit-by-reference) — returns the parsed stage result.
+function stage(target, proposals) {
+  return JSON.parse(dream(target, ['stage', writeJson(target, 'batch.json', { proposals })]));
+}
+
+// commit BY REFERENCE — approved is the operator-approved SLUG list (["slug-a"] or { approved:[…] }).
+function commit(target, approved) {
+  return JSON.parse(dream(target, ['commit', writeJson(target, 'approved.json', approved)]));
+}
+
+// Write staged.jsonl directly (simulate a tampered/stale audit trail for the re-gate security probes).
+function seedStaged(target, records) {
+  const dir = path.join(target, '.wrxn', 'dream');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'staged.jsonl'), records.map((r) => JSON.stringify(r)).join('\n') + '\n');
+}
+
 // ── check: the well-formed accept path + every per-proposal reason code ────────
 
 test('check returns ok:true for a well-formed proposal on a fresh install', () => {
@@ -138,6 +155,57 @@ test('duplicate normalized title (different slug) → duplicate_existing_title',
   wiki(t, ['write-page', 'decisions', 'some-other-slug', '--description', 'Adopt Trunk-Based Development', '--body', 'x']);
   const v = checkOne(t, validProposal({ slug: 'a-fresh-slug' }));
   assert.equal(v.reason, 'duplicate_existing_title');
+});
+
+// ── identity fields: slug + title are gated (dream-review #2) ──────────────────
+
+test('a proposal with no slug → invalid_slug', () => {
+  const t = freshInstall('dream-noslug-');
+  const p = validProposal();
+  delete p.slug;
+  assert.equal(checkOne(t, p).reason, 'invalid_slug');
+});
+
+test('a non-kebab slug ("Not A Kebab!") → invalid_slug', () => {
+  const t = freshInstall('dream-badslug-');
+  assert.equal(checkOne(t, validProposal({ slug: 'Not A Kebab!' })).reason, 'invalid_slug');
+});
+
+test('a proposal with no title → missing_title', () => {
+  const t = freshInstall('dream-notitle-');
+  const p = validProposal();
+  delete p.title;
+  assert.equal(checkOne(t, p).reason, 'missing_title');
+});
+
+// ── credential secret-scan in the gate (dream-review #3, security M2) ──────────
+
+test('SECURITY (secret-scan): a body containing an AWS key → contains_secret', () => {
+  const t = freshInstall('dream-secret-aws-');
+  const v = checkOne(t, validProposal({ body: '# Creds\n\nThe access key is AKIAIOSFODNN7EXAMPLE, keep it safe.' }));
+  assert.equal(v.ok, false);
+  assert.equal(v.reason, 'contains_secret');
+});
+
+// ── argv flag-injection: a "--"-leading title is gated (dream-review #5, security M3) ──
+
+test('SECURITY (M3): a "--root"-titled proposal is rejected at the gate (invalid_title)', () => {
+  const t = freshInstall('dream-flag-gate-');
+  assert.equal(checkOne(t, validProposal({ title: '--root' })).reason, 'invalid_title');
+});
+
+// ── negative-filter tuning: ordinary decisions are no longer false-positives (dream-review #6) ──
+
+test('filter tuning: "Use Azure Synapse" passes the gate (bare synapse alternation removed)', () => {
+  const t = freshInstall('dream-azure-');
+  const v = checkOne(t, validProposal({ kind: 'concept', tier: 'concepts', slug: 'use-azure-synapse', title: 'Query via Azure Synapse', body: '# Azure Synapse\n\nWe query the warehouse with Azure Synapse Analytics.' }));
+  assert.deepEqual(v, { ok: true });
+});
+
+test('filter tuning: "services are registered transient" passes the gate (DI-lifetime false positive removed)', () => {
+  const t = freshInstall('dream-di-transient-');
+  const v = checkOne(t, validProposal({ kind: 'decision', tier: 'decisions', slug: 'di-transient-lifetime', title: 'Stateless services use a transient lifetime', body: '# DI lifetime\n\nAll stateless services are registered transient in the DI container.' }));
+  assert.deepEqual(v, { ok: true });
 });
 
 // ── anti-superstition negative filters (each rejects with a negative_filter_* reason) ──
@@ -260,7 +328,8 @@ test('commit writes the approved proposals additively to their tiers via wiki.cj
   const t = freshInstall('dream-commit-');
   const a = validProposal({ kind: 'decision', tier: 'decisions', slug: 'use-pino', title: 'Use pino', body: '# Pino\n\nWe log with pino structured logs.' });
   const b = validProposal({ kind: 'gotcha', tier: 'gotchas', slug: 'cache-trap', title: 'Cache trap', body: '# Cache trap\n\nWarm the cache before the first request.' });
-  const out = JSON.parse(dream(t, ['commit', writeJson(t, 'approved.json', { proposals: [a, b] })]));
+  stage(t, [a, b]);                                  // stage first — commit is BY REFERENCE (slugs)
+  const out = commit(t, ['use-pino', 'cache-trap']); // operator approves the staged slugs
 
   assert.equal(out.written.length, 2);
   assert.equal(out.skipped.length, 0);
@@ -276,24 +345,70 @@ test('commit writes the approved proposals additively to their tiers via wiki.cj
 
 test('commit dedup-skips an existing page WITHOUT aborting the rest of the batch', () => {
   const t = freshInstall('dream-commit-skip-');
-  // the middle proposal's page already exists (laid through the wiki adapter)
-  wiki(t, ['write-page', 'decisions', 'mid', '--description', 'Mid', '--body', 'pre-existing curated page']);
-
   const first = validProposal({ kind: 'decision', tier: 'decisions', slug: 'first', title: 'First', body: '# First\n\nfirst decision.' });
   const mid = validProposal({ kind: 'decision', tier: 'decisions', slug: 'mid', title: 'Mid', body: '# Mid\n\nWOULD-CLOBBER if written.' });
   const third = validProposal({ kind: 'decision', tier: 'decisions', slug: 'third', title: 'Third', body: '# Third\n\nthird decision.' });
+  stage(t, [first, mid, third]); // all three validate + stage (no page exists yet)
 
-  const out = JSON.parse(dream(t, ['commit', writeJson(t, 'approved.json', { proposals: [first, mid, third] })]));
+  // the middle proposal's page is then laid by hand — a curated page appears AFTER staging
+  wiki(t, ['write-page', 'decisions', 'mid', '--description', 'Mid', '--body', 'pre-existing curated page']);
 
-  // the batch did NOT abort: the two non-colliding pages are written, the middle is skipped
+  const out = commit(t, ['first', 'mid', 'third']);
+
+  // the batch did NOT abort: the two non-colliding pages are written, the middle is re-gate dedup-skipped
   assert.deepEqual(out.written.map((w) => w.slug).sort(), ['first', 'third']);
   assert.equal(out.skipped.length, 1);
   assert.equal(out.skipped[0].slug, 'mid');
-  assert.equal(out.skipped[0].reason, 'skipped-existing');
+  assert.equal(out.skipped[0].reason, 'duplicate_existing_path');
   assert.ok(fs.existsSync(path.join(t, '.wrxn', 'wiki', 'decisions', 'first.md')), 'first written despite the mid collision');
   assert.ok(fs.existsSync(path.join(t, '.wrxn', 'wiki', 'decisions', 'third.md')), 'third written despite the mid collision');
   // the pre-existing curated page is NOT clobbered
   assert.match(fs.readFileSync(path.join(t, '.wrxn', 'wiki', 'decisions', 'mid.md'), 'utf8'), /pre-existing curated page/);
+});
+
+// ── commit-by-reference re-gate at the write boundary (dream-review #1, the BLOCKING fix) ──
+
+test('SECURITY (re-gate at commit): a gate-REJECTED proposal force-committed by slug is NOT written', () => {
+  const t = freshInstall('dream-commit-regate-');
+  // a proposal that FAILS the gate (confidence below the floor) reaches staged.jsonl by tamper/stale
+  const bad = validProposal({ slug: 'sneaky', title: 'Sneaky', confidence: 0.2, body: '# Sneaky\n\nlow-confidence junk that must never reach recall.' });
+  seedStaged(t, [{ ts: 'x', op: 'stage', slug: 'sneaky', tier: 'decisions', proposal: bad }]);
+
+  const out = commit(t, ['sneaky']); // operator force-approves the slug
+  assert.equal(out.written.length, 0, 're-gate at the write boundary blocked the bad proposal');
+  assert.equal(out.skipped[0].slug, 'sneaky');
+  assert.equal(out.skipped[0].reason, 'confidence_below_threshold');
+  assert.ok(!fs.existsSync(path.join(t, '.wrxn', 'wiki', 'decisions', 'sneaky.md')), 'no page written to the recall surface');
+});
+
+test('commit ignores an approved slug that is absent from staged.jsonl (not_staged, nothing written)', () => {
+  const t = freshInstall('dream-commit-unstaged-');
+  const a = validProposal({ kind: 'decision', tier: 'decisions', slug: 'use-pino', title: 'Use pino', body: '# Pino\n\nWe log with pino.' });
+  stage(t, [a]);
+  const out = commit(t, ['never-staged', 'use-pino']); // approve a slug that was never staged
+  assert.equal(out.written.length, 1, 'only the staged slug is written');
+  assert.equal(out.written[0].slug, 'use-pino');
+  const sk = out.skipped.find((s) => s.slug === 'never-staged');
+  assert.ok(sk, 'the unstaged slug is recorded skipped');
+  assert.equal(sk.reason, 'not_staged');
+  assert.ok(!fs.existsSync(path.join(t, '.wrxn', 'wiki', 'decisions', 'never-staged.md')));
+});
+
+test('SECURITY (M3): a staged proposal with title "--root" does not write outside the wiki', () => {
+  const t = freshInstall('dream-flag-commit-');
+  // tamper: a "--root"-titled proposal in staged.jsonl (bypassing the stage-time gate)
+  const evil = validProposal({ slug: 'evil', title: '--root', body: '# Evil\n\nflag-injection attempt.' });
+  seedStaged(t, [{ ts: 'x', op: 'stage', slug: 'evil', tier: 'decisions', proposal: evil }]);
+
+  // run with cwd INSIDE the temp install so any stray relative dir lands here (cleaned up), not the repo
+  const out = JSON.parse(execFileSync(
+    'node',
+    [path.join(t, DREAM), 'commit', writeJson(t, 'approved.json', ['evil']), '--root', t],
+    { encoding: 'utf8', cwd: t }
+  ));
+  assert.equal(out.written.length, 0, 're-gate blocked the --root title');
+  assert.equal(out.skipped[0].reason, 'invalid_title');
+  assert.ok(!fs.existsSync(path.join(t, '--root')), 'no flag-injected --root directory created');
 });
 
 // ── _rules tier + rule kind (dream-03) ────────────────────────────────────────
@@ -334,7 +449,8 @@ test('a non-rule kind proposed to the _rules tier → kind_tier_mismatch', () =>
 
 test('commit writes an approved rule to _rules/<slug>.md via wiki.cjs (indexable .md)', () => {
   const t = freshInstall('dream-rule-commit-');
-  const out = JSON.parse(dream(t, ['commit', writeJson(t, 'approved.json', { proposals: [validRule()] })]));
+  stage(t, [validRule()]);
+  const out = commit(t, ['always-rebase-before-merge']);
   assert.equal(out.written.length, 1);
   assert.equal(out.skipped.length, 0);
   const page = path.join(t, '.wrxn', 'wiki', '_rules', 'always-rebase-before-merge.md');
@@ -408,14 +524,16 @@ test('set-focus records the update in the .wrxn/dream audit log (.jsonl)', () =>
 
 test('INVARIANT: the slot updates while every OTHER tier stays additive + dedup-skip', () => {
   const t = freshInstall('dream-focus-invariant-');
-  // a curated knowledge page already exists
+  // a dream proposal for 'use-pino' is staged BEFORE any curated page exists
+  const dup = validProposal({ slug: 'use-pino', title: 'Use pino', body: '# Pino\n\nWOULD-CLOBBER if written.' });
+  stage(t, [dup]);
+  // a curated knowledge page with the same slug is then laid by hand
   wiki(t, ['write-page', 'decisions', 'use-pino', '--description', 'Use pino', '--body', 'CURATED original']);
 
-  // a dream commit of the SAME slug is dedup-SKIPPED (additive — never clobbers a knowledge page)
-  const dup = validProposal({ slug: 'use-pino', title: 'Use pino', body: '# Pino\n\nWOULD-CLOBBER if written.' });
-  const out = JSON.parse(dream(t, ['commit', writeJson(t, 'approved.json', { proposals: [dup] })]));
+  // committing the staged slug is re-gate dedup-SKIPPED (additive — never clobbers a knowledge page)
+  const out = commit(t, ['use-pino']);
   assert.equal(out.written.length, 0, 'the duplicate knowledge page is not written');
-  assert.equal(out.skipped[0].reason, 'skipped-existing');
+  assert.equal(out.skipped[0].reason, 'duplicate_existing_path');
   assert.match(fs.readFileSync(path.join(t, '.wrxn', 'wiki', 'decisions', 'use-pino.md'), 'utf8'), /CURATED original/, 'knowledge tier NOT clobbered');
 
   // …but the focus slot DOES overwrite in place across two set-focus calls
@@ -445,6 +563,32 @@ test('CONTINUITY DOCTRINE: set-focus never reads or writes the handoff baton (di
   const slotTxt = fs.readFileSync(path.join(t, '.wrxn', 'wiki', '_slots', 'current-focus.md'), 'utf8');
   assert.match(slotTxt, new RegExp(focusMarker));
   assert.doesNotMatch(slotTxt, new RegExp(batonMarker), 'the slot did not absorb the baton (disjoint paths + writers)');
+});
+
+// ── set-focus is gated too (dream-review #4, security M1): negative filters + secret-scan ──
+
+test('SECURITY (M1): set-focus refuses a focus body containing a credential (slot not written)', () => {
+  const t = freshInstall('dream-focus-secret-');
+  const page = path.join(t, '.wrxn', 'wiki', '_slots', 'current-focus.md');
+  let err;
+  try {
+    dream(t, ['set-focus', writeJson(t, 'focus.json', { body: '# Current focus\n\nrotate AKIAIOSFODNN7EXAMPLE before Friday.' })]);
+  } catch (e) { err = e; }
+  assert.ok(err, 'set-focus exited non-zero');
+  assert.match(String(err.stderr || ''), /contains_secret|credential/i);
+  assert.ok(!fs.existsSync(page), 'the focus slot was not written');
+});
+
+test('SECURITY (M1): set-focus refuses a focus body that trips a negative filter (slot not written)', () => {
+  const t = freshInstall('dream-focus-neg-');
+  const page = path.join(t, '.wrxn', 'wiki', '_slots', 'current-focus.md');
+  let err;
+  try {
+    dream(t, ['set-focus', writeJson(t, 'focus.json', { body: '# Current focus\n\nthe recon tool is broken and does not work.' })]);
+  } catch (e) { err = e; }
+  assert.ok(err, 'set-focus exited non-zero');
+  assert.match(String(err.stderr || ''), /negative_filter|negative filter/i);
+  assert.ok(!fs.existsSync(page), 'the focus slot was not written');
 });
 
 test('the knowledge gate does NOT gain _slots — a proposal targeting _slots is unsupported_tier', () => {

@@ -15,9 +15,9 @@
 const fs = require('fs');
 const path = require('path');
 
-// The human-prose tiers only. The `_`-prefixed tiers (`_rules`, and `_slots` in a later slice) are
-// machine-written by the dream adapter through wiki.cjs — they are deliberately OUTSIDE this
-// human-prose frontmatter lint, not an omission (dream-03: no silent divergence).
+// The human-prose tiers only. The `_`-prefixed tiers (`_rules` and `_slots`) are machine-written by the
+// dream adapter through wiki.cjs — they are deliberately OUTSIDE this human-prose frontmatter lint, not
+// an omission (dream-03: no silent divergence).
 const TIERS = ['concepts', 'decisions', 'gotchas', 'sessions'];
 const REQUIRED_KEYS = ['name', 'description', 'tier'];
 const MAX_FLAGGED = 20;

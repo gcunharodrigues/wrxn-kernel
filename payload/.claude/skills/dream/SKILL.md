@@ -48,6 +48,9 @@ Do NOT:
   the session — those are reference-material patterns, not memory.
 - Enumerate options that weren't actually considered, or expand a terse operator comment into an essay.
 - Fabricate code or speculate about consequences the session itself didn't raise.
+- **Write a session secret into a page.** Redact any credential (API key, token, private key) that
+  surfaced in the session — a durable page is recalled forever. The gate also rejects `contains_secret`,
+  but you are the first filter.
 
 Do:
 - Compress the session into well-titled pages with the right `kind`.
@@ -116,10 +119,16 @@ node .wrxn/dream.cjs check /tmp/dream-batch.json
 
 A batch returns `{ abstained, accepted[], rejected[ {index, slug, reason} ] }`. Each `reason` is a
 machine code — `confidence_below_threshold`, `missing_evidence`, `missing_rationale`,
-`body_missing_h1`, `unsupported_tier`, `kind_tier_mismatch`, `duplicate_existing_path`,
+`body_missing_h1`, `body_too_large`, `invalid_slug`, `missing_title`, `invalid_title`,
+`unsupported_tier`, `kind_tier_mismatch`, `contains_secret`, `duplicate_existing_path`,
 `duplicate_existing_title`, `max_proposals_exceeded`, or a `negative_filter_*`. Fix or drop every
 rejected proposal; re-check until the batch is clean. If it returns `{ abstained: true }` (or every
 proposal is rejected), **stop** — write nothing.
+
+If the gate rejects a genuinely durable insight on a `negative_filter_*` **false positive** (e.g. a real
+decision that merely mentions "transient", "synapse", or "release"), **rephrase** the page to drop the
+transient/operational wording — state the durable decision, not the episodic event — then re-check.
+Never write around the gate.
 
 **2 — stage** (record the validated batch to the audit trail; nothing reaches the wiki yet):
 
@@ -131,15 +140,20 @@ node .wrxn/dream.cjs stage /tmp/dream-batch.json
 **confidence**, the **verbatim evidence quote**, and the one-line rationale — and ask which to approve.
 Never skip this step. If the operator approves none, you are done: commit nothing.
 
-**4 — commit** (write ONLY the operator-approved subset). Build a JSON array of just the approved
-Proposals and commit it:
+**4 — commit** (write ONLY the operator-approved subset, **by reference**). Build a JSON array of the
+approved **slugs** — NOT a rebuilt Proposal array — and commit it:
 
 ```bash
-node .wrxn/dream.cjs commit /tmp/dream-approved.json
+node .wrxn/dream.cjs commit /tmp/dream-approved.json   # ["slug-a","slug-b"]  (or {"approved":["slug-a",…]})
 ```
 
-`commit` writes each net-new page to its tier via `wiki.cjs` and **dedup-skips** any whose path
-already exists — it never clobbers a curated page. It returns `{ written[], skipped[] }`.
+`commit` reads `.wrxn/dream/staged.jsonl`, finds each approved slug's **staged** proposal, **re-runs the
+gate** on it (confidence, evidence, body H1, kind↔tier, secret-scan, negative filters, identity, dedup —
+everything `check` ran), and writes ONLY the ones that still pass — net-new pages, additively, via
+`wiki.cjs`. It **dedup-skips** any whose path already exists (never clobbers a curated page); a slug not
+staged (`not_staged`) or one that fails re-validation is recorded skipped with the reason. Returns
+`{ written[], skipped[] }`. This binds *committed == staged == presented*: a proposal the gate would
+reject can never be written, even if its slug is force-approved.
 
 **5 — confirm recall (optional).** The committed pages are plain `.md` in the wiki, so the Brain
 recalls them automatically next session. Spot-check with a wiki query:
@@ -165,6 +179,10 @@ This is **not** the knowledge-proposal loop — do not run a focus update throug
 ```bash
 node .wrxn/dream.cjs set-focus /tmp/dream-focus.json   # { "title": "Current focus", "body": "# Current focus\n\n…" }
 ```
+
+The focus slot is **gated** too: `set-focus` runs the anti-superstition negative filters and the
+credential secret-scan over the focus body and **refuses** (writing nothing) if either fires. Redact
+secrets and pin durable standing context, not a transient note.
 
 **Continuity doctrine — do not cross these wires.** The focus slot is **disjoint** from the handoff
 **baton** (`.wrxn/continuity/latest.md`): different path, different writer. `set-focus` NEVER reads or

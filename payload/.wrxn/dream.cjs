@@ -14,10 +14,14 @@
 //   stage  <batch.json>                   record the VALIDATED (accepted) batch into the audit trail
 //          under .wrxn/dream/ as .jsonl (NEVER .md, so recon's prose ingestion never recalls a
 //          staged-but-unapproved proposal). Nothing is written to the wiki.
-//   commit <approved.json>                write operator-approved proposals additively to their tiers
-//          VIA the wiki.cjs adapter (the indirection contract — no direct wiki .md writes), then append
-//          the outcome to the .wrxn/dream/ audit log (.jsonl). Additive + dedup-SKIP: an approved page
-//          that already exists is recorded skipped-existing and the batch still writes the rest.
+//   commit <approved.json>                write the operator-approved subset additively to their tiers,
+//          BY REFERENCE: approved.json is the approved SLUG list (["slug-a",…] or { approved:[…] }). For
+//          each slug we look up its staged proposal in staged.jsonl and RE-RUN the gate (validateProposal)
+//          at the write boundary, writing ONLY those that still pass — VIA the wiki.cjs adapter (the
+//          indirection contract). This binds committed == staged == presented: a gate-rejected proposal
+//          can never reach recall even if its slug is force-approved. Additive + dedup-SKIP; a slug not
+//          staged (not_staged) or one that fails re-validation is recorded skipped with the reason, and
+//          the rest of the batch still writes. Then the outcome is appended to the .wrxn/dream/ audit log.
 //   set-focus <focus.json>                write/OVERWRITE the durable standing-focus slot
 //          `_slots/current-focus.md` (input { title?, body }) via the wiki adapter's --force path, then
 //          log it. This is the LONE update-exception: only the focus slot may be overwritten; the
@@ -104,14 +108,28 @@ function wikiAdapter() {
   return path.join(__dirname, 'wiki.cjs'); // sibling in the same install .wrxn/ dir
 }
 
+// Guard the dream→wiki bridge against argv flag-injection (security M3): a user-controlled value
+// beginning with `--` would be parsed by wiki.cjs's flag()/positionals() scan as a flag (e.g. a title
+// "--root" redirects the write out of the wiki). The gate already rejects a `--`-leading slug
+// (invalid_slug) and title (invalid_title); this is the defense-in-depth backstop at the exec boundary.
+function guardArgv(values) {
+  for (const v of values) {
+    if (typeof v === 'string' && v.startsWith('--')) {
+      throw new Error(`flag-injection guard: refusing a --leading value at the wiki bridge: ${JSON.stringify(v.slice(0, 32))}`);
+    }
+  }
+}
+
 function wikiQuery(root, terms, opts) {
   const o = opts || {};
+  guardArgv(terms.map(String));
   const args = [wikiAdapter(), 'query', ...terms.map(String), '--root', root, '--limit', String(o.limit || 5000)];
   if (o.tier) args.push('--tier', o.tier);
   return JSON.parse(execFileSync('node', args, { encoding: 'utf8' }));
 }
 
 function wikiWritePage(root, tier, slug, description, body) {
+  guardArgv([slug, String(description || ''), String(body || '')]);
   const args = [wikiAdapter(), 'write-page', tier, slug, '--description', String(description || ''), '--body', String(body || ''), '--root', root];
   return JSON.parse(execFileSync('node', args, { encoding: 'utf8' }));
 }
@@ -119,6 +137,7 @@ function wikiWritePage(root, tier, slug, description, body) {
 // Overwrite a page in place via the wiki adapter's --force path (the indirection contract — never a
 // direct .md write). wiki.cjs restricts --force to the `_slots` tier, so only the focus slot is reachable.
 function wikiForceWritePage(root, tier, slug, description, body) {
+  guardArgv([slug, String(description || ''), String(body || '')]);
   const args = [wikiAdapter(), 'write-page', tier, slug, '--description', String(description || ''), '--body', String(body || ''), '--force', '--root', root];
   return JSON.parse(execFileSync('node', args, { encoding: 'utf8' }));
 }
@@ -136,21 +155,46 @@ function normalizeTitle(t) {
 const NEGATIVE_FILTERS = [
   // "tool X is broken" — a broad negative tool claim hardens into a permanent false refusal.
   { reason: 'negative_filter_tool_broken', re: /\bis (currently |completely |totally |again |now )?broken\b|\b(are|was|were) broken\b|\b(does|do|did)(n['’‛]t| not) work\b|\bnot working\b|\bis (down|unusable|busted|borked|useless)\b|\b(always|constantly|keeps?|forever) (fail(s|ing)?|break(s|ing)?|crash(es|ing)?)\b/ },
-  // a transient environment / setup failure — not a durable property of the system.
-  { reason: 'negative_filter_transient_failure', re: /\b(econnrefused|enoent|eaddrinuse|etimedout|connection refused|connection reset|timed out|time-?out|flak(e|y|ey)|intermittent|transient|rate[- ]?limit(ed)?|http 5\d\d|50[234]|port (already )?in use|address already in use|network (error|issue|glitch)|dns (error|failure))\b/ },
-  // a smoke / sanity / happy-path check — proves nothing durable.
-  { reason: 'negative_filter_smoke_test', re: /\b(smoke[- ]?tests?|sanity[- ]?checks?|hello[- ]?world|happy path)\b/ },
-  // a release / version marker — a one-time event, not durable knowledge.
-  { reason: 'negative_filter_release_marker', re: /\b(release notes?|released|bump(ed|ing)? (the )?version|version bump|changelog|tagged v\d|published to npm|npm publish|cut (a|the) release)\b/ },
+  // a transient environment / setup failure — not a durable property of the system. (The bare adjectives
+  // `transient`/`intermittent` are intentionally NOT here: they false-positive on DI-lifetime decisions
+  // like "services are registered transient" — the concrete error codes below carry the failure intent.)
+  { reason: 'negative_filter_transient_failure', re: /\b(econnrefused|enoent|eaddrinuse|etimedout|connection refused|connection reset|timed out|time-?out|flak(e|y|ey)|rate[- ]?limit(ed)?|http 5\d\d|50[234]|port (already )?in use|address already in use|network (error|issue|glitch)|dns (error|failure))\b/ },
+  // a smoke / sanity / happy-path RESULT — proves nothing durable. Gated on a result word so a forward
+  // decision ("we adopt smoke tests", "the happy path must stay fast") is NOT a false positive.
+  { reason: 'negative_filter_smoke_test', re: /\bhello[- ]?world\b|\b(smoke[- ]?tests?|sanity[- ]?checks?|happy path)\s+(pass(ed|es|ing)?|ran|run|succeed(ed|s)?|works?|worked|green)\b/ },
+  // a release / version EVENT — a one-time act, not durable knowledge. (Bare nouns `released`/`changelog`/
+  // `version bump` are intentionally NOT here: they false-positive on release-POLICY decisions.)
+  { reason: 'negative_filter_release_marker', re: /\b(release notes?|bump(ed|ing)? (the )?version|tagged v\d|published to npm|npm publish|cut (a|the) release)\b/ },
   // a one-off task narrative — "today I renamed/fixed-a-typo" is episodic, not semantic.
   { reason: 'negative_filter_one_off', re: /\b(one[- ]?off|just this once|one[- ]?time only|fixed a typo|typo fix|renamed (the )?(file|variable|function|method)|moved (the )?file|trivial (chore|fix|task)|quick chore)\b/ },
-  // never memorialize wrxn itself (its own routing / skill / engine text) — the memory system must not pollute itself.
-  { reason: 'negative_filter_wrxn_self', re: /\bsynapse\b|\bsynapse-engine\b|\.claude\/(skills|hooks)\b|\bskill\.md\b|\bwiki\.cjs\b|\bdream\.cjs\b|\bconstitution\.md\b|\b(routing|keyword[- ]?recall) domain\b|\bwrxn['’‛]?s?\s+(own|routing|skill|synapse|hook|constitution|manifest|payload|kernel|adapter)\b/ },
+  // never memorialize wrxn itself (its own routing / skill / engine text) — the memory system must not
+  // pollute itself. (The bare word `synapse` is intentionally NOT here — it false-positives on "Azure
+  // Synapse" / "Matrix Synapse"; wrxn's OWN synapse is still caught by the qualified `wrxn…synapse` clause.)
+  { reason: 'negative_filter_wrxn_self', re: /\bsynapse-engine\b|\.claude\/(skills|hooks)\b|\bskill\.md\b|\bwiki\.cjs\b|\bdream\.cjs\b|\bconstitution\.md\b|\b(routing|keyword[- ]?recall) domain\b|\bwrxn['’‛]?s?\s+(own|routing|skill|synapse|hook|constitution|manifest|payload|kernel|adapter)\b/ },
 ];
 
 function negativeFilter(text) {
   const lc = String(text || '').toLowerCase();
   for (const f of NEGATIVE_FILTERS) if (f.re.test(lc)) return f.reason;
+  return null;
+}
+
+// ── credential / secret scan (security M2) ────────────────────────────────────
+// A durable page must never harden a session secret into recalled memory. Scanned over the AUTHORED
+// text (title + body + rationale) — the same scope as the negative filters, and CASE-SENSITIVE (these
+// token shapes are case-specific). Evidence quotes are audit-only (never written to a page) so they
+// stay out of scope here, like the negative filters.
+const SECRET_PATTERNS = [
+  /AKIA[0-9A-Z]{16}/,                    // AWS access key id
+  /gh[pousr]_[A-Za-z0-9]{36}/,           // GitHub token (ghp_/gho_/ghu_/ghs_/ghr_)
+  /npm_[A-Za-z0-9]{36}/,                 // npm automation token
+  /sk-[A-Za-z0-9]{20,}/,                 // OpenAI-style secret key
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----/,  // PEM private-key header
+];
+
+function secretScan(text) {
+  const s = String(text || ''); // NOT lowercased — the token shapes are case-sensitive.
+  for (const re of SECRET_PATTERNS) if (re.test(s)) return 'contains_secret';
   return null;
 }
 
@@ -170,8 +214,16 @@ function validateProposal(p, io) {
   if (typeof p.rationale !== 'string' || p.rationale.trim().length === 0) return { ok: false, reason: 'missing_rationale' };
   if (typeof p.body !== 'string' || !p.body.startsWith('# ')) return { ok: false, reason: 'body_missing_h1' };
   if (p.body.length > BODY_MAX) return { ok: false, reason: 'body_too_large' };
-  const neg = negativeFilter(`${p.title || ''}\n${p.body}\n${p.rationale}`);
+  const authored = `${p.title || ''}\n${p.body}\n${p.rationale}`;
+  const neg = negativeFilter(authored);
   if (neg) return { ok: false, reason: neg };
+  const sec = secretScan(authored);
+  if (sec) return { ok: false, reason: sec };
+  // identity fields — gated BEFORE the (expensive) dedup IO so a bad/missing slug or a flag-injecting
+  // title can never reach the wiki bridge (a no-slug proposal otherwise passes check then drops at commit).
+  if (typeof p.slug !== 'string' || !/^[a-z0-9][a-z0-9-]*$/.test(p.slug)) return { ok: false, reason: 'invalid_slug' };
+  if (typeof p.title !== 'string' || p.title.trim().length === 0) return { ok: false, reason: 'missing_title' };
+  if (p.title.startsWith('--')) return { ok: false, reason: 'invalid_title' };
   if (io.pathExists(p.tier, p.slug)) return { ok: false, reason: 'duplicate_existing_path' };
   if (io.titleExists(p.title, p.tier, p.slug)) return { ok: false, reason: 'duplicate_existing_title' };
   return { ok: true };
@@ -299,23 +351,58 @@ function runStage() {
   });
 }
 
+// Normalize commit input into the operator-approved SLUG list (["slug-a",…] or { approved:[…] }).
+function approvedSlugs(input) {
+  if (Array.isArray(input)) return input.map(String);
+  if (input && typeof input === 'object' && Array.isArray(input.approved)) return input.approved.map(String);
+  return [];
+}
+
+// Read staged.jsonl into a slug → staged-proposal map (last staged wins). Malformed lines are skipped.
+function readStaged(root) {
+  const map = new Map();
+  let txt;
+  try {
+    txt = fs.readFileSync(path.join(root, ...DREAM_DIR, STAGED_FILE), 'utf8');
+  } catch {
+    return map; // no staged trail yet → nothing to commit by reference
+  }
+  for (const line of txt.split('\n')) {
+    const s = line.trim();
+    if (!s) continue;
+    try {
+      const rec = JSON.parse(s);
+      if (rec && rec.slug && rec.proposal) map.set(rec.slug, rec.proposal);
+    } catch {
+      /* skip a malformed audit line */
+    }
+  }
+  return map;
+}
+
+// commit BY REFERENCE: bind committed == staged == presented. For each operator-approved slug we look up
+// its staged proposal and RE-RUN the full gate (validateProposal) at the write boundary — so a proposal
+// the gate would reject can never reach recall, even if its slug is force-approved. A slug not staged, or
+// one that fails re-validation (confidence, evidence, body H1, kind↔tier, secret-scan, negative filters,
+// identity, dedup — all re-checked), is recorded skipped with the reason; the rest of the batch still writes.
 function runCommit() {
   const input = readJson(positionalFile());
   const root = installRoot();
-  const { proposals, abstain } = normalizeBatch(input);
-  if (abstain) return print({ abstained: true, written: [], skipped: [] });
-
+  const approved = approvedSlugs(input);
   const io = makeIo(root);
+  const staged = readStaged(root);
   const written = [];
   const skipped = [];
-  for (const p of proposals) {
-    if (!p || !TIERS.includes(p.tier) || !p.slug) {
-      skipped.push({ slug: p && p.slug, reason: 'skipped-invalid' });
+  for (const slug of approved) {
+    const key = String(slug);
+    const p = staged.get(key);
+    if (!p) {
+      skipped.push({ slug: key, reason: 'not_staged' });
       continue;
     }
-    // dedup-skip (path) — additive: an approved page that already exists is skipped, never clobbered.
-    if (io.pathExists(p.tier, p.slug)) {
-      skipped.push({ slug: p.slug, reason: 'skipped-existing' });
+    const v = validateProposal(p, io); // the re-gate — additive + dedup-skip + every quality/safety check
+    if (!v.ok) {
+      skipped.push({ slug: key, reason: v.reason });
       continue;
     }
     try {
@@ -325,8 +412,8 @@ function runCommit() {
       // wiki.cjs write-page does process.exit(2) on an existing page — catch the non-zero exit so a
       // TOCTOU collision (or any single write failure) is recorded and the rest of the batch STILL writes.
       const stderr = String((err && err.stderr) || '');
-      const reason = /already exists/i.test(stderr) ? 'skipped-existing' : 'skipped-error';
-      skipped.push({ slug: p.slug, reason });
+      const reason = /already exists/i.test(stderr) ? 'duplicate_existing_path' : 'skipped_error';
+      skipped.push({ slug: key, reason });
     }
   }
   appendLine(path.join(dreamDir(root), AUDIT_FILE), { ts: new Date().toISOString(), op: 'commit', written: written.map((w) => w.slug), skipped });
@@ -347,6 +434,15 @@ function runSetFocus() {
   if (typeof body !== 'string' || body.trim().length === 0) {
     fail('set-focus needs a non-empty "body" — the standing-focus statement to pin');
   }
+  // Gate the focus slot too (security M1): it is an ungated --force write, so run the same content-safety
+  // checks the knowledge gate runs — the anti-superstition negative filters + the credential secret-scan
+  // — over the focus title+body, and refuse a `--`-leading flag-injection value. Reject ⇒ nothing written.
+  const scan = `${title}\n${body}`;
+  const neg = negativeFilter(scan);
+  if (neg) fail(`set-focus rejected — the focus body trips a negative filter (${neg}); state durable standing context, not a transient note`);
+  const sec = secretScan(scan);
+  if (sec) fail(`set-focus rejected — the focus body contains a credential (${sec}); never pin a session secret`);
+  if (title.startsWith('--') || body.startsWith('--')) fail('set-focus rejected — a --leading title/body is refused (flag-injection guard)');
   const r = wikiForceWritePage(root, FOCUS_TIER, FOCUS_SLUG, title, body);
   appendLine(path.join(dreamDir(root), AUDIT_FILE), { ts: new Date().toISOString(), op: 'set-focus', file: r.written });
   return print({ focus: r.written });

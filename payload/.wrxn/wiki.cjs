@@ -90,7 +90,7 @@ function listPages(dir) {
 function runQuery() {
   const terms = positionals();
   if (terms.length === 0) {
-    process.stdout.write('Usage: node .wrxn/wiki.cjs query <search-term...> [--tier all|concepts|decisions|gotchas|sessions|_rules] [--limit N]\n');
+    process.stdout.write('Usage: node .wrxn/wiki.cjs query <search-term...> [--tier all|concepts|decisions|gotchas|sessions|_rules|_slots] [--limit N]\n');
     process.exit(2);
   }
   const needle = terms.join(' ').toLowerCase();
