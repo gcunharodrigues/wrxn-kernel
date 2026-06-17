@@ -24,6 +24,11 @@
       "profile": "project"
     },
     {
+      "path": ".claude/hooks/drift-detect.cjs",
+      "class": "managed",
+      "profile": "project"
+    },
+    {
       "path": ".claude/hooks/enforce-managed-guard.cjs",
       "class": "managed",
       "profile": "project"
