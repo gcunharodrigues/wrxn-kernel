@@ -184,6 +184,13 @@ test('forced handoff fires at >= the threshold (45% of a 200k window)', () => {
   assert.match(ctx, /\[HANDOFF REQUIRED\]/);
 });
 
+test('the forced-handoff directive carries a dream consolidation nudge — a suggestion, never an auto-run', () => {
+  const d = engine.handoffDirective(0.5, 0.4);
+  assert.match(d, /\[HANDOFF REQUIRED\]/);   // mirrors the existing directive assertion
+  assert.match(d, /dream/i);                 // the dream consolidation reminder rides the directive
+  assert.match(d, /suggestion|optional/i);   // … and only suggests — dream is never auto-invoked
+});
+
 test('no handoff below the threshold (20% of a 200k window)', () => {
   const root = freshInstall('wrxn-syn-ho-below-');
   const tx = writeTranscript(root, { input_tokens: 40000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 9000 });

@@ -257,6 +257,7 @@ function handoffDirective(consumed, pct) {
     '  1. Finish the current request.',
     '  2. Run the handoff skill to write the baton (a compact handoff document).',
     '  3. Tell the operator to /clear and open a fresh session, where the baton injects on resume.',
+    '  Suggestion (optional, before step 2): run the dream skill to consolidate this session\'s durable learnings into wiki memory — a suggestion only; dream never auto-runs, it acts only when you invoke it.',
   ].join('\n');
 }
 
