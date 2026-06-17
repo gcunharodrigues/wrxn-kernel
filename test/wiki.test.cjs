@@ -123,7 +123,7 @@ test('write-page: an empty body still gets the # <slug> heading (backward-compat
 
 test('every wiki tier .gitkeep is classified state in the manifest', () => {
   const manifest = loadManifest(path.join(PKG_ROOT, 'manifest.json'));
-  const tiers = ['concepts', 'decisions', 'gotchas', 'sessions'];
+  const tiers = ['concepts', 'decisions', 'gotchas'];
   for (const t of tiers) {
     const entry = manifest.files.find((f) => f.path === `.wrxn/wiki/${t}/.gitkeep`);
     assert.ok(entry, `.wrxn/wiki/${t}/.gitkeep missing from manifest`);

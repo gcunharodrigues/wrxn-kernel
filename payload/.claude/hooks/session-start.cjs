@@ -3,9 +3,9 @@
 
 // WRXN session-start hook — the orientation surface (wrxn-kernel-10).
 // SessionStart. Injects identity + resume as additionalContext so every new session opens
-// oriented. The resume gives the DELIBERATE handoff baton precedence over the automatic
-// episodic record: a baton at .wrxn/continuity/latest.md (single writer = the handoff skill)
-// wins; otherwise the most-recent dated session page is surfaced as the resume pointer.
+// oriented. The resume surfaces the DELIBERATE handoff baton at .wrxn/continuity/latest.md (single
+// writer = the handoff skill); absent a baton there is no prior handoff to resume. (The automatic
+// episodic session-page fallback was retired with the session-capture subsystem in harvest-01.)
 //
 // Self-contained: ships into installs, MUST NOT import the kernel lib (node stdlib only).
 // Fail-open: any fault emits {} (no orientation) — the hook NEVER blocks a session opening.
@@ -62,20 +62,6 @@ function readBaton(root) {
   return readFileOr(path.join(root, '.wrxn', 'continuity', 'latest.md'), null);
 }
 
-// The automatic episodic record: the most-recent dated session page (sessions tier).
-function latestSessionPage(root) {
-  const dir = path.join(root, '.wrxn', 'wiki', 'sessions');
-  let names;
-  try {
-    names = fs.readdirSync(dir).filter((n) => n.endsWith('.md'));
-  } catch {
-    return null;
-  }
-  if (names.length === 0) return null;
-  names.sort(); // dated `YYYY-MM-DD-…` slugs sort chronologically
-  return names[names.length - 1];
-}
-
 function main() {
   let consumed = '';
   try {
@@ -94,12 +80,7 @@ function main() {
   if (baton && baton.trim()) {
     parts.push('', 'Resume — deliberate handoff baton (.wrxn/continuity/latest.md):', baton.trim());
   } else {
-    const page = latestSessionPage(root);
-    if (page) {
-      parts.push('', `Resume — last session: .wrxn/wiki/sessions/${page}`);
-    } else {
-      parts.push('', 'Resume — fresh install, no prior session recorded.');
-    }
+    parts.push('', 'Resume — no prior handoff.');
   }
 
   emit({

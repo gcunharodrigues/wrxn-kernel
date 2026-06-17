@@ -40,9 +40,8 @@ _Avoid_: daemon, background job, summarizer (it is a deliberate, operator-confir
 
 **Consolidation**:
 dream's act — turning one session's experience into durable decisions/gotchas/rules/concepts in the
-wiki, each candidate gated by validation. Distinct from **Capture** (session-end's mechanical
-breadcrumb page).
-_Avoid_: capture, summarization.
+wiki, each candidate gated by validation.
+_Avoid_: summarization.
 
 **Proposal**:
 A validated candidate page dream stages for operator confirmation before any write. It carries a

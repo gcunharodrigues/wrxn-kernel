@@ -64,16 +64,6 @@
       "profile": "project"
     },
     {
-      "path": ".claude/hooks/session-end.cjs",
-      "class": "managed",
-      "profile": "project"
-    },
-    {
-      "path": ".claude/hooks/session-history.cjs",
-      "class": "managed",
-      "profile": "project"
-    },
-    {
       "path": ".claude/hooks/session-start.cjs",
       "class": "managed",
       "profile": "project"
@@ -460,11 +450,6 @@
     },
     {
       "path": ".wrxn/wiki/gotchas/.gitkeep",
-      "class": "state",
-      "profile": "project"
-    },
-    {
-      "path": ".wrxn/wiki/sessions/.gitkeep",
       "class": "state",
       "profile": "project"
     },
