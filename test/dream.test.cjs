@@ -364,3 +364,91 @@ test('the .wrxn/dream audit dir gitkeep is classified state in the manifest and 
   assert.ok(r, 'gitkeep in receipt');
   assert.equal(r.class, 'state');
 });
+
+// ── set-focus: the _slots focus slot + the lone update-exception (dream-04) ────
+// The focus slot is the project's durable STANDING focus — NOT a knowledge proposal. set-focus
+// creates AND overwrites _slots/current-focus.md (the lone exception to additive + dedup-skip), goes
+// through wiki.cjs (the indirection contract), and is DISJOINT from the continuity baton.
+
+function setFocus(t, focus) {
+  return JSON.parse(dream(t, ['set-focus', writeJson(t, 'focus.json', focus)]));
+}
+
+test('set-focus creates _slots/current-focus.md, and a LATER set-focus UPDATES it in place', () => {
+  const t = freshInstall('dream-focus-');
+  const page = path.join(t, '.wrxn', 'wiki', '_slots', 'current-focus.md');
+  setFocus(t, { title: 'Current focus', body: '# Current focus\n\nShip dream-04: the focus slot.' });
+  assert.ok(fs.existsSync(page), 'focus slot created as a real .md under .wrxn/wiki/_slots');
+  assert.match(fs.readFileSync(page, 'utf8'), /Ship dream-04/);
+
+  // a LATER set-focus OVERWRITES the same path in place — the lone update-exception
+  setFocus(t, { title: 'Current focus', body: '# Current focus\n\nNow onto dream-05: the handoff nudge.' });
+  const txt = fs.readFileSync(page, 'utf8');
+  assert.match(txt, /dream-05/, 'slot updated to the new standing focus');
+  assert.doesNotMatch(txt, /dream-04/, 'the prior focus is overwritten in place, not appended');
+});
+
+test('set-focus writes the slot via wiki.cjs as an indexable .md the wiki query can recall', () => {
+  const t = freshInstall('dream-focus-md-');
+  const marker = 'WQZX-distinctive-focus-marker';
+  setFocus(t, { body: `# Current focus\n\n${marker}` });
+  const res = JSON.parse(wiki(t, ['query', marker]));
+  assert.ok(res.total >= 1, 'the focus slot is a queryable wiki page (recon prose-ingests it)');
+  assert.equal(res.hits[0].tier, '_slots');
+});
+
+test('set-focus records the update in the .wrxn/dream audit log (.jsonl)', () => {
+  const t = freshInstall('dream-focus-audit-');
+  setFocus(t, { body: '# Current focus\n\nfocus body' });
+  const audit = fs.readFileSync(path.join(t, '.wrxn', 'dream', 'audit.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const ev = audit.find((e) => e.op === 'set-focus');
+  assert.ok(ev, 'a set-focus event is appended to the audit log');
+  assert.match(ev.file, /_slots\/current-focus\.md$/);
+});
+
+test('INVARIANT: the slot updates while every OTHER tier stays additive + dedup-skip', () => {
+  const t = freshInstall('dream-focus-invariant-');
+  // a curated knowledge page already exists
+  wiki(t, ['write-page', 'decisions', 'use-pino', '--description', 'Use pino', '--body', 'CURATED original']);
+
+  // a dream commit of the SAME slug is dedup-SKIPPED (additive — never clobbers a knowledge page)
+  const dup = validProposal({ slug: 'use-pino', title: 'Use pino', body: '# Pino\n\nWOULD-CLOBBER if written.' });
+  const out = JSON.parse(dream(t, ['commit', writeJson(t, 'approved.json', { proposals: [dup] })]));
+  assert.equal(out.written.length, 0, 'the duplicate knowledge page is not written');
+  assert.equal(out.skipped[0].reason, 'skipped-existing');
+  assert.match(fs.readFileSync(path.join(t, '.wrxn', 'wiki', 'decisions', 'use-pino.md'), 'utf8'), /CURATED original/, 'knowledge tier NOT clobbered');
+
+  // …but the focus slot DOES overwrite in place across two set-focus calls
+  setFocus(t, { body: '# Current focus\n\nfocus v1' });
+  setFocus(t, { body: '# Current focus\n\nfocus v2' });
+  const slot = fs.readFileSync(path.join(t, '.wrxn', 'wiki', '_slots', 'current-focus.md'), 'utf8');
+  assert.match(slot, /focus v2/);
+  assert.doesNotMatch(slot, /focus v1/, 'the slot is the LONE updatable page');
+});
+
+test('CONTINUITY DOCTRINE: set-focus never reads or writes the handoff baton (disjoint paths)', () => {
+  const t = freshInstall('dream-focus-baton-');
+  // pre-seed the deliberate handoff baton (single writer = the handoff skill) with a distinctive marker
+  const baton = path.join(t, '.wrxn', 'continuity', 'latest.md');
+  fs.mkdirSync(path.dirname(baton), { recursive: true });
+  const batonMarker = 'BATON-ONLY-marker-must-survive';
+  fs.writeFileSync(baton, `# Handoff\n\n${batonMarker}\n`);
+
+  const focusMarker = 'FOCUS-ONLY-marker';
+  setFocus(t, { body: `# Current focus\n\n${focusMarker}` });
+
+  // the baton is untouched (set-focus never WROTE it) and never absorbed the focus content
+  const batonTxt = fs.readFileSync(baton, 'utf8');
+  assert.match(batonTxt, new RegExp(batonMarker), 'baton content survives — set-focus did not write it');
+  assert.doesNotMatch(batonTxt, new RegExp(focusMarker), 'the focus was not written into the baton');
+  // the focus slot carries ONLY its own marker (set-focus never READ/copied the baton)
+  const slotTxt = fs.readFileSync(path.join(t, '.wrxn', 'wiki', '_slots', 'current-focus.md'), 'utf8');
+  assert.match(slotTxt, new RegExp(focusMarker));
+  assert.doesNotMatch(slotTxt, new RegExp(batonMarker), 'the slot did not absorb the baton (disjoint paths + writers)');
+});
+
+test('the knowledge gate does NOT gain _slots — a proposal targeting _slots is unsupported_tier', () => {
+  const t = freshInstall('dream-slots-gate-');
+  const v = checkOne(t, validProposal({ kind: 'concept', tier: '_slots', slug: 'current-focus', title: 'x', body: '# x\n\ny' }));
+  assert.equal(v.reason, 'unsupported_tier');
+});

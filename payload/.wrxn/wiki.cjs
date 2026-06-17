@@ -4,24 +4,29 @@
 // WRXN memory-wiki adapter — the install-local CLI over the file-based memory tiers.
 // Self-contained: this ships INTO an install and MUST NOT import the kernel lib (node stdlib only).
 //
-// Tiers live under <installRoot>/.wrxn/wiki/<tier>/ where tier ∈ {concepts, decisions, gotchas, sessions, _rules}.
+// Tiers live under <installRoot>/.wrxn/wiki/<tier>/ where tier ∈ {concepts, decisions, gotchas, sessions, _rules, _slots}.
 // Each page is a plain markdown file. Empty tiers are the fresh-install default — every read path
 // must return cleanly (no crash) over an empty wiki.
 //
 // Subcommands:
 //   query <text...>              grep-style substring search → JSON {query, tier, total, hits[]}
 //   recall <text...>             alias of query (page-level recall; same substring engine)
-//   write-page <tier> <slug>     create <tier>/<slug>.md (refuses to overwrite); prints the path
+//   write-page <tier> <slug>     create <tier>/<slug>.md (refuses to overwrite); prints the path.
+//                                --force overwrites in place, but ONLY for the `_slots` focus slot.
 //
-// Flags: --tier <concepts|decisions|gotchas|sessions|_rules|all> (default all) · --limit <N> (default 20)
-//        --root <dir> (override the install-root walk-up; mainly for tests)
+// Flags: --tier <concepts|decisions|gotchas|sessions|_rules|_slots|all> (default all) · --limit <N> (default 20)
+//        --force (write-page only; overwrite the `_slots` slot in place) · --root <dir> (test override)
 
 const fs = require('fs');
 const path = require('path');
 
 // `_rules` is the dream-written tier (durable always/never project conventions) — recalled like the
 // prose tiers, but machine-written by the dream adapter (dream-03), hence the `_` prefix.
-const TIERS = ['concepts', 'decisions', 'gotchas', 'sessions', '_rules'];
+// `_slots` (dream-04) holds the durable standing-focus page (`_slots/current-focus.md`) — the LONE
+// wiki page that may be overwritten in place, and only via `write-page --force`.
+const TIERS = ['concepts', 'decisions', 'gotchas', 'sessions', '_rules', '_slots'];
+// The one tier whose pages `--force` may overwrite — every other tier stays create-only / refuse-overwrite.
+const OVERWRITABLE_TIER = '_slots';
 
 // ── install-root resolution (walk up to the wrxn.install.json receipt) ────────
 // Mirrors payload/.claude/hooks/enforce-managed-guard.cjs findInstallRoot.
@@ -117,17 +122,25 @@ function runQuery() {
 function runWritePage() {
   const [tier, slug] = positionals();
   if (!tier || !slug) {
-    process.stdout.write('Usage: node .wrxn/wiki.cjs write-page <tier> <slug> [--description "..."] [--body "..."]\n');
+    process.stdout.write('Usage: node .wrxn/wiki.cjs write-page <tier> <slug> [--description "..."] [--body "..."] [--force]\n');
     process.exit(2);
   }
   if (!TIERS.includes(tier)) fail(`unknown tier "${tier}" — one of ${TIERS.join(', ')}`);
   if (!/^[a-z0-9][a-z0-9-]*$/.test(slug)) fail(`slug must be kebab-case ([a-z0-9-]): "${slug}"`);
 
+  // `--force` is the LONE overwrite-exception (dream-04): it overwrites a page in place, and ONLY for
+  // the `_slots` focus slot. Every normal write-page (no `--force`, any other tier) still refuses to
+  // clobber — so the wiki stays additive/curated and only the standing-focus slot may be updated.
+  const force = process.argv.includes('--force');
+  if (force && tier !== OVERWRITABLE_TIER) {
+    fail(`--force overwrite is only permitted for the ${OVERWRITABLE_TIER} focus slot (the lone update-exception), not "${tier}"`);
+  }
+
   const root = wikiRoot();
   const dir = path.join(root, tier);
   fs.mkdirSync(dir, { recursive: true });
   const dest = path.join(dir, `${slug}.md`);
-  if (fs.existsSync(dest)) fail(`page already exists, refusing to overwrite: ${path.relative(root, dest)}`);
+  if (fs.existsSync(dest) && !force) fail(`page already exists, refusing to overwrite: ${path.relative(root, dest)}`);
 
   const description = flag('description') || '';
   const body = flag('body') || '';

@@ -148,11 +148,36 @@ recalls them automatically next session. Spot-check with a wiki query:
 node .wrxn/wiki.cjs query "<a phrase from a page you just wrote>"
 ```
 
+## Refreshing the focus slot
+
+`_slots/current-focus.md` is the project's **durable standing focus** — a short statement of what the
+project is centered on right now, recall-surfaced like any other page. It is the **lone updatable wiki
+page**: every knowledge page is additive + dedup-skip, but the focus slot may be **overwritten in
+place**.
+
+This is **not** the knowledge-proposal loop — do not run a focus update through `check` / `stage` /
+`commit` (those are for evidence-backed concept/decision/gotcha/rule pages). The slot has its **own op**:
+
+1. Draft a short standing-focus statement (a few lines of markdown, body starting with `# `).
+2. **Present it to the operator and wait for confirmation** — like every dream write.
+3. On approval, write it via the dedicated op — it overwrites the slot in place:
+
+```bash
+node .wrxn/dream.cjs set-focus /tmp/dream-focus.json   # { "title": "Current focus", "body": "# Current focus\n\n…" }
+```
+
+**Continuity doctrine — do not cross these wires.** The focus slot is **disjoint** from the handoff
+**baton** (`.wrxn/continuity/latest.md`): different path, different writer. `set-focus` NEVER reads or
+writes the baton, and the **handoff** skill remains its sole writer. The baton is ephemeral cross-session
+resume; the focus slot is durable standing context. Keeping their paths and writers separate is the
+structural fix that stops a deliberate handoff from being clobbered.
+
 ## Boundaries
 
 - **Current session only.** No transcript mining, no cross-session backlog.
-- **Additive only.** dream creates net-new pages; merging or refreshing an existing page is out of
-  scope (that is harvest, a later phase).
+- **Additive only, save one slot.** dream creates net-new knowledge pages; merging or refreshing an
+  existing page is out of scope (that is harvest, a later phase). The **lone exception** is the focus
+  slot `_slots/current-focus.md`, which `set-focus` overwrites in place (see *Refreshing the focus slot*).
 - **Never autonomous.** dream is a deliberate, attended, operator-confirmed skill — never a background
   run, never a write without confirmation.
 - **`_rules` ≠ SYNAPSE.** A `rule` page is *recalled knowledge* — the Brain surfaces it like a concept

@@ -143,6 +143,56 @@ test('the laid receipt classifies the _rules tier gitkeep as state', () => {
   assert.equal(gitkeep.class, 'state');
 });
 
+// ── _slots tier + the force-overwrite exception (dream-04) ────────────────────
+// `_slots/current-focus.md` is the durable standing-focus page — the LONE wiki page that may be
+// overwritten, and only via `write-page --force`. Every other tier stays create-only / refuse-overwrite.
+
+test('write-page creates a page in the _slots tier and query finds it', () => {
+  const { target } = freshInstall('wrxn-wiki-slots-');
+  const out = JSON.parse(runAdapter(target, ['write-page', '_slots', 'current-focus', '--body', 'shipping the dream slice']));
+  assert.equal(out.tier, '_slots');
+  const page = path.join(target, '.wrxn', 'wiki', '_slots', 'current-focus.md');
+  assert.ok(fs.existsSync(page), 'page laid in the _slots tier');
+  const res = JSON.parse(runAdapter(target, ['query', 'shipping the dream slice']));
+  assert.ok(res.total >= 1, 'query found the _slots page');
+  assert.equal(res.hits[0].tier, '_slots');
+});
+
+test('write-page --force overwrites the focus slot in place (create then update)', () => {
+  const { target } = freshInstall('wrxn-wiki-force-');
+  runAdapter(target, ['write-page', '_slots', 'current-focus', '--body', 'FIRST focus statement']);
+  runAdapter(target, ['write-page', '_slots', 'current-focus', '--force', '--body', 'SECOND focus statement']);
+  const txt = fs.readFileSync(path.join(target, '.wrxn', 'wiki', '_slots', 'current-focus.md'), 'utf8');
+  assert.match(txt, /SECOND focus statement/, 'force overwrote with the new content');
+  assert.doesNotMatch(txt, /FIRST focus statement/, 'the prior content is gone (overwritten in place, not appended)');
+});
+
+test('write-page --force is refused for any tier other than _slots (the lone update-exception)', () => {
+  const { target } = freshInstall('wrxn-wiki-force-guard-');
+  runAdapter(target, ['write-page', 'concepts', 'pinned', '--body', 'curated original']);
+  assert.throws(
+    () => runAdapter(target, ['write-page', 'concepts', 'pinned', '--force', '--body', 'would clobber']),
+    /only permitted for the _slots/
+  );
+  // the curated knowledge page is intact — --force cannot touch it
+  assert.match(fs.readFileSync(path.join(target, '.wrxn', 'wiki', 'concepts', 'pinned.md'), 'utf8'), /curated original/);
+});
+
+test('.wrxn/wiki/_slots/.gitkeep is classified state in the manifest', () => {
+  const manifest = loadManifest(path.join(PKG_ROOT, 'manifest.json'));
+  const entry = manifest.files.find((f) => f.path === '.wrxn/wiki/_slots/.gitkeep');
+  assert.ok(entry, '.wrxn/wiki/_slots/.gitkeep in manifest');
+  assert.equal(entry.class, 'state');
+});
+
+test('the laid receipt classifies the _slots tier gitkeep as state', () => {
+  const { target } = freshInstall('wrxn-wiki-slots-receipt-');
+  const receipt = JSON.parse(fs.readFileSync(path.join(target, 'wrxn.install.json'), 'utf8'));
+  const gitkeep = receipt.files.find((f) => f.path === '.wrxn/wiki/_slots/.gitkeep');
+  assert.ok(gitkeep, '_slots tier gitkeep in receipt');
+  assert.equal(gitkeep.class, 'state');
+});
+
 // ── AC-2: .recon-wrxn.json is laid (seeded); optional live recon-wrxn index+query ──
 
 test('.recon-wrxn.json is laid into a fresh install and is valid JSON', () => {
