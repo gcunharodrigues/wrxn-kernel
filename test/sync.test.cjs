@@ -221,3 +221,242 @@ test('the sync SKILL.md is managed/project, laid, and user-invocable (AC1)', () 
   assert.match(body, /name:\s*sync/, 'frontmatter names the skill');
   assert.match(body, /user-invocable:\s*true/, 'the skill is user-invocable');
 });
+
+// ── sync-06: prose propose → confirm → re-stamp ───────────────────────────────
+// The OTHER half of the sync loop: for a STALE prose doc, the skill DRAFTS a reconciling edit (the
+// LLM half — passed IN here as a deterministic test input), the adapter STAGES it by-reference
+// (secret-scanned, mirroring dream's stage), then on operator confirm RE-VALIDATES at the write
+// boundary and writes the edit IN PLACE + advances the doc's `synced_to:` watermark. DECLINE writes
+// nothing. The watermark means "verified fresh", never "stamped without checking".
+//
+// Split mirrors dream exactly: the drafted reconciling body is a test INPUT (never an LLM call);
+// `sync.cjs` gates/writes deterministically. Two phases: propose (stage) → confirm (commit-by-ref).
+
+function writeJson(target, name, obj) {
+  const p = path.join(target, name);
+  fs.writeFileSync(p, JSON.stringify(obj));
+  return p;
+}
+
+// A stale, watermarked prose doc under .wrxn/wiki/ — declares derived_from + a synced_to watermark.
+function writeStaleDoc(target, rel, over) {
+  const o = Object.assign(
+    { derived_from: 'src/auth.ts#login', synced_to: 'a1b2c3d4', body: '# Auth flow\n\nThe original prose, now stale.' },
+    over || {}
+  );
+  const slug = path.basename(rel, '.md');
+  const tier = path.basename(path.dirname(rel));
+  const page = ['---', `name: ${slug}`, `description: ${slug} notes`, `tier: ${tier}`, `derived_from: ${o.derived_from}`, `synced_to: ${o.synced_to}`, '---', '', o.body, ''].join('\n');
+  const full = path.join(target, rel);
+  fs.mkdirSync(path.dirname(full), { recursive: true });
+  fs.writeFileSync(full, page);
+  return full;
+}
+
+// A reconciling proposal — the drafted edit + the drift record's fields (doc/symbol/synced_to/current).
+function proseProposal(over) {
+  return Object.assign(
+    {
+      doc: '.wrxn/wiki/concepts/auth-flow.md',
+      symbol: 'src/auth.ts#login',
+      synced_to: 'a1b2c3d4',
+      current: 'e5f6a7b8',
+      body: '# Auth flow\n\nlogin() now also issues a refresh token alongside the access token.',
+    },
+    over || {}
+  );
+}
+
+function propose(target, proposal) {
+  return JSON.parse(runCli(target, ['propose', writeJson(target, 'proposal.json', proposal)]));
+}
+
+function confirm(target, approved) {
+  return JSON.parse(runCli(target, ['confirm', writeJson(target, 'approved.json', approved)]));
+}
+
+// Seed .wrxn/sync/staged.jsonl directly (simulate a tampered/stale staging trail for the re-gate probes).
+function seedStaged(target, records) {
+  const dir = path.join(target, '.wrxn', 'sync');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'staged.jsonl'), records.map((r) => JSON.stringify(r)).join('\n') + '\n');
+}
+
+function readWatermark(file) {
+  const m = /^synced_to:\s*(.*)$/m.exec(fs.readFileSync(file, 'utf8'));
+  return m ? m[1].trim() : null;
+}
+
+// ── pure transforms (deterministic seams) ────────────────────────────────────
+
+test('restampDoc: advances synced_to to the new fingerprint + swaps in the reconciling body, preserving provenance', () => {
+  const content = ['---', 'name: auth-flow', 'tier: concepts', 'derived_from: src/auth.ts#login', 'synced_to: OLD', '---', '', '# Auth flow', '', 'old prose', ''].join('\n');
+  const out = sync.restampDoc(content, { body: '# Auth flow\n\nNEW reconciling prose.', current: 'NEWFP' });
+  assert.match(out, /^synced_to: NEWFP$/m, 'watermark advanced to the new fingerprint');
+  assert.doesNotMatch(out, /synced_to: OLD/, 'old watermark replaced');
+  assert.match(out, /derived_from: src\/auth\.ts#login/, 'derived_from provenance preserved');
+  assert.match(out, /NEW reconciling prose/, 'body replaced with the reconciling content');
+  assert.doesNotMatch(out, /old prose/, 'stale body removed');
+});
+
+test('restampDoc: inserts synced_to when the doc carried none (unwatermarked → first stamp)', () => {
+  const content = ['---', 'name: x', 'derived_from: lib/x.cjs', '---', '', '# X', '', 'body'].join('\n');
+  assert.match(sync.restampDoc(content, { body: '# X\n\nnew', current: 'FP1' }), /^synced_to: FP1$/m);
+});
+
+test('restampDoc: a doc with no frontmatter cannot be re-stamped → null (defensive)', () => {
+  assert.equal(sync.restampDoc('# Just a body\n\nno frontmatter here', { body: '# x', current: 'fp' }), null);
+});
+
+test('secretScan: flags an AWS key, passes clean prose (AC4 primitive, reused from dream)', () => {
+  assert.equal(sync.secretScan('# Notes\n\nThe key is AKIAIOSFODNN7EXAMPLE in here'), 'contains_secret');
+  assert.equal(sync.secretScan('# Notes\n\nplain reconciling prose, no secrets'), null);
+});
+
+test('proposalHash: deterministic for the same content, changes when the body changes (integrity primitive)', () => {
+  const a = sync.proposalHash({ doc: 'd', current: 'c', body: 'B' });
+  assert.equal(a, sync.proposalHash({ doc: 'd', current: 'c', body: 'B' }), 'same content → same hash');
+  assert.notEqual(a, sync.proposalHash({ doc: 'd', current: 'c', body: 'B2' }), 'body change → different hash');
+});
+
+// ── AC1: propose stages the drafted edit by-reference (mirrors dream's stage), doc untouched ──
+
+test('propose: stages the reconciling edit by-reference under .wrxn/sync (non-.md); doc UNCHANGED at stage (AC1)', () => {
+  const t = freshInstall('wrxn-sync-propose-');
+  const doc = writeStaleDoc(t, '.wrxn/wiki/concepts/auth-flow.md', {});
+  const before = fs.readFileSync(doc, 'utf8');
+  const marker = 'REFRESH-TOKEN-reconcile-marker';
+  const out = propose(t, proseProposal({ body: `# Auth flow\n\n${marker}` }));
+  assert.equal(out.staged, 1, 'one reconciling edit staged');
+
+  const dir = path.join(t, '.wrxn', 'sync');
+  const staged = path.join(dir, 'staged.jsonl');
+  assert.ok(fs.existsSync(staged), 'staged.jsonl created');
+  // recon walks all of .wrxn and prose-ingests *.md → the staging trail MUST stay non-markdown (mirror dream)
+  assert.ok(fs.readdirSync(dir).every((f) => !f.endsWith('.md')), `no .md under .wrxn/sync (got ${fs.readdirSync(dir).join(', ')})`);
+  assert.match(fs.readFileSync(staged, 'utf8'), new RegExp(marker), 'the drafted edit persisted by-reference');
+  assert.equal(fs.readFileSync(doc, 'utf8'), before, 'the prose doc is unchanged at propose time (stage never writes)');
+});
+
+// ── AC4: the drafted edit is secret-scanned BEFORE staging ─────────────────────
+
+test('propose: a drafted edit containing a secret is REFUSED before staging (AC4)', () => {
+  const t = freshInstall('wrxn-sync-secret-');
+  const doc = writeStaleDoc(t, '.wrxn/wiki/concepts/auth-flow.md', {});
+  const before = fs.readFileSync(doc, 'utf8');
+  let err;
+  try {
+    runCli(t, ['propose', writeJson(t, 'p.json', proseProposal({ body: '# Auth flow\n\nthe token is AKIAIOSFODNN7EXAMPLE keep it safe' }))]);
+  } catch (e) { err = e; }
+  assert.ok(err, 'propose exited non-zero on a secret');
+  assert.match(String(err.stderr || ''), /contains_secret|credential|secret/i);
+  assert.ok(!fs.existsSync(path.join(t, '.wrxn', 'sync', 'staged.jsonl')), 'nothing staged');
+  assert.equal(fs.readFileSync(doc, 'utf8'), before, 'doc untouched');
+});
+
+// ── AC2 + AC5: confirm writes in place + advances the watermark, only on approve ──
+
+test('confirm: an approved proposal edits the file in place AND advances the watermark to current (AC2 + AC5)', () => {
+  const t = freshInstall('wrxn-sync-confirm-');
+  const doc = writeStaleDoc(t, '.wrxn/wiki/concepts/auth-flow.md', { synced_to: 'a1b2c3d4' });
+  propose(t, proseProposal({ synced_to: 'a1b2c3d4', current: 'e5f6a7b8', body: '# Auth flow\n\nlogin now issues a refresh token.' }));
+  // AC5: staging did NOT advance the watermark — it advances ONLY as part of a confirmed write
+  assert.equal(readWatermark(doc), 'a1b2c3d4', 'staging did NOT advance the watermark');
+
+  const out = confirm(t, ['.wrxn/wiki/concepts/auth-flow.md']);
+  assert.equal(out.written.length, 1, 'the approved edit was written');
+  const after = fs.readFileSync(doc, 'utf8');
+  assert.match(after, /login now issues a refresh token/, 'body reconciled in place');
+  assert.equal(readWatermark(doc), 'e5f6a7b8', 'watermark advanced to the source current fingerprint (AC5)');
+  assert.match(after, /derived_from: src\/auth\.ts#login/, 'derived_from provenance preserved');
+});
+
+// ── AC2: a TAMPERED staged proposal cannot write (integrity re-check at the write boundary) ──
+
+test('confirm: a TAMPERED staged proposal (hash mismatch) cannot write — file + watermark unchanged (AC2)', () => {
+  const t = freshInstall('wrxn-sync-tamper-');
+  const doc = writeStaleDoc(t, '.wrxn/wiki/concepts/auth-flow.md', { synced_to: 'a1b2c3d4' });
+  const before = fs.readFileSync(doc, 'utf8');
+  const docRel = '.wrxn/wiki/concepts/auth-flow.md';
+  // a staged record whose body was altered AFTER staging: the hash still binds the ORIGINAL drafted body
+  const honestHash = sync.proposalHash({ doc: docRel, current: 'e5f6a7b8', body: '# Auth flow\n\nORIGINAL drafted prose.' });
+  seedStaged(t, [{ ts: 'x', op: 'propose', doc: docRel, synced_to: 'a1b2c3d4', current: 'e5f6a7b8', body: '# Auth flow\n\nTAMPERED injected prose.', hash: honestHash }]);
+
+  const out = confirm(t, [docRel]);
+  assert.equal(out.written.length, 0, 'the tampered proposal was blocked at the write boundary');
+  assert.equal(out.skipped[0].reason, 'integrity_mismatch');
+  assert.equal(fs.readFileSync(doc, 'utf8'), before, 'the prose doc is byte-identical (no write)');
+  assert.equal(readWatermark(doc), 'a1b2c3d4', 'the watermark did NOT advance');
+});
+
+test('confirm: a staged proposal carrying a secret (valid hash) is re-scanned and refused (AC2 write-boundary re-gate)', () => {
+  const t = freshInstall('wrxn-sync-confirm-secret-');
+  const doc = writeStaleDoc(t, '.wrxn/wiki/concepts/auth-flow.md', { synced_to: 'a1b2c3d4' });
+  const before = fs.readFileSync(doc, 'utf8');
+  const docRel = '.wrxn/wiki/concepts/auth-flow.md';
+  const body = '# Auth flow\n\ntoken AKIAIOSFODNN7EXAMPLE slipped into the draft';
+  seedStaged(t, [{ ts: 'x', op: 'propose', doc: docRel, synced_to: 'a1b2c3d4', current: 'e5f6a7b8', body, hash: sync.proposalHash({ doc: docRel, current: 'e5f6a7b8', body }) }]);
+
+  const out = confirm(t, [docRel]);
+  assert.equal(out.written.length, 0, 're-scan at the write boundary blocked the secret');
+  assert.equal(out.skipped[0].reason, 'contains_secret');
+  assert.equal(fs.readFileSync(doc, 'utf8'), before, 'no write');
+  assert.equal(readWatermark(doc), 'a1b2c3d4', 'watermark unchanged');
+});
+
+// ── AC3: decline → file AND watermark both unchanged ──────────────────────────
+
+test('confirm: DECLINE (empty approval) leaves the file AND the watermark unchanged (AC3)', () => {
+  const t = freshInstall('wrxn-sync-decline-');
+  const doc = writeStaleDoc(t, '.wrxn/wiki/concepts/auth-flow.md', { synced_to: 'a1b2c3d4' });
+  const before = fs.readFileSync(doc, 'utf8');
+  propose(t, proseProposal({ synced_to: 'a1b2c3d4', current: 'e5f6a7b8' }));
+  const out = confirm(t, { approved: [] }); // the operator declines — nothing approved
+  assert.equal(out.written.length, 0, 'nothing written on decline');
+  assert.equal(fs.readFileSync(doc, 'utf8'), before, 'file unchanged on decline (AC3)');
+  assert.equal(readWatermark(doc), 'a1b2c3d4', 'watermark unchanged on decline (AC3)');
+});
+
+// ── SECURITY: the doc path is constrained to .wrxn/wiki/ — no write outside ────
+
+test('SECURITY: propose refuses a doc path that escapes .wrxn/wiki/', () => {
+  const t = freshInstall('wrxn-sync-escape-');
+  let err;
+  try {
+    runCli(t, ['propose', writeJson(t, 'p.json', proseProposal({ doc: '../../etc/evil.md' }))]);
+  } catch (e) { err = e; }
+  assert.ok(err, 'propose refused an out-of-wiki doc path');
+  assert.match(String(err.stderr || ''), /wiki|unsafe|outside|invalid/i);
+});
+
+test('SECURITY: confirm re-validates the target path — a seeded out-of-wiki doc is skipped, never written', () => {
+  const t = freshInstall('wrxn-sync-escape-commit-');
+  const evilRel = '.wrxn/dream/poison.md'; // inside .wrxn but OUTSIDE .wrxn/wiki/
+  const body = '# x\n\ny';
+  seedStaged(t, [{ ts: 'x', op: 'propose', doc: evilRel, synced_to: 's', current: 'c', body, hash: sync.proposalHash({ doc: evilRel, current: 'c', body }) }]);
+  // cwd inside the temp install so any stray relative write lands here (cleaned up), not the repo
+  const out = JSON.parse(execFileSync('node', [path.join(t, SYNC_REL), 'confirm', writeJson(t, 'a.json', [evilRel]), '--root', t], { encoding: 'utf8', cwd: t }));
+  assert.equal(out.written.length, 0, 'out-of-wiki target refused at the write boundary');
+  assert.equal(out.skipped[0].reason, 'unsafe_target');
+  assert.ok(!fs.existsSync(path.join(t, evilRel)), 'nothing written outside .wrxn/wiki');
+});
+
+// ── the headline demo: propose → confirm; re-run → decline → nothing changes ──
+
+test('DEMO: stale doc → propose → confirm → reconciled + re-stamped; re-run → decline → nothing changes', () => {
+  const t = freshInstall('wrxn-sync-demo-');
+  const doc = writeStaleDoc(t, '.wrxn/wiki/concepts/auth-flow.md', { synced_to: 'OLD0001' });
+
+  // round 1: propose → confirm (approve) → reconciled in place + watermark advanced
+  propose(t, proseProposal({ synced_to: 'OLD0001', current: 'NEW0002', body: '# Auth flow\n\nReconciled: login now returns a refresh token.' }));
+  confirm(t, ['.wrxn/wiki/concepts/auth-flow.md']);
+  assert.match(fs.readFileSync(doc, 'utf8'), /Reconciled: login now returns a refresh token/, 'round 1 reconciled the prose');
+  assert.equal(readWatermark(doc), 'NEW0002', 'round 1 advanced the watermark after the confirmed write');
+
+  // round 2: propose again → DECLINE → nothing changes
+  const snapshot = fs.readFileSync(doc, 'utf8');
+  propose(t, proseProposal({ synced_to: 'NEW0002', current: 'NEW0003', body: '# Auth flow\n\nA further drafted change the operator rejects.' }));
+  confirm(t, []); // decline
+  assert.equal(fs.readFileSync(doc, 'utf8'), snapshot, 'round 2 declined → file unchanged');
+  assert.equal(readWatermark(doc), 'NEW0002', 'round 2 declined → watermark unchanged');
+});

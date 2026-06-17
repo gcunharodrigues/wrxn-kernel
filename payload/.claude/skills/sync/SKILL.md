@@ -13,8 +13,10 @@ symbol has since changed (an AST fingerprint, so reformatting and comment edits 
 This skill **queries that set and reports it**. It is the third maintenance loop alongside `dream`
 (memory) — `sync` keeps derived prose reconciled with source.
 
-> This slice is **report only**. It never edits a doc, regenerates a file, or advances a watermark.
-> Auto-regen of mechanical files and propose→confirm for prose are separate, later steps.
+> The **report** is read-only — it never edits a doc or advances a watermark. For **prose** drift you can
+> then go one step further: `sync` can DRAFT a reconciling edit and, on your explicit confirm, write it in
+> place and advance the watermark (the `propose → confirm` loop below). Auto-regen of *mechanical* derived
+> files is still a separate, later step.
 
 ## Indirection contract (MUST)
 
@@ -45,13 +47,52 @@ This skill **queries that set and reports it**. It is the third maintenance loop
      unreachable). Report "drift unavailable — start `recon-wrxn serve` and retry." Never treat this as
      "all synced": unknown is not clean.
 
-3. **Stop at the report.** Fixing the drift (regenerating a mechanical file, or proposing a reconciling
-   prose edit for the operator to confirm) is out of scope here. Hand the stale list to the operator as
-   the actionable output.
+3. **Decide per stale doc.** Hand the stale list to the operator. For a **prose** page, you may reconcile
+   it with the `propose → confirm` loop below. Regenerating a *mechanical* derived file is still out of
+   scope here.
+
+## Propose → confirm (prose re-stamp, sync-06)
+
+For a stale PROSE doc, reconcile it WITHOUT ever auto-rewriting words: you draft the edit, the operator
+confirms, then the watermark advances. The watermark means **"verified fresh"**, never "stamped without
+checking". Same split as `dream`: **you (the skill) draft the prose; `.wrxn/sync.cjs` gates and writes.**
+
+1. **Draft + propose (stage).** From a `stale[]` entry, write the reconciling markdown body and stage it
+   by-reference — secret-scanned, recorded under `.wrxn/sync/staged.jsonl`, the live doc untouched:
+
+   ```bash
+   node .wrxn/sync.cjs propose proposal.json
+   ```
+
+   `proposal.json` carries the drift record's own fields (do NOT re-derive them) plus your drafted body:
+
+   ```json
+   { "doc": ".wrxn/wiki/concepts/auth-flow.md", "symbol": "src/auth.ts#login",
+     "synced_to": "<old watermark from the report>", "current": "<current fingerprint from the report>",
+     "body": "# Auth flow\n\n…the reconciled prose…" }
+   ```
+
+2. **Present it to the operator and wait.** Show the drafted edit. Nothing is written and the watermark is
+   NOT advanced until the operator confirms — staging alone never re-stamps.
+
+3. **Confirm (commit) or decline.** On approval, confirm BY REFERENCE (the doc path). The adapter re-reads
+   the staged edit, re-runs the secret-scan + an integrity check (a tampered or altered proposal cannot
+   write), edits the doc in place, and advances `synced_to:` to `current`:
+
+   ```bash
+   node .wrxn/sync.cjs confirm approved.json
+   ```
+
+   where `approved.json` is the operator-approved doc list — `[".wrxn/wiki/concepts/auth-flow.md"]` or
+   `{ "approved": [".wrxn/wiki/concepts/auth-flow.md"] }`. **Decline** = confirm an empty approval
+   (`{ "approved": [] }`) — the file AND the watermark stay exactly as they were.
 
 ## Boundaries
 
-- **Report only.** No writes, no regen, no re-stamp — those are later sync slices.
+- **Report is read-only.** Prose `propose → confirm` is the ONLY write path, and only on explicit operator
+  confirm. Regen of mechanical derived files is a later sync slice.
+- **Never auto-rewrite words.** The reconciling edit is staged and presented; the in-place write + watermark
+  advance happen only on confirm, re-validated at the write boundary.
 - **Declared provenance only.** Only docs carrying a `derived_from:` anchor participate; an undocumented
   file is never "drifted". This is opt-in by provenance, by design.
 - **Fail-soft, never alarmist.** If recon is unreachable the answer is "unavailable", not "stale" and not
@@ -59,6 +100,7 @@ This skill **queries that set and reports it**. It is the third maintenance loop
 
 ## Source
 
-WRXN Kernel issue sync-04. Adapter: `.wrxn/sync.cjs`. Drift signal: recon-wrxn `recon_drift` (sync-03),
-watermark storage (sync-01) + AST fingerprint (sync-02). Door discovery mirrors `recall-surface.cjs`;
-skill+adapter shape mirrors `dream`. PRD `sync-prd`; ADR 0004.
+WRXN Kernel issues sync-04 (report) + sync-06 (prose propose → confirm → re-stamp). Adapter: `.wrxn/sync.cjs`.
+Drift signal: recon-wrxn `recon_drift` (sync-03), watermark storage (sync-01) + AST fingerprint (sync-02).
+Door discovery mirrors `recall-surface.cjs`; skill+adapter shape (stage → commit-by-reference, secret-scan)
+mirrors `dream`. PRD `sync-prd`; ADR 0004.
