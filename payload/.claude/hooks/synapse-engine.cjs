@@ -247,18 +247,54 @@ function resolveHandoffPct(manifestText) {
   return Number.isFinite(m) && m > 0 ? m : 0.40;
 }
 
+// A CHEAP, fail-open presence-probe for curation debt — the debt-gate on the handoff harvest nudge
+// (harvest-05). It does NOT recompute health: no recon-door query, no scan of the knowledge tiers (that
+// is harvest.cjs `check`, an operator-invoked command far too heavy for a per-prompt hook). It reads ONLY
+// the single latest `.wrxn/harvest/<ts>.jsonl` report a prior `check` already wrote and asks "did the last
+// health-check find real debt?". Report filenames are timestamp-derived (ISO with `:`/`.` → `-`), so the
+// lexically-greatest name is the newest report. A real finding = any record EXCEPT the near_dup
+// "unavailable" marker (a cold-door "couldn't check", not debt); an empty report / only-unavailable / no
+// reports / missing dir all read as no-debt → silent. Any fault → false (never a spurious nudge, never a
+// throw). Only invoked when a handoff is actually firing, so the one extra file read is doubly bounded.
+function hasCurationDebt(root) {
+  try {
+    const dir = path.join(root, '.wrxn', 'harvest');
+    const reports = fs.readdirSync(dir).filter((n) => n.endsWith('.jsonl'));
+    if (!reports.length) return false;
+    const latest = reports.sort()[reports.length - 1];
+    const text = fs.readFileSync(path.join(dir, latest), 'utf8');
+    for (const line of text.split('\n')) {
+      const t = line.trim();
+      if (!t) continue;
+      let rec;
+      try { rec = JSON.parse(t); } catch { continue; } // a malformed line contributes nothing
+      if (rec && rec.type && rec.status !== 'unavailable') return true;
+    }
+    return false;
+  } catch {
+    return false; // missing dir / unreadable report / any fault → fail-open: no debt, no throw
+  }
+}
+
 // The NON-BLOCKING forced-handoff directive (never refuses work — orders the agent to wrap up cleanly).
-function handoffDirective(consumed, pct) {
+// `hasDebt` (harvest-05) appends a harvest curation nudge AFTER the dream line — emitted ONLY when the
+// latest health-check found curation debt, so a clean knowledge set never sees it. Ordered after dream:
+// dream consolidates the session first, then harvest curates the enlarged knowledge set.
+function handoffDirective(consumed, pct, hasDebt) {
   const now = Math.round(consumed * 100);
   const thresh = Math.round(pct * 100);
-  return [
+  const lines = [
     '[HANDOFF REQUIRED]',
     `  Context is at ~${now}% of the model window (>= the ${thresh}% handoff threshold). NON-BLOCKING — do NOT stop work:`,
     '  1. Finish the current request.',
     '  2. Run the handoff skill to write the baton (a compact handoff document).',
     '  3. Tell the operator to /clear and open a fresh session, where the baton injects on resume.',
     '  Suggestion (optional, before step 2): run the dream skill to consolidate this session\'s durable learnings into wiki memory — a suggestion only; dream never auto-runs, it acts only when you invoke it.',
-  ].join('\n');
+  ];
+  if (hasDebt) {
+    lines.push('  Then (optional, only because the last health-check found curation debt): run the harvest skill to review the flagged near-dups / decay-candidates / malformed pages — a suggestion only; harvest never auto-deletes, every change is proposed for your confirmation.');
+  }
+  return lines.join('\n');
 }
 
 // ── assembly ────────────────────────────────────────────────────────────────────
@@ -325,7 +361,7 @@ function compose(root, event) {
       const window = modelWindow(ev.cwd || root, process.env.HOME || os.homedir(), manifestText, ev.session_id, resident);
       const consumed = resident / window;
       const pct = resolveHandoffPct(manifestText);
-      if (consumed >= pct) out.push(handoffDirective(consumed, pct));
+      if (consumed >= pct) out.push(handoffDirective(consumed, pct, hasCurationDebt(root)));
     }
   }
 
@@ -375,5 +411,6 @@ module.exports = {
   readStatuslineWindow,
   modelWindow,
   resolveHandoffPct,
+  hasCurationDebt,
   handoffDirective,
 };

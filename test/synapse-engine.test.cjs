@@ -445,3 +445,117 @@ test('domainRules extracts <DOMAIN>_RULE_N values in numeric order', () => {
 test('estimateTokens approximates chars/4', () => {
   assert.equal(engine.estimateTokens('a'.repeat(40)), 10);
 });
+
+// ── harvest-05: debt-gated harvest nudge in the handoff directive (after dream) ──────
+// H5 appends a harvest curation line to [HANDOFF REQUIRED], ordered AFTER the dream line, but ONLY when
+// the latest .wrxn/harvest/*.jsonl health-check report carries real debt. The probe is cheap (reads the
+// single latest report — never recomputes near-dup / never touches the recon door) and fail-open (any
+// fault → no harvest line, no throw, the rest of the directive intact). The cold-door near_dup
+// "unavailable" marker is a "couldn't check", NOT debt.
+
+// Write a harvest health-check report (one JSON record per line) under .wrxn/harvest/<name>.
+function writeHarvestReport(root, name, records) {
+  const dir = path.join(root, '.wrxn', 'harvest');
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, name);
+  const body = records.map((r) => JSON.stringify(r)).join('\n');
+  fs.writeFileSync(file, body ? body + '\n' : '');
+  return file;
+}
+
+const DEBT_REC = { ts: '2026-06-17T10:00:00.000Z', type: 'near_dup', members: [{ slug: 'a' }, { slug: 'b' }], score: 0.9 };
+const UNAVAIL_REC = { ts: '2026-06-17T10:00:00.000Z', type: 'near_dup', status: 'unavailable', reason: 'door cold' };
+
+test('handoffDirective appends the harvest line AFTER the dream line when debt is present', () => {
+  const d = engine.handoffDirective(0.5, 0.4, true);
+  assert.match(d, /\[HANDOFF REQUIRED\]/);
+  assert.match(d, /run the dream skill to consolidate/);
+  assert.match(d, /run the harvest skill to/);
+  assert.ok(d.indexOf('dream skill') < d.indexOf('harvest skill'), 'dream line precedes the harvest line');
+});
+
+test('handoffDirective emits NO harvest line when there is no debt (dream line intact)', () => {
+  const d = engine.handoffDirective(0.5, 0.4, false);
+  assert.match(d, /run the dream skill to consolidate/);
+  assert.doesNotMatch(d, /harvest skill/);
+});
+
+test('hasCurationDebt is true when the latest report carries a real finding', () => {
+  const root = tmp('wrxn-debt-yes-');
+  writeHarvestReport(root, '2026-06-17T09-00-00-000Z.jsonl', [DEBT_REC]);
+  assert.equal(engine.hasCurationDebt(root), true);
+});
+
+test('hasCurationDebt reads only the LATEST report (a newer clean report clears stale debt)', () => {
+  const root = tmp('wrxn-debt-latest-');
+  writeHarvestReport(root, '2026-06-17T09-00-00-000Z.jsonl', [DEBT_REC]); // older: had debt
+  writeHarvestReport(root, '2026-06-17T10-00-00-000Z.jsonl', []);          // newer: clean
+  assert.equal(engine.hasCurationDebt(root), false);
+});
+
+test('hasCurationDebt is false on a clean tree — empty report, only-unavailable, or no reports dir', () => {
+  const a = tmp('wrxn-debt-empty-');
+  writeHarvestReport(a, '2026-06-17T09-00-00-000Z.jsonl', []);
+  assert.equal(engine.hasCurationDebt(a), false);
+
+  const b = tmp('wrxn-debt-unavail-');
+  writeHarvestReport(b, '2026-06-17T09-00-00-000Z.jsonl', [UNAVAIL_REC]); // cold-door marker is NOT debt
+  assert.equal(engine.hasCurationDebt(b), false);
+
+  const c = tmp('wrxn-debt-none-'); // no .wrxn/harvest dir at all
+  assert.equal(engine.hasCurationDebt(c), false);
+});
+
+test('hasCurationDebt is fail-open on a malformed/unreadable report (no throw, no debt)', () => {
+  const root = tmp('wrxn-debt-bad-');
+  const dir = path.join(root, '.wrxn', 'harvest');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, '2026-06-17T09-00-00-000Z.jsonl'), 'not json{{{\n{also bad\n');
+  assert.doesNotThrow(() => engine.hasCurationDebt(root));
+  assert.equal(engine.hasCurationDebt(root), false);
+});
+
+test('end-to-end: a handoff with curation debt shows the dream line THEN a harvest line', () => {
+  const root = freshInstall('wrxn-ho-debt-');
+  const tx = writeTranscript(root, USAGE_90K);
+  const home = fakeHome('wrxn-home-debt-', root, ['claude-opus-4-8']); // 45% of 200k → handoff fires
+  writeHarvestReport(root, '2026-06-17T09-00-00-000Z.jsonl', [DEBT_REC]);
+  const ctx = inject(
+    { prompt: 'continue', cwd: root, transcript_path: tx },
+    { CLAUDE_PROJECT_DIR: root, HOME: home, WRXN_RULES_BUDGET: '100000' }
+  );
+  assert.match(ctx, /\[HANDOFF REQUIRED\]/);
+  assert.match(ctx, /run the dream skill to consolidate/);
+  assert.match(ctx, /run the harvest skill to/);
+  assert.ok(ctx.indexOf('dream skill') < ctx.indexOf('harvest skill'), 'dream line precedes the harvest line');
+});
+
+test('end-to-end: a handoff on a clean tree shows the dream line and NO harvest line', () => {
+  const root = freshInstall('wrxn-ho-clean-');
+  const tx = writeTranscript(root, USAGE_90K);
+  const home = fakeHome('wrxn-home-clean-', root, ['claude-opus-4-8']);
+  // no harvest report written (a fresh install ships only .wrxn/harvest/.gitkeep) → no debt
+  const ctx = inject(
+    { prompt: 'continue', cwd: root, transcript_path: tx },
+    { CLAUDE_PROJECT_DIR: root, HOME: home, WRXN_RULES_BUDGET: '100000' }
+  );
+  assert.match(ctx, /\[HANDOFF REQUIRED\]/);
+  assert.match(ctx, /run the dream skill to consolidate/);
+  assert.doesNotMatch(ctx, /harvest skill/);
+});
+
+test('end-to-end: a malformed harvest report → handoff intact, dream line, NO harvest line (fail-open)', () => {
+  const root = freshInstall('wrxn-ho-badreport-');
+  const tx = writeTranscript(root, USAGE_90K);
+  const home = fakeHome('wrxn-home-badreport-', root, ['claude-opus-4-8']);
+  const dir = path.join(root, '.wrxn', 'harvest');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, '2026-06-17T09-00-00-000Z.jsonl'), 'not json{{{\n');
+  const ctx = inject(
+    { prompt: 'continue', cwd: root, transcript_path: tx },
+    { CLAUDE_PROJECT_DIR: root, HOME: home, WRXN_RULES_BUDGET: '100000' }
+  );
+  assert.match(ctx, /\[HANDOFF REQUIRED\]/);                // directive intact
+  assert.match(ctx, /run the dream skill to consolidate/);  // dream line intact
+  assert.doesNotMatch(ctx, /harvest skill/);                // malformed report → no debt → no harvest line
+});
