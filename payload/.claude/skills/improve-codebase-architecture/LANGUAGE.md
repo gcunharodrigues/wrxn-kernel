@@ -51,3 +51,63 @@ What maintainers get from depth. Change, bugs, knowledge, and verification conce
 - **Depth as ratio of implementation-lines to interface-lines** (Ousterhout): rewards padding the implementation. We use depth-as-leverage instead.
 - **"Interface" as the TypeScript `interface` keyword or a class's public methods**: too narrow — interface here includes every fact a caller must know.
 - **"Boundary"**: overloaded with DDD's bounded context. Say **seam** or **interface**.
+
+## Deep vs shallow
+
+**Deep module** — small interface, lots of implementation:
+
+```
+┌─────────────────────┐
+│   Small Interface   │  ← Few methods, simple params
+├─────────────────────┤
+│                     │
+│  Deep Implementation│  ← Complex logic hidden
+│                     │
+└─────────────────────┘
+```
+
+**Shallow module** — large interface, little implementation (avoid):
+
+```
+┌─────────────────────────────────┐
+│       Large Interface           │  ← Many methods, complex params
+├─────────────────────────────────┤
+│  Thin Implementation            │  ← Just passes through
+└─────────────────────────────────┘
+```
+
+When designing an interface, ask:
+
+- Can I reduce the number of methods?
+- Can I simplify the parameters?
+- Can I hide more complexity inside?
+
+## Designing for testability
+
+Good interfaces make testing natural.
+
+**Accept dependencies, don't create them.** A module handed its collaborators can be tested with fakes; one that constructs them internally can't.
+
+```typescript
+// Testable
+function processOrder(order, paymentGateway) {}
+
+// Hard to test
+function processOrder(order) {
+  const gateway = new StripeGateway();
+}
+```
+
+**Return results, don't produce side effects.** A function that returns a value is checked by reading its output; one that mutates state forces the test to rebuild that state first.
+
+```typescript
+// Testable
+function calculateDiscount(cart): Discount {}
+
+// Hard to test
+function applyDiscount(cart): void {
+  cart.total -= discount;
+}
+```
+
+**Small surface area.** Fewer methods = fewer tests needed. Fewer params = simpler test setup.

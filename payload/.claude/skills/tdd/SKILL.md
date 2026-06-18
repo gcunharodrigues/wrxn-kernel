@@ -18,5 +18,6 @@ verticality review → **tdd** → code review → security review → QA-walk �
 ## Rules
 
 - Tests and typecheck pass on **every commit** (Constitution Art. III). A red commit is not done.
-- Test external behavior, not implementation — internals stay refactorable.
+- Test external behavior, not implementation — internals stay refactorable. For test quality see [tests.md](tests.md); for mocking at boundaries see [mocking.md](mocking.md).
 - One slice = one tracer bullet: independently buildable and walkable (Constitution Art. II).
+- **No horizontal slices.** Do NOT write all tests first, then all code — bulk tests pin imagined behavior, not real. One test → one impl → repeat, each cycle learning from the last.

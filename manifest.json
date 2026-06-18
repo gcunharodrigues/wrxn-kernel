@@ -299,7 +299,22 @@
       "profile": "project"
     },
     {
+      "path": ".claude/skills/resolving-merge-conflicts/SKILL.md",
+      "class": "managed",
+      "profile": "project"
+    },
+    {
       "path": ".claude/skills/tdd/SKILL.md",
+      "class": "managed",
+      "profile": "project"
+    },
+    {
+      "path": ".claude/skills/tdd/tests.md",
+      "class": "managed",
+      "profile": "project"
+    },
+    {
+      "path": ".claude/skills/tdd/mocking.md",
       "class": "managed",
       "profile": "project"
     },
@@ -340,6 +355,11 @@
     },
     {
       "path": ".claude/skills/write-a-skill/SKILL.md",
+      "class": "managed",
+      "profile": "project"
+    },
+    {
+      "path": ".claude/skills/write-a-skill/GLOSSARY.md",
       "class": "managed",
       "profile": "project"
     },
