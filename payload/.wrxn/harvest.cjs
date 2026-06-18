@@ -540,7 +540,7 @@ function reportRetention() {
 // prefix — no clock is read. ONLY <ts>.jsonl reports are eligible (REPORT_RE); the fixed-name state files
 // (staged/audit/decay-staged.jsonl) + .gitkeep never match, so curation/merge/decay trails are never touched.
 // Fail-soft: an unreadable dir or a failed unlink is swallowed — retention is hygiene, never the point of check.
-function pruneReports(dir, keep) {
+function pruneReports(dir, keep, protect) {
   let names;
   try {
     names = fs.readdirSync(dir);
@@ -548,12 +548,18 @@ function pruneReports(dir, keep) {
     return; // no report dir yet → nothing to prune
   }
   const reports = names.filter((n) => REPORT_RE.test(n)).sort(); // lexical = chronological (oldest first)
-  for (let i = 0; i < reports.length - keep; i++) {
+  // Delete the oldest down to the `keep` bound, but NEVER the just-written report (`protect`): a same-
+  // millisecond collision names it `<base>-N.jsonl`, which collates BEFORE its `<base>.jsonl` sibling, so a
+  // blind oldest-prefix prune could delete the fresh report `check` is about to return (phase-4.5-04 review).
+  let toDelete = reports.length - keep;
+  for (let i = 0; i < reports.length && toDelete > 0; i++) {
+    if (reports[i] === protect) continue; // the fresh report is retained and counts toward `keep`
     try {
       fs.unlinkSync(path.join(dir, reports[i]));
     } catch {
       /* fail-soft — a vanished/locked report never breaks the check run */
     }
+    toDelete--;
   }
 }
 
@@ -573,7 +579,7 @@ async function check(root, { transport, timeoutMs } = {}) {
   const dir = harvestDir(root);
   const file = reportPath(dir, ts);
   fs.writeFileSync(file, records.length ? records.map((r) => JSON.stringify(r)).join('\n') + '\n' : '');
-  pruneReports(dir, reportRetention()); // phase-4.5-04: bound the report dir to the retention policy as part of the check run
+  pruneReports(dir, reportRetention(), path.basename(file)); // phase-4.5-04: bound the report dir, never pruning the fresh report
   const nearDupCount = near.status === 'unavailable' ? 0 : near.clusters.length;
   return {
     report: path.relative(root, file),

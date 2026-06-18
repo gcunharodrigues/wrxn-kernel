@@ -546,6 +546,21 @@ test('pruneReports (phase-4.5-04): NEVER prunes the fixed-name state files (stag
   assert.equal([...remaining].filter((f) => /^\d{4}-/.test(f)).length, 3, 'only the <ts>.jsonl reports were bounded');
 });
 
+test('pruneReports (phase-4.5-04 review): never prunes the just-written report even when a same-ms `-N` name sorts first', () => {
+  const root = installRoot('wrxn-harvest-prune-protect-');
+  const dir = path.join(root, '.wrxn', 'harvest');
+  fs.mkdirSync(dir, { recursive: true });
+  // Same-millisecond collision: the fresh report is the `-1` suffix, which collates BEFORE its base sibling,
+  // so a blind oldest-prefix prune (keep=1) would delete the fresh report. `protect` must save it.
+  const base = '2026-06-18T12-00-00-000Z.jsonl';
+  const fresh = '2026-06-18T12-00-00-000Z-1.jsonl';
+  fs.writeFileSync(path.join(dir, base), '{}\n');
+  fs.writeFileSync(path.join(dir, fresh), '{}\n');
+  harvest.pruneReports(dir, 1, fresh);
+  const remaining = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl'));
+  assert.deepEqual(remaining, [fresh], 'the just-written report survives; its older same-ms sibling is pruned to honor keep=1');
+});
+
 test('pruneReports (phase-4.5-04): fail-soft on an absent dir (never throws)', () => {
   assert.doesNotThrow(() => harvest.pruneReports(path.join(installRoot('wrxn-harvest-prune-nodir-'), '.wrxn', 'harvest', 'nope'), 5));
 });
