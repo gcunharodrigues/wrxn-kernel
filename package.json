@@ -1,6 +1,6 @@
 {
   "name": "@gcunharodrigues/wrxn",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "description": "WRXN Kernel — installable AI operating system. Two profiles (project | workspace), pull-based updates, managed/seeded/state file classes.",
   "bin": {
     "wrxn": "bin/wrxn.cjs"
@@ -16,7 +16,7 @@
     "test": "node --test --require ./test/setup.cjs"
   },
   "dependencies": {
-    "recon-wrxn": "6.0.0-wrxn.5"
+    "recon-wrxn": "6.0.0-wrxn.6"
   },
   "engines": {
     "node": ">=20"
