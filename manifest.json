@@ -344,6 +344,16 @@
       "profile": "project"
     },
     {
+      "path": ".claude/skills/write-an-agent/SKILL.md",
+      "class": "managed",
+      "profile": "project"
+    },
+    {
+      "path": ".claude/skills/write-an-agent/EXAMPLES.md",
+      "class": "managed",
+      "profile": "project"
+    },
+    {
       "path": ".claude/skills/audit/SKILL.md",
       "class": "managed",
       "profile": "workspace"
