@@ -15,10 +15,12 @@
 //
 // Subcommand:
 //   report   query recon_drift over the serve door and print the drift summary JSON:
-//            { status, stale[], unwatermarked[] }
-//              · status "drift"        — at least one doc is stale (stale[] names doc/symbol/synced_to/current).
-//              · status "synced"       — the warm door computed an EMPTY stale set ("all synced"; AC3 no-op,
-//                                        never manufactures stale rows).
+//            { status, stale[], unwatermarked[], orphaned[] }
+//              · status "drift"        — at least one doc is stale OR orphaned. stale[] names doc/symbol/
+//                                        synced_to/current; orphaned[] (phase-4.5-02) names a doc whose
+//                                        derived_from source symbol is GONE (doc/synced_to, no symbol/current).
+//              · status "synced"       — the warm door computed an EMPTY stale AND orphaned set ("all synced";
+//                                        AC3 no-op, never manufactures rows).
 //              · status "unavailable"  — recon is unreachable OR answered without the structured drift sidecar
 //                                        (no warm door, a timeout, a non-200, a malformed body, or a 200 whose
 //                                        body lacks an affirmative `drift.stale` array — unknown is not clean,
@@ -117,11 +119,18 @@ function summarizeDrift(parsed) {
   if (!isEntry(d) || !Array.isArray(d.stale)) return unavailable();
   const stale = d.stale.filter(isEntry).map(normEntry);
   const unwatermarked = (Array.isArray(d.unwatermarked) ? d.unwatermarked : []).filter(isEntry).map(normEntry);
-  return { status: stale.length ? 'drift' : 'synced', stale, unwatermarked };
+  // phase-4.5-02: the third drift class — a watermarked page whose derived_from source symbol is GONE from
+  // recon's graph (renamed/deleted). Each entry normalizes to { doc, synced_to } (no symbol/current — the
+  // source is absent). It is DISTINCT from stale (source moved) and unwatermarked (never reconciled), but
+  // like stale it MUST elevate the status off a clean "synced": a dangling page is the exact case sync used
+  // to hide (the operator never learned the page was un-reconcilable). An older recon with no drift.orphaned
+  // degrades to [] (back-compatible, never throws).
+  const orphaned = (Array.isArray(d.orphaned) ? d.orphaned : []).filter(isEntry).map(normEntry);
+  return { status: stale.length || orphaned.length ? 'drift' : 'synced', stale, unwatermarked, orphaned };
 }
 
 function unavailable() {
-  return { status: 'unavailable', stale: [], unwatermarked: [] };
+  return { status: 'unavailable', stale: [], unwatermarked: [], orphaned: [] };
 }
 
 // ── the door (IO shell, injectable transport) — the recall-surface.cjs contract ─

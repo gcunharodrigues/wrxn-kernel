@@ -68,11 +68,11 @@ function deadPid() {
 
 // A REAL recon_drift door body (sync-08 contract): a markdown `result` plus the structured `drift` sidecar.
 // `driftOver` overrides the sidecar buckets; the extra sidecar fields (multiAnchor/uncomparable/fresh) are
-// present to prove the kernel ignores everything except stale/unwatermarked.
+// present to prove the kernel ignores everything except stale/unwatermarked/orphaned (phase-4.5-02).
 function driftBody(driftOver) {
   return JSON.stringify({
     result: '# Drift Report\n\n…markdown…',
-    drift: Object.assign({ stale: [], unwatermarked: [], multiAnchor: [], uncomparable: [], fresh: 0 }, driftOver || {}),
+    drift: Object.assign({ stale: [], unwatermarked: [], multiAnchor: [], uncomparable: [], orphaned: [], fresh: 0 }, driftOver || {}),
   });
 }
 
@@ -92,6 +92,11 @@ const NORM_STALE = { doc: '.wrxn/wiki/concepts/auth-flow.md', symbol: 'login', s
 // an unwatermarked door entry carries NO watermark (no syncedTo/current) → normalizes to { doc, symbol }.
 const DOOR_UW = { page: 'Database Layer', pageFile: '.wrxn/wiki/concepts/db.md', symbol: 'connect', symbolFile: 'src/db.ts', symbolLine: 5 };
 const NORM_UW = { doc: '.wrxn/wiki/concepts/db.md', symbol: 'connect' };
+// an orphaned door entry (phase-4.5-02): a watermarked page whose derived_from source symbol is GONE from the
+// graph (renamed/deleted). It carries page/pageFile + the now-dangling syncedTo watermark but NO symbol/current
+// (the source is absent) → normalizes to { doc, synced_to }.
+const DOOR_ORPHANED = { page: 'Legacy Flow', pageFile: '.wrxn/wiki/concepts/legacy.md', syncedTo: 'deadbeefdeadbeef' };
+const NORM_ORPHANED = { doc: '.wrxn/wiki/concepts/legacy.md', synced_to: 'deadbeefdeadbeef' };
 
 function runCli(target, args) {
   return execFileSync('node', [path.join(target, SYNC_REL), ...args, '--root', target], { encoding: 'utf8' });
@@ -128,6 +133,34 @@ test('summarizeDrift: normalizes + passes the unwatermarked bucket through (sync
   assert.deepEqual(out.unwatermarked, [NORM_UW], 'the unwatermarked bucket survives, normalized to { doc, symbol }');
 });
 
+// ── phase-4.5-02: the orphaned (dangling-watermark) bucket ──────────────────────
+
+test('summarizeDrift: an orphaned entry → status "drift", normalized to { doc, synced_to } DISTINCTLY from stale/unwatermarked (phase-4.5-02)', () => {
+  const out = sync.summarizeDrift({ drift: { stale: [], unwatermarked: [], orphaned: [DOOR_ORPHANED] } });
+  assert.equal(out.status, 'drift', 'a dangling page is surfaced — orphaned alone (no stale) is NEVER a false "synced"');
+  assert.deepEqual(out.orphaned, [NORM_ORPHANED], 'orphaned normalized to { doc, synced_to } — no symbol/current (the source is gone)');
+  assert.deepEqual(out.stale, [], 'orphaned is distinct from stale');
+  assert.deepEqual(out.unwatermarked, [], 'orphaned is distinct from unwatermarked');
+});
+
+test('summarizeDrift: NO false positive — a live stale-only response has an empty orphaned[] (phase-4.5-02)', () => {
+  const out = sync.summarizeDrift({ drift: { stale: [DOOR_STALE], unwatermarked: [] } });
+  assert.deepEqual(out.orphaned, [], 'a response whose drift carries no orphaned[] yields no orphaned rows');
+  assert.deepEqual(out.stale, [NORM_STALE], 'the live stale entry is unaffected');
+});
+
+test('summarizeDrift: a fully clean response (no stale, no orphaned) → "synced" with an empty orphaned[]', () => {
+  const out = sync.summarizeDrift({ drift: { stale: [], unwatermarked: [], orphaned: [] } });
+  assert.equal(out.status, 'synced');
+  assert.deepEqual(out.orphaned, []);
+});
+
+test('summarizeDrift: an "unavailable" body carries an empty orphaned[] (shape parity across all three buckets)', () => {
+  const out = sync.summarizeDrift(null);
+  assert.equal(out.status, 'unavailable');
+  assert.deepEqual(out.orphaned, [], 'orphaned is present + empty even when the drift sidecar is missing');
+});
+
 // ── driftFromDoor — the IO shell, with an injected transport ──────────────────
 
 test('driftFromDoor: a warm door returning the real drift sidecar → "drift"; pins the recon_drift POST contract (AC2)', async () => {
@@ -144,6 +177,16 @@ test('driftFromDoor: a warm door returning the real drift sidecar → "drift"; p
   // cross-repo contract pins (sync-03 AC6): the recon_drift door path + the endpoint port.
   assert.equal(seen.path, '/api/tools/recon_drift', 'POSTs the recon_drift serve door');
   assert.equal(seen.port, 64101, 'uses the port from serve-endpoint.json');
+});
+
+test('driftFromDoor: a warm door returning orphaned pages → "drift" with orphaned[] normalized end-to-end (phase-4.5-02)', async () => {
+  const root = installRoot('wrxn-sync-orphaned-');
+  writeEndpoint(root, { pid: process.pid, port: 64108 });
+  const transport = async () => ({ statusCode: 200, body: driftBody({ orphaned: [DOOR_ORPHANED] }) });
+  const out = await sync.driftFromDoor(root, { transport });
+  assert.equal(out.status, 'drift', 'an orphaned-only drift set surfaces as drift, not synced');
+  assert.deepEqual(out.orphaned, [NORM_ORPHANED], 'the door orphaned entry is normalized end-to-end through the IO shell');
+  assert.deepEqual(out.stale, [], 'orphaned never leaks into stale');
 });
 
 test('driftFromDoor: a warm 200 with ONLY markdown `result` (no drift sidecar) → "unavailable", never a false "synced" (sync-08/09 regression guard)', async () => {

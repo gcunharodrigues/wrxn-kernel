@@ -35,14 +35,17 @@ This skill **queries that set and reports it**. It is the third maintenance loop
    node .wrxn/sync.cjs report
    ```
 
-2. **Read the JSON** it prints — `{ status, stale[], unwatermarked[] }`:
+2. **Read the JSON** it prints — `{ status, stale[], unwatermarked[], orphaned[] }`:
 
-   - **`status: "synced"`** — the stale set is empty. **Say so briefly ("all synced") and stop.** Do not
-     manufacture findings. A clean tree is a successful no-op.
+   - **`status: "synced"`** — both the stale AND orphaned sets are empty. **Say so briefly ("all synced") and
+     stop.** Do not manufacture findings. A clean tree is a successful no-op.
    - **`status: "drift"`** — present each `stale[]` entry to the operator: the **doc** page, the **symbol**
      that moved, and **`synced_to` → `current`** (the watermark vs the source's current fingerprint). If
-     `unwatermarked[]` is non-empty, note those separately — docs that declare `derived_from` but were
-     never watermarked (so drift can't yet be computed for them).
+     `orphaned[]` is non-empty, flag those DISTINCTLY — each is a **dangling** doc (`doc` + `synced_to`) whose
+     `derived_from:` source symbol was **renamed or deleted**, so its provenance is gone and drift can no
+     longer be computed. The reconcile loop below cannot fix an orphan (there is no live source to re-stamp
+     against); surface it so the operator can re-anchor or retire the page. If `unwatermarked[]` is non-empty,
+     note those separately — docs that declare `derived_from` but were never watermarked.
    - **`status: "unavailable"`** — recon's serve door is not warm (no `recon-wrxn serve` running, or it was
      unreachable). Report "drift unavailable — start `recon-wrxn serve` and retry." Never treat this as
      "all synced": unknown is not clean.
