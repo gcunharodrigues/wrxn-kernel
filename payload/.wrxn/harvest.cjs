@@ -50,6 +50,14 @@ const HARVEST_DIR = ['.wrxn', 'harvest'];
 const STAGED_FILE = 'staged.jsonl'; // the proposed-but-unconfirmed merges (survivor body + absorbed, by-reference).
 const AUDIT_FILE = 'audit.jsonl'; // append-only outcome log (stage + commit + decay events).
 const DECAY_STAGED_FILE = 'decay-staged.jsonl'; // harvest-04: proposed-but-unconfirmed decay annotations (by-reference). Distinct fixed name from merge's staged.jsonl; both non-.md so recon never recalls a staged-but-unconfirmed op.
+// Bounded retention for the timestamped <ts>.jsonl check reports (phase-4.5-04). `check` writes a fresh
+// report every run; without a cap the dir grows without bound on a long-lived install. Keep the N most-recent
+// (ISO timestamps sort lexically = chronologically — no clock read). 20 is a generous trailing window of
+// recent checks for trend/diff while strictly bounding growth; env override (clamped >= 1 so the just-written
+// report is never pruned) mirrors synapse's WRXN_HANDOFF_PCT precedent. REPORT_RE matches ONLY a timestamped
+// report — the fixed-name state files (staged/audit/decay-staged.jsonl) + .gitkeep never match, never prune.
+const REPORT_RETAIN_DEFAULT = 20;
+const REPORT_RE = /^\d{4}-\d{2}-\d{2}T.*\.jsonl$/;
 const BODY_MAX = 32000; // survivor body cap (chars) — a durable merged page, not a dump (dream/sync parity).
 const WIKI_REL = ['.wrxn', 'wiki']; // all merge targets confine under <root>/.wrxn/wiki/<knowledge-tier>/.
 const WIKI_PREFIX = '.wrxn/wiki/'; // stripped to form the reinforce.json wiki-rel join key (recall-surface parity).
@@ -296,6 +304,22 @@ function nearDupQualifies(hit) {
   return Number.isFinite(sem) && hasSemantic && sem >= NEAR_DUP_THRESHOLD;
 }
 
+// Order clusters by a STABLE total order so an unchanged tree yields a byte-identical report every run
+// (phase-4.5-04). Primary key = the lexically-first member. The old `(a,b) => a.members[0] < b.members[0]
+// ? -1 : 1` returned 1 for BOTH compare(a,b) AND compare(b,a) on an equal leading member — non-antisymmetric,
+// so V8's sort could resolve tied clusters by input permutation → non-reproducible reports. Clusters are
+// disjoint connected components, so leading members never collide TODAY; the secondary keys make this a
+// proper total order regardless (defense in depth): larger cluster first, then the stronger edge score, then
+// the full member list — and two truly-identical clusters compare EQUAL (return 0).
+function compareClusters(a, b) {
+  if (a.members[0] !== b.members[0]) return a.members[0] < b.members[0] ? -1 : 1;
+  if (a.members.length !== b.members.length) return b.members.length - a.members.length; // larger cluster first
+  if (a.score !== b.score) return b.score - a.score; // stronger dup signal first
+  const ja = a.members.join(' ');
+  const jb = b.members.join(' ');
+  return ja < jb ? -1 : ja > jb ? 1 : 0; // full member list; identical clusters → 0
+}
+
 // Collapse pairwise near-dup edges into connected-component CLUSTERS (union-find), so a symmetric A↔B
 // match is reported once and a transitive A-B-C chain is one cluster of three. Each cluster carries its
 // sorted members + the STRONGEST edge similarity (the clearest dup signal). Singletons are not clusters.
@@ -333,7 +357,7 @@ function clusterNearDups(edges) {
     if (members.size < 2) continue;
     clusters.push({ members: [...members].sort(), score: Math.round((groupScore.get(r) || 0) * 1e4) / 1e4 });
   }
-  return clusters.sort((a, b) => (a.members[0] < b.members[0] ? -1 : 1));
+  return clusters.sort(compareClusters);
 }
 
 // ── the door (IO shell, injectable transport) — the recall-surface.cjs contract ──
@@ -504,6 +528,35 @@ function reportPath(dir, ts) {
   return file;
 }
 
+// The effective report-retention bound: the WRXN_HARVEST_RETAIN env override (clamped to a whole number >= 1
+// so a bogus/zero value can never prune away the just-written report), else the sane default (phase-4.5-04).
+function reportRetention() {
+  const env = Number(process.env.WRXN_HARVEST_RETAIN);
+  return Number.isFinite(env) && env >= 1 ? Math.floor(env) : REPORT_RETAIN_DEFAULT;
+}
+
+// Prune the timestamped check reports under .wrxn/harvest/ to the retention bound, keeping the `keep` most-
+// recent (phase-4.5-04). ISO timestamps sort lexically = chronologically, so the oldest are the lexical
+// prefix — no clock is read. ONLY <ts>.jsonl reports are eligible (REPORT_RE); the fixed-name state files
+// (staged/audit/decay-staged.jsonl) + .gitkeep never match, so curation/merge/decay trails are never touched.
+// Fail-soft: an unreadable dir or a failed unlink is swallowed — retention is hygiene, never the point of check.
+function pruneReports(dir, keep) {
+  let names;
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return; // no report dir yet → nothing to prune
+  }
+  const reports = names.filter((n) => REPORT_RE.test(n)).sort(); // lexical = chronological (oldest first)
+  for (let i = 0; i < reports.length - keep; i++) {
+    try {
+      fs.unlinkSync(path.join(dir, reports[i]));
+    } catch {
+      /* fail-soft — a vanished/locked report never breaks the check run */
+    }
+  }
+}
+
 // ── check: the IO orchestrator ───────────────────────────────────────────────────
 // scanLocal (always) + nearDupFromDoor (degrades to unavailable when cold) → assemble → write the jsonl.
 // REPORT-ONLY: the ONLY write is the report under .wrxn/harvest/. `transport` is injected in tests.
@@ -520,6 +573,7 @@ async function check(root, { transport, timeoutMs } = {}) {
   const dir = harvestDir(root);
   const file = reportPath(dir, ts);
   fs.writeFileSync(file, records.length ? records.map((r) => JSON.stringify(r)).join('\n') + '\n' : '');
+  pruneReports(dir, reportRetention()); // phase-4.5-04: bound the report dir to the retention policy as part of the check run
   const nearDupCount = near.status === 'unavailable' ? 0 : near.clusters.length;
   return {
     report: path.relative(root, file),
@@ -1154,7 +1208,10 @@ module.exports = {
   scanLocal,
   isProse,
   nearDupQualifies,
+  compareClusters,
   clusterNearDups,
+  pruneReports,
+  reportRetention,
   assembleRecords,
   tierOfPath,
   isHarvestPath,
@@ -1187,4 +1244,5 @@ module.exports = {
   NEAR_DUP_THRESHOLD,
   FIND_PATH,
   REINFORCE_WINDOW_DAYS,
+  REPORT_RETAIN_DEFAULT,
 };

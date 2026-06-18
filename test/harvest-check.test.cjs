@@ -468,3 +468,115 @@ test('the .wrxn/harvest report dir gitkeep is state/project and laid (mirrors .w
   const t = freshInstall('wrxn-harvest-gitkeep-');
   assert.ok(fs.existsSync(path.join(t, '.wrxn', 'harvest', '.gitkeep')), 'the report dir ships');
 });
+
+// ════════════════════════════════════════════════════════════════════════════════
+// phase-4.5-04 — report hygiene: (1) a STABLE cluster order so an unchanged tree yields a byte-identical
+// report every run, and (2) BOUNDED report retention so .wrxn/harvest/ never grows without bound.
+// ════════════════════════════════════════════════════════════════════════════════
+
+// ── defect 1: a STABLE, antisymmetric cluster comparator (reproducible ordering) ──
+
+test('compareClusters (phase-4.5-04): equal-leading clusters compare ANTISYMMETRICALLY (stable tiebreak); identical → 0', () => {
+  // The old comparator `(a,b) => a.members[0] < b.members[0] ? -1 : 1` returned 1 for BOTH compare(a,b) AND
+  // compare(b,a) on an equal leading member — non-antisymmetric, so V8's sort could order tied clusters by
+  // input permutation → non-reproducible reports. (Disjoint connected components mean a shared lead can't
+  // arise from clusterNearDups today, but the comparator must still be a proper total order — defense in depth.)
+  const a = { members: ['shared.md', 'a-extra.md'], score: 0.9 };
+  const b = { members: ['shared.md', 'b-extra.md'], score: 0.9 };
+  assert.equal(harvest.compareClusters(a, b), -harvest.compareClusters(b, a), 'antisymmetric on an equal leading member');
+  assert.notEqual(harvest.compareClusters(a, b), 0, 'a stable secondary key breaks the tie deterministically (never ambiguous)');
+  // a proper total order returns 0 for two truly-identical clusters (the terminal tiebreak)
+  assert.equal(
+    harvest.compareClusters({ members: ['x.md', 'y.md'], score: 0.9 }, { members: ['x.md', 'y.md'], score: 0.9 }),
+    0,
+    'identical clusters compare equal'
+  );
+  // distinct leading members still order lexically by the first member (unchanged primary behaviour)
+  assert.equal(harvest.compareClusters({ members: ['a.md'], score: 0.5 }, { members: ['b.md'], score: 0.5 }), -1, 'distinct leads order by the first member');
+});
+
+test('clusterNearDups (phase-4.5-04): re-clustering the SAME edges (shuffled) yields a byte-identical order', () => {
+  const edges = [
+    { a: 'x/m.md', b: 'x/n.md', score: 0.91 },
+    { a: 'x/a.md', b: 'x/b.md', score: 0.93 },
+    { a: 'x/p.md', b: 'x/q.md', score: 0.88 },
+  ];
+  const first = harvest.clusterNearDups(edges);
+  const second = harvest.clusterNearDups([edges[2], edges[0], edges[1]]); // same set, different input order
+  assert.deepEqual(second, first, 'same input → same output: cluster ordering is reproducible across runs');
+  assert.deepEqual(first.map((c) => c.members[0]), ['x/a.md', 'x/m.md', 'x/p.md'], 'clusters are ordered by their lexically-first member');
+});
+
+// ── defect 2: bounded report retention ──
+
+// Plant `count` fake timestamped <ts>.jsonl reports (ISO-derived names — lexical = chronological).
+function plantReports(dir, count) {
+  fs.mkdirSync(dir, { recursive: true });
+  for (let i = 0; i < count; i++) {
+    const ts = `2026-06-18T${String(i).padStart(2, '0')}-00-00-000Z`;
+    fs.writeFileSync(path.join(dir, `${ts}.jsonl`), '{}\n');
+  }
+}
+
+test('pruneReports (phase-4.5-04): keeps the N most-recent reports, deletes the older prefix', () => {
+  const root = installRoot('wrxn-harvest-prune-');
+  const dir = path.join(root, '.wrxn', 'harvest');
+  plantReports(dir, 12);
+  harvest.pruneReports(dir, 5);
+  const kept = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl')).sort();
+  assert.deepEqual(
+    kept,
+    [
+      '2026-06-18T07-00-00-000Z.jsonl', '2026-06-18T08-00-00-000Z.jsonl', '2026-06-18T09-00-00-000Z.jsonl',
+      '2026-06-18T10-00-00-000Z.jsonl', '2026-06-18T11-00-00-000Z.jsonl',
+    ],
+    'only the 5 most-recent (lexically-largest) timestamps survive; the 7 oldest are pruned'
+  );
+});
+
+test('pruneReports (phase-4.5-04): NEVER prunes the fixed-name state files (staged/audit/decay-staged/.gitkeep)', () => {
+  const root = installRoot('wrxn-harvest-prune-fixed-');
+  const dir = path.join(root, '.wrxn', 'harvest');
+  plantReports(dir, 8);
+  const FIXED = ['staged.jsonl', 'audit.jsonl', 'decay-staged.jsonl', '.gitkeep'];
+  for (const f of FIXED) fs.writeFileSync(path.join(dir, f), 'x');
+  harvest.pruneReports(dir, 3);
+  const remaining = new Set(fs.readdirSync(dir));
+  for (const f of FIXED) assert.ok(remaining.has(f), `${f} is a durable state file — never a retention target`);
+  assert.equal([...remaining].filter((f) => /^\d{4}-/.test(f)).length, 3, 'only the <ts>.jsonl reports were bounded');
+});
+
+test('pruneReports (phase-4.5-04): fail-soft on an absent dir (never throws)', () => {
+  assert.doesNotThrow(() => harvest.pruneReports(path.join(installRoot('wrxn-harvest-prune-nodir-'), '.wrxn', 'harvest', 'nope'), 5));
+});
+
+test('reportRetention (phase-4.5-04): a sane default; the WRXN_HARVEST_RETAIN env override is honored (clamped >= 1)', () => {
+  const saved = process.env.WRXN_HARVEST_RETAIN;
+  try {
+    delete process.env.WRXN_HARVEST_RETAIN;
+    assert.ok(Number.isInteger(harvest.REPORT_RETAIN_DEFAULT) && harvest.REPORT_RETAIN_DEFAULT >= 1, 'the default is a sane positive integer');
+    assert.equal(harvest.reportRetention(), harvest.REPORT_RETAIN_DEFAULT, 'no env → the sane default');
+    process.env.WRXN_HARVEST_RETAIN = '7';
+    assert.equal(harvest.reportRetention(), 7, 'a valid env override wins');
+    process.env.WRXN_HARVEST_RETAIN = '0';
+    assert.equal(harvest.reportRetention(), harvest.REPORT_RETAIN_DEFAULT, 'a < 1 value is rejected (never prune away the fresh report)');
+    process.env.WRXN_HARVEST_RETAIN = 'garbage';
+    assert.equal(harvest.reportRetention(), harvest.REPORT_RETAIN_DEFAULT, 'a non-numeric value falls back to the default');
+  } finally {
+    if (saved === undefined) delete process.env.WRXN_HARVEST_RETAIN;
+    else process.env.WRXN_HARVEST_RETAIN = saved;
+  }
+});
+
+test('check (phase-4.5-04): many runs bound the report dir to the retention default (state files untouched)', async () => {
+  const root = freshInstall('wrxn-harvest-retain-');
+  writePage(root, 'concepts', 'broken', { description: null }, '# broken'); // a malformed page → a record every run
+  const N = harvest.REPORT_RETAIN_DEFAULT;
+  const dir = path.join(root, '.wrxn', 'harvest');
+  // a durable state file coexisting with the reports must survive the cap
+  fs.writeFileSync(path.join(dir, 'audit.jsonl'), '{"op":"x"}\n');
+  for (let i = 0; i < N + 6; i++) await harvest.check(root, {});
+  const reports = fs.readdirSync(dir).filter((f) => /^\d{4}-.*\.jsonl$/.test(f));
+  assert.equal(reports.length, N, `the report dir is bounded to the retention default (${N})`);
+  assert.ok(fs.existsSync(path.join(dir, 'audit.jsonl')), 'the durable audit log is never a retention target');
+});
