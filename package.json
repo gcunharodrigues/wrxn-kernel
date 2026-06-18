@@ -21,6 +21,14 @@
   "engines": {
     "node": ">=20"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gcunharodrigues/wrxn-kernel.git"
+  },
+  "publishConfig": {
+    "provenance": true,
+    "access": "public"
+  },
   "license": "MIT",
   "private": false
 }
