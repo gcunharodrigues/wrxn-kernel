@@ -1,31 +1,82 @@
 name: release
 
-# Publish to npm via OIDC trusted publishing when a release tag is pushed.
-# No NPM_TOKEN: the GitHub Actions OIDC identity authenticates against the
-# trusted-publisher config registered on npmjs.com for this package.
-# Requires: npm CLI >= 11.5.1 (node 24 + the explicit upgrade below) and the
-# id-token: write permission. Emits provenance + publishes the scoped package
-# publicly (publishConfig.provenance / access).
+# Continuous delivery — type-gated release-on-merge (ADR 0007, gate-05). Replaces the manual
+# `git push tag v*` trigger: a merge to `main` publishes (or not) by conventional-commit type.
+#
+# Runs AFTER CI by construction: the `wrxn-main-gate` ruleset only lets a change reach `main` once the
+# required `wrxn-ci` check is green, so anything that triggers this workflow is already CI-passed.
+#
+# Type gate (lib/release.cjs · `wrxn release-check`):
+#   feat → minor · fix/perf → patch · breaking (type! / BREAKING CHANGE:) → major  → PUBLISH
+#   chore/docs/refactor/test/style/ci/build → NO release.
+#
+# Version / bump model — package.json.version is the SOURCE OF TRUTH (no chicken/egg):
+#   * test/migrate.test.cjs enforces every migration's version <= package.json.version, so the version
+#     can never be a semantic-release placeholder. We therefore do NOT adopt the "package.json is a
+#     placeholder" model and do NOT commit a bump back to `main` through the gate (that commit would
+#     have to re-pass the branch ruleset — the chicken/egg this avoids).
+#   * The developer bumps package.json.version IN THE PR (like gate-02 → 0.11.0).
+#   * On merge to `main`: compute the release decision from the merged commits; when release==true AND
+#     package.json.version is not already on npm, publish the CURRENT package.json.version via OIDC +
+#     provenance and push the `v<version>` git tag (tags are not blocked by the branch ruleset).
+#     No commit-back-to-main. The npm-already-published guard makes re-runs idempotent.
+#
+# OIDC: tokenless — the GitHub Actions OIDC identity authenticates against the trusted-publisher
+# config on npmjs.com (no long-lived npm auth secret). Requires npm >= 11.5.1 (node 24 + the explicit
+# upgrade) and id-token: write. contents: write is needed only to push the release tag.
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
 
 permissions:
   id-token: write
-  contents: read
+  contents: write
+
+# Serialize releases so two quick merges can't double-publish. Never cancel an in-flight publish.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  publish:
+  release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
-      - run: npm install -g npm@latest
-      - run: npm ci
-      - run: npm test
-      - run: npm publish
+
+      # Decide by conventional-commit type over the merged commit range. No npm ci needed: release-check
+      # uses only node stdlib + git, so a non-release merge (chore/docs) stops here fast.
+      - name: decide release by conventional-commit type
+        id: decide
+        run: node bin/wrxn.cjs release-check --range "${{ github.event.before }}..${{ github.sha }}"
+
+      - name: upgrade npm (OIDC trusted publishing needs npm >= 11.5.1)
+        if: steps.decide.outputs.release == 'true'
+        run: npm install -g npm@latest
+      - name: install dependencies
+        if: steps.decide.outputs.release == 'true'
+        run: npm ci
+      - name: test (pre-publish backstop)
+        if: steps.decide.outputs.release == 'true'
+        run: npm test
+
+      - name: publish to npm (OIDC + provenance) when release-worthy and unpublished
+        if: steps.decide.outputs.release == 'true'
+        run: |
+          VER=$(node -p "require('./package.json').version")
+          PKG=$(node -p "require('./package.json').name")
+          PUBLISHED=$(npm view "$PKG@$VER" version 2>/dev/null || true)
+          if [ -n "$PUBLISHED" ]; then
+            echo "$PKG@$VER already published — skipping (idempotent re-run)"
+            exit 0
+          fi
+          echo "publishing $PKG@$VER (bump: ${{ steps.decide.outputs.bump }})"
+          npm publish --provenance --access public
+          git tag "v$VER"
+          git push origin "v$VER"

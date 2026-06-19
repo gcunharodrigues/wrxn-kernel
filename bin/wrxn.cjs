@@ -14,6 +14,7 @@ const onboard = require('../lib/onboard.cjs');
 const connect = require('../lib/connect.cjs');
 const ship = require('../lib/ship.cjs');
 const protect = require('../lib/protect.cjs');
+const release = require('../lib/release.cjs');
 const brain = require('../lib/brain.cjs');
 const statusline = require('../lib/statusline.cjs');
 const { convert } = require('../lib/convert.cjs');
@@ -50,6 +51,8 @@ function parseArgs(argv) {
       args.flags.root = argv[++i];
     } else if (a === '--base') {
       args.flags.base = argv[++i];
+    } else if (a === '--range') {
+      args.flags.range = argv[++i];
     } else if (a === '--branch') {
       args.flags.branch = argv[++i];
     } else if (a === '--title') {
@@ -191,6 +194,15 @@ Usage:
                                  on any failure. The wrxn-ci workflow runs this after the project's own
                                  WRXN_TEST_CMD, so CI is never a vacuous pass — even a no-suite repo is
                                  really gated.
+
+  wrxn release-check [--range <before>..<head>] [--root <dir>]
+                                 the CD type-gate: read the merged commit messages from the git range
+                                 (default: the HEAD commit) and decide by conventional-commit type
+                                 whether the merge publishes — feat→minor, fix/perf→patch, breaking
+                                 (type! / BREAKING CHANGE:)→major; chore/docs/refactor/test → no release.
+                                 Prints {"release":bool,"bump":...} and, in CI, appends release/bump to
+                                 $GITHUB_OUTPUT. The release-on-merge workflow gates the OIDC publish on
+                                 it. Fail-safe: a non-repo / bad range → no release.
 
   wrxn flow status <prd> [--root <dir>]
                                  print the flow-status board for a PRD's issue set. Reads issues
@@ -742,6 +754,41 @@ async function main(argv) {
     }
     process.stdout.write(ok ? 'wrxn-ci PASS\n' : 'wrxn-ci FAIL\n');
     return ok ? 0 : 2;
+  }
+
+  if (cmd === 'release-check') {
+    // The CD type-gate bridge (gate-05): read the merged commit messages from a git range, decide by
+    // conventional-commit type whether the merge publishes, and emit the decision. release.yml gates the
+    // OIDC publish on it; recon-wrxn (gate-06) reuses the same gate via `npx @gcunharodrigues/wrxn`.
+    // The git read lives here (CLI layer); the pure classifier (shouldRelease) is unit-tested.
+    const root = path.resolve(args.flags.root || process.cwd());
+    const range = args.flags.range;
+    let logArgs;
+    if (range && range.includes('..')) {
+      const [before, head] = range.split('..');
+      const headRef = head || 'HEAD';
+      // A zero before-sha is GitHub's "new branch" sentinel — there is no prior tip, so the range is
+      // meaningless; read only the head commit.
+      logArgs = /^0+$/.test(before)
+        ? ['-C', root, 'log', '-1', '--format=%B%x00', headRef]
+        : ['-C', root, 'log', '--format=%B%x00', range];
+    } else {
+      logArgs = ['-C', root, 'log', '-1', '--format=%B%x00', range || 'HEAD'];
+    }
+    let raw = '';
+    try {
+      raw = execFileSync('git', logArgs, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+    } catch {
+      // Not a git repo / bad range — fail SAFE: never publish on uncertainty.
+      raw = '';
+    }
+    const decision = release.shouldRelease(release.parseLog(raw));
+    // Expose the decision to the workflow's conditional publish step.
+    if (process.env.GITHUB_OUTPUT) {
+      fs.appendFileSync(process.env.GITHUB_OUTPUT, `release=${decision.release}\nbump=${decision.bump || ''}\n`);
+    }
+    process.stdout.write(JSON.stringify(decision) + '\n');
+    return 0;
   }
 
   process.stderr.write(`wrxn: unknown command "${cmd}"\n\n${USAGE}\n`);
