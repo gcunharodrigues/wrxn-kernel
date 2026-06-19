@@ -93,3 +93,56 @@ the baton (`.wrxn/continuity/latest.md`) is single-writer (the handoff skill), e
 resume; the focus slot is durable standing context. Keeping their paths and writers disjoint preserves
 the continuity doctrine.
 _Avoid_: merging the focus slot with the handoff baton.
+
+## Build flow
+
+**HITL phase**:
+The front half of the build flow, run in the main conversation with the operator: grill → (research) →
+(prototype) → PRD → issues → verticality gate. Everything needing a human decision is resolved here, in
+one window, before any agent builds.
+_Avoid_: front half, planning (too vague).
+
+**AFK phase**:
+The build half, run by isolated typed **executors** with no human in the loop: per slice, builder →
+reviewer → security → agent qa-walk. Gated entirely by the dispatch contract.
+_Avoid_: back half, automation.
+
+**Executor**:
+A typed, isolated subagent that runs one AFK phase by reading and following its phase skill, bounded by
+the dispatch spec, returning a validated report. The six: builder, reviewer, security, qa-walker,
+researcher, devops — **devops alone may push**.
+_Avoid_: worker, runner, bot.
+
+**Agent qa-walk**:
+The per-slice functional walk an isolated qa-walker runs against **one slice's issue ACs**, the last gate
+of that slice's AFK phase. AC-level.
+_Avoid_: conflating with the human qa-walk.
+
+**Human qa-walk**:
+The operator's functional walk of the **whole assembled artifact against all PRD stories**, after every
+slice is AFK-verified — the cross-slice / integration / does-it-feel-right gate no per-slice agent can
+see. Runs via qa-walk's operator-mode.
+_Avoid_: acceptance (the sign-off *after* this walk), conflating with the agent qa-walk.
+
+**Correction pass**:
+The post-human-walk fix loop: findings are filed as issues, triaged for severity (fix-now vs defer,
+trivia batched), the fix-now issues run a scoped re-run of the AFK phase, then the operator re-accepts.
+_Avoid_: rework, hotfix.
+
+**Integration branch**:
+The staging branch where AFK-verified slices accumulate (slice N+1 builds on slice N) and the human
+qa-walk runs; devops promotes it to trunk in a single push after accept. Keeps un-human-walked code off
+trunk.
+_Avoid_: feature branch, trunk.
+
+**compass**:
+The router skill — a user- and model-invocable map of the skills and the build flow that answers "where
+am I, which skill/agent next." Static flow doctrine + a live read of installed skills (drift-free by
+construction).
+_Avoid_: index, menu, help.
+
+**Flow status**:
+The derived per-PRD gate board (`wrxn flow status`) — reconstructs each slice's progress
+(build/review/security/qa) from the durable gate **artifacts**, not a separate state store. compass
+renders it for "is the process running correctly."
+_Avoid_: dashboard, state machine (there is no separate state — the artifacts are the truth).
