@@ -12,6 +12,7 @@ const worktree = require('../lib/worktree.cjs');
 const executor = require('../lib/executor.cjs');
 const onboard = require('../lib/onboard.cjs');
 const connect = require('../lib/connect.cjs');
+const ship = require('../lib/ship.cjs');
 const brain = require('../lib/brain.cjs');
 const statusline = require('../lib/statusline.cjs');
 const { convert } = require('../lib/convert.cjs');
@@ -48,6 +49,12 @@ function parseArgs(argv) {
       args.flags.root = argv[++i];
     } else if (a === '--base') {
       args.flags.base = argv[++i];
+    } else if (a === '--branch') {
+      args.flags.branch = argv[++i];
+    } else if (a === '--title') {
+      args.flags.title = argv[++i];
+    } else if (a === '--body') {
+      args.flags.body = argv[++i];
     } else if (a === '--path') {
       args.flags.path = argv[++i];
     } else if (a === '--executor') {
@@ -122,6 +129,15 @@ Usage:
                                  never the secret (registry is per-install state, never shipped).
       list                       print all registered connections (agent-readable JSON)
       get <name>                 print one connection by name
+
+  wrxn ship --title "<pr title>" [--branch <name>] [--base <main>] [--body <text>] [--dry-run] [--root <dir>]
+                                 the autonomous promote path (replaces the WRXN_ACTIVE_AGENT /
+                                 settings.local.json dance): push the reviewed branch, open a PR,
+                                 and arm auto-merge (gh pr merge --auto --squash) — GitHub merges the
+                                 instant the server-enforced CI gate is green. --branch defaults to
+                                 the repo's current branch. --dry-run prints the promote plan without
+                                 running it (a non-destructive preview). Stops at the first failing
+                                 step (a failed push never opens a PR).
 
   wrxn brain query "<q>" [--json] [--limit <n>] [--type <prose|code|NodeType>] [--neighbors] [--root <dir>]
                                  ask the warm Brain (recon-wrxn's code+prose graph) from the terminal.
@@ -447,6 +463,48 @@ async function main(argv) {
       process.stderr.write(`wrxn: ${err.message}\n`);
       return 2;
     }
+  }
+
+  if (cmd === 'ship') {
+    // The autonomous promote path: push the reviewed branch, open a PR, arm auto-merge — GitHub
+    // merges the instant the server-enforced CI gate is green. Replaces the WRXN_ACTIVE_AGENT /
+    // settings.local.json dance entirely (no env flag, no GitHub clicks). Real git/gh run via the
+    // real spawnSync invoker (ship.defaultInvoke) — that is what makes the promote "validated by
+    // invocation". --dry-run prints the plan without running it (a non-destructive preview).
+    const root = path.resolve(args.flags.root || process.cwd());
+    let branch = args.flags.branch;
+    if (!branch) {
+      // Default to the repo's current branch — the reviewed branch the devops executor stands on.
+      try {
+        branch = execFileSync('git', ['-C', root, 'branch', '--show-current'], { encoding: 'utf8' }).trim();
+      } catch { branch = ''; }
+    }
+    const title = args.flags.title;
+    const base = args.flags.base || ship.DEFAULT_BASE;
+    const body = args.flags.body || '';
+    if (!branch) { process.stderr.write('wrxn: ship requires a branch — pass --branch <name>, or run inside the git repo on the branch to promote\n'); return 2; }
+    if (!title) { process.stderr.write('wrxn: ship requires --title "<pr title>"\n'); return 2; }
+    let plan;
+    try {
+      plan = ship.buildShipPlan({ branch, title, base, body });
+    } catch (err) {
+      process.stderr.write(`wrxn: ${err.message}\n`);
+      return 2;
+    }
+    if (args.flags['dry-run']) {
+      process.stdout.write(JSON.stringify(plan, null, 2) + '\n');
+      return 0;
+    }
+    const res = ship.ship({ branch, title, base, body }); // real defaultInvoke (git + gh)
+    for (const s of res.steps) {
+      process.stdout.write(`  ${s.ok ? '✓' : '✗'} ${s.step} — ${s.detail}\n`);
+    }
+    if (res.ok) {
+      process.stdout.write(`shipped ${branch} → PR opened on ${base} with auto-merge armed (GitHub merges when CI is green)\n`);
+      return 0;
+    }
+    process.stderr.write(`wrxn: ship failed at "${res.failed}" — promote halted (no PR/auto-merge past the failure)\n`);
+    return 2;
   }
 
   if (cmd === 'brain') {

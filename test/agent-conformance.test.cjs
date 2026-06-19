@@ -126,12 +126,15 @@ test('least-privilege: only the devops executor declares push capability (canPus
   assert.equal(EXECUTORS.devops.canPush, true, 'only devops declares push capability');
 });
 
-// ── only the devops agent body encodes the push-gate dance ──────────────────────
-test('only devops encodes the push-gate dance; the others state they never push', () => {
+// ── devops promotes via `wrxn ship`, not the retired env-flag dance (gate-03) ─────
+// The WRXN_ACTIVE_AGENT / settings.local.json gate was proven a live no-op (2026-06-19 audit F1);
+// devops now promotes via one `wrxn ship` (push → PR → auto-merge) with zero env flags.
+test('devops promotes via `wrxn ship` (PR + auto-merge), with NO WRXN_ACTIVE_AGENT / settings.local.json dance', () => {
   const body = (type) => fs.readFileSync(agentFile(type), 'utf8');
   const devops = body('devops');
-  assert.match(devops, /WRXN_ACTIVE_AGENT/, 'devops must set the push-gate env flag');
-  assert.match(devops, /settings\.local\.json/, 'devops must toggle .claude/settings.local.json');
+  assert.match(devops, /wrxn ship/, 'devops must promote via the `wrxn ship` command');
+  assert.doesNotMatch(devops, /WRXN_ACTIVE_AGENT/, 'the retired env-flag must be gone (audit F1: a live no-op)');
+  assert.doesNotMatch(devops, /settings\.local\.json/, 'the settings.local.json dance must be gone');
   for (const { type } of FLEET) {
     if (type === 'devops') continue;
     assert.match(body(type), /never .*push/i, `${type} body must state it never pushes`);
