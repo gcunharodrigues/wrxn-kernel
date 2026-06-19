@@ -46,3 +46,10 @@ post-hoc correction pass). Each cites the gate that raised it. Resolve + tick wh
 
 - `wikiLint` swallows a per-file read error (fail-open on one unreadable page) — does NOT break the closed-on-crash
   property of the gate overall (entrypoint `exit 1` on any thrown predicate). Leave unless cheap.
+- **slice-07 null nit** (security INFO): `enforce-pipeline-adherence.cjs:~88,94` — `JSON.parse("null")` returns
+  `null` past the parse `try`, then `null.tool_name` throws uncaught (exit 1). Still **fails open** (exit 1 ≠
+  block-exit 2) and unreachable in practice (CC never emits literal `null`). Optional 1-liner:
+  `if (!event || typeof event !== 'object') return emit({});` after the parse block.
+- **slice-07 PRD-doc over-block** (review NB1): the `\bPRD\b…\b(document|doc)\b` branch fires on a read-only
+  "summarize the PRD document" delegated to a generic agent — safe-direction false positive (over-block is
+  recoverable). Optional tighten; not worth a re-dispatch.
