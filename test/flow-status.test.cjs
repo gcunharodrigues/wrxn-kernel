@@ -68,13 +68,33 @@ test('no artifacts for an issue yields state=queued and all gates pending', () =
   assert.equal(s.gates.qa, 'pending');
 });
 
-// ── blocked issue → queued, even with artifacts ───────────────────────────────
+// ── B2: dependency resolution — done-ness wins; only UNRESOLVED blockers queue ─
 
-test('a blocked issue yields queued regardless of present artifacts', () => {
+test('a fully-done slice is done even when it lists a blocker (B2)', () => {
+  // All four gates done ⇒ done, regardless of any listed blocker (completion must not be masked).
   const board = flowStatus([ISSUE_C], { 'flow-03': FULL });
   const s = board[0];
   assert.equal(s.id, 'flow-03');
-  assert.equal(s.state, 'queued', 'blocked must be queued');
+  assert.equal(s.state, 'done', 'all four gates done ⇒ done, regardless of listed blockers');
+});
+
+test('a resolved blocker (blocker fully done) lets state follow the gates (B2)', () => {
+  // flow-01 fully done → flow-03's blocker is resolved; flow-03 has build+review → in-progress.
+  const board = flowStatus([ISSUE_A, ISSUE_C], {
+    'flow-01': FULL,
+    'flow-03': { greenCommit: 'abc1234', reviewMarker: 'r.md' },
+  });
+  const c = board.find((s) => s.id === 'flow-03');
+  assert.equal(c.state, 'in-progress', 'resolved blocker → gate-driven state, not queued');
+});
+
+test('an unresolved blocker (blocker not done) pins the slice queued (B2)', () => {
+  // flow-01 NOT done → flow-03's blocker is unresolved; its own build+review can't unblock it.
+  const board = flowStatus([ISSUE_A, ISSUE_C], {
+    'flow-03': { greenCommit: 'abc1234', reviewMarker: 'r.md' },
+  });
+  const c = board.find((s) => s.id === 'flow-03');
+  assert.equal(c.state, 'queued', 'unresolved blocker → queued despite gate progress');
 });
 
 // ── empty blockedBy array is not blocked ──────────────────────────────────────
@@ -209,4 +229,83 @@ test('CLI: wrxn flow status <prd> prints a board with correct gate symbols', () 
 test('CLI: wrxn flow status exits non-zero without a prd argument', () => {
   const { code } = runCli(['flow', 'status']);
   assert.notEqual(code, 0);
+});
+
+// ── S1: a regex metachar in the prd id must not crash artifact matching ────────
+
+test('CLI: a regex-metachar in the prd id does not crash artifact matching (S1)', () => {
+  const { dir } = gitRepo('wrxn-flow-regex-');
+  // A prd slug with a regex metachar flows into the derived id and into new RegExp(...).
+  // An unescaped "(" builds an unterminated group → SyntaxError on the old code path.
+  const prd = 'a(b';
+  const issuesDir = path.join(dir, '.scratch', prd, 'issues');
+  fs.mkdirSync(issuesDir, { recursive: true });
+  fs.writeFileSync(path.join(issuesDir, '01-x.md'), '# 01 — X\n\nStatus: ready-for-agent\n');
+  const { code, stdout } = runCli(['flow', 'status', prd, '--root', dir]);
+  assert.equal(code, 0, 'a metachar id must not crash the RegExp build');
+  assert.ok(stdout.includes('a(b-01'), 'the slice is still listed');
+});
+
+// ── S2: a path-traversal prd must not escape <root>/.scratch/ ─────────────────
+
+test('CLI: a path-traversal prd escaping .scratch is rejected (S2)', () => {
+  const { dir } = gitRepo('wrxn-flow-traversal-');
+  // A readable issues dir OUTSIDE .scratch — a traversal prd ("../evil") would otherwise reach it.
+  const evil = path.join(dir, 'evil', 'issues');
+  fs.mkdirSync(evil, { recursive: true });
+  fs.writeFileSync(path.join(evil, '01-x.md'), '# 01 — X\n');
+  const { code } = runCli(['flow', 'status', '../evil', '--root', dir]);
+  assert.equal(code, 2, 'a traversal prd must be rejected, not read');
+});
+
+// ── B1: a "None" blocked-by sentinel is not a real dependency ─────────────────
+
+test('CLI: a "None" blocked-by sentinel does not queue a built slice (B1)', () => {
+  const { dir, git } = gitRepo('wrxn-flow-none-');
+  const issuesDir = path.join(dir, '.scratch', 'myprd', 'issues');
+  fs.mkdirSync(issuesDir, { recursive: true });
+  // Slice 01 lists the sentinel under "Blocked by" — it has no real dependency.
+  fs.writeFileSync(path.join(issuesDir, '01-first.md'),
+    '# 01 — First slice\n\nStatus: ready-for-agent\n\n## Blocked by\n\n- None — can start immediately.\n');
+  // A green build commit for slice 01.
+  fs.writeFileSync(path.join(dir, 'work.txt'), 'work\n');
+  git('add', '.');
+  git('commit', '-q', '-m', 'feat(slice): first slice [myprd-01]');
+
+  const { code, stdout } = runCli(['flow', 'status', 'myprd', '--root', dir]);
+  assert.equal(code, 0, `exit 0; out: ${stdout}`);
+  assert.match(stdout, /myprd-01\s+build✓/, 'build gate detected');
+  assert.doesNotMatch(stdout, /myprd-01.*queued/, 'None sentinel must not queue the slice');
+});
+
+// ── B2 (end-to-end): a "NN (desc)" blocker normalizes + resolves to a canonical id ──
+
+test('CLI: a "NN (desc)" blocker resolves once its slice is fully done (B2 normalization)', () => {
+  const { dir, git } = gitRepo('wrxn-flow-resolve-');
+  const issuesDir = path.join(dir, '.scratch', 'myprd', 'issues');
+  fs.mkdirSync(issuesDir, { recursive: true });
+  fs.writeFileSync(path.join(issuesDir, '01-first.md'), '# 01 — First\n\nStatus: ready-for-agent\n');
+  // Slice 02 lists slice 01 in the real "NN (description)." bullet form (not a bare canonical id).
+  fs.writeFileSync(path.join(issuesDir, '02-second.md'),
+    '# 02 — Second\n\nStatus: ready-for-agent\n\n## Blocked by\n\n- 01 (the first slice must land first).\n');
+
+  // Slice 01 fully done: green commit + all three downstream gate markers.
+  fs.writeFileSync(path.join(dir, 'a.txt'), 'a\n');
+  git('add', '.');
+  git('commit', '-q', '-m', 'feat: first [myprd-01]');
+  fs.writeFileSync(path.join(dir, 'review-myprd-01.md'), 'APPROVED\n');
+  fs.writeFileSync(path.join(dir, 'security-myprd-01.md'), 'PASS\n');
+  fs.writeFileSync(path.join(dir, 'walk-findings-myprd-01.md'), 'walk\n');
+
+  // Slice 02 has build + review only.
+  fs.writeFileSync(path.join(dir, 'b.txt'), 'b\n');
+  git('add', '.');
+  git('commit', '-q', '-m', 'feat: second [myprd-02]');
+  fs.writeFileSync(path.join(dir, 'review-myprd-02.md'), 'APPROVED\n');
+
+  const { code, stdout } = runCli(['flow', 'status', 'myprd', '--root', dir]);
+  assert.equal(code, 0, `exit 0; out: ${stdout}`);
+  assert.match(stdout, /myprd-01\s+build✓ review✓ sec✓ qa✓\s+done/, 'slice 01 fully done');
+  // Slice 02's "01 (...)" blocker is resolved (01 is done) → follows its own gates → in-progress.
+  assert.match(stdout, /myprd-02\s+build✓ review✓ sec· qa·\s+in-progress/, 'resolved blocker → in-progress');
 });

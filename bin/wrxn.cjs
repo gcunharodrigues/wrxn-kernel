@@ -25,6 +25,12 @@ function version() {
   return pkg.version;
 }
 
+// Escape a dynamic fragment before embedding it in a RegExp. Slice ids derive from the prd slug and
+// issue filenames, so an unescaped metachar would otherwise build an invalid pattern (crash / ReDoS).
+function escapeRegExp(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function parseArgs(argv) {
   const args = { _: [], flags: {} };
   for (let i = 0; i < argv.length; i++) {
@@ -509,7 +515,15 @@ async function main(argv) {
         return 2;
       }
       const root = path.resolve(args.flags.root || process.cwd());
-      const issuesDir = path.join(root, '.scratch', prd, 'issues');
+      // S2: prd flows into a filesystem path — keep it a plain dir name contained within
+      // <root>/.scratch/. Reject "..", absolute paths, and anything that resolves outside .scratch/.
+      const scratchRoot = path.join(root, '.scratch');
+      const issuesDir = path.join(scratchRoot, prd, 'issues');
+      if (prd.includes('..') || path.isAbsolute(prd)
+          || !path.resolve(issuesDir).startsWith(path.resolve(scratchRoot) + path.sep)) {
+        process.stderr.write(`wrxn: invalid prd "${prd}" — must be a directory name under .scratch/\n`);
+        return 2;
+      }
 
       // Read issue files sorted by filename (numeric ordering preserved by filename prefix)
       let issueFiles;
@@ -542,7 +556,15 @@ async function main(argv) {
             if (/^##\s+/.test(line)) { inBlocked = /^##\s+blocked by/i.test(line); continue; }
             if (inBlocked) {
               const m = line.match(/^\s*-\s+(.+)$/);
-              if (m) blockedBy.push(m[1].trim());
+              if (m) {
+                const item = m[1].trim();
+                // B1: the "None — can start immediately." sentinel is not a real dependency.
+                if (/^none\b/i.test(item)) continue;
+                // B2: normalize a "02 (desc)." bullet to the canonical id "<prefix>-02" so it can be
+                // resolved against the done set. A bullet that is already an id is kept as-is.
+                const numM = item.match(/^(\d+)/);
+                blockedBy.push(numM ? `${prdPrefix}-${numM[1]}` : item);
+              }
             }
           }
         } catch { /* id still usable without content */ }
@@ -575,9 +597,12 @@ async function main(argv) {
       for (const issue of issues) {
         const { id } = issue;
         const entry = {};
-        // greenCommit: commit message containing [id] or the bare id word
-        const re = new RegExp(`\\[${id}\\]|\\b${id}\\b`);
-        const commitLine = gitLog.split('\n').find((l) => re.test(l));
+        // greenCommit: commit message containing [id] or the bare id word.
+        // S1: escape the id (+ guard construction) so a metachar id can never build an invalid RegExp.
+        const eid = escapeRegExp(id);
+        let re;
+        try { re = new RegExp(`\\[${eid}\\]|\\b${eid}\\b`); } catch { re = null; }
+        const commitLine = re ? gitLog.split('\n').find((l) => re.test(l)) : null;
         if (commitLine) entry.greenCommit = commitLine.trim().split(/\s+/)[0];
         // review marker
         const reviewFile = findArtifactFile(`review-${id}.md`);
