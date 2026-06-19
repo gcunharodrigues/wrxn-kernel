@@ -74,21 +74,6 @@
       "profile": "project"
     },
     {
-      "path": ".claude/hooks/enforce-push-authority.cjs",
-      "class": "managed",
-      "profile": "project"
-    },
-    {
-      "path": ".claude/hooks/enforce-review-marker.cjs",
-      "class": "managed",
-      "profile": "project"
-    },
-    {
-      "path": ".claude/hooks/enforce-tests-on-push.cjs",
-      "class": "managed",
-      "profile": "project"
-    },
-    {
       "path": ".claude/hooks/recall-surface.cjs",
       "class": "managed",
       "profile": "project"

@@ -135,8 +135,7 @@ Usage:
       get <name>                 print one connection by name
 
   wrxn ship --title "<pr title>" [--branch <name>] [--base <main>] [--body <text>] [--dry-run] [--root <dir>]
-                                 the autonomous promote path (replaces the WRXN_ACTIVE_AGENT /
-                                 settings.local.json dance): push the reviewed branch, open a PR,
+                                 the autonomous promote path: push the reviewed branch, open a PR,
                                  and arm auto-merge (gh pr merge --auto --squash) — GitHub merges the
                                  instant the server-enforced CI gate is green. --branch defaults to
                                  the repo's current branch. --dry-run prints the promote plan without
@@ -496,8 +495,8 @@ async function main(argv) {
 
   if (cmd === 'ship') {
     // The autonomous promote path: push the reviewed branch, open a PR, arm auto-merge — GitHub
-    // merges the instant the server-enforced CI gate is green. Replaces the WRXN_ACTIVE_AGENT /
-    // settings.local.json dance entirely (no env flag, no GitHub clicks). Real git/gh run via the
+    // merges the instant the server-enforced CI gate is green — no env flag, no GitHub clicks. Real
+    // git/gh run via the
     // real spawnSync invoker (ship.defaultInvoke) — that is what makes the promote "validated by
     // invocation". --dry-run prints the plan without running it (a non-destructive preview).
     const root = path.resolve(args.flags.root || process.cwd());

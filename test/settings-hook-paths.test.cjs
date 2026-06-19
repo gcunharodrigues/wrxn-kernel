@@ -46,3 +46,29 @@ test('no hook command uses a bare relative node .claude/hooks/ path', () => {
     );
   }
 });
+
+// ── gate-redesign gate-04: the three client-side push-gate hooks are retired ──
+// They are superseded by the server-side `wrxn-main-gate` ruleset + CI (ADR 0007 choice 5). A
+// client hook can never be hard enforcement (it gates one tool surface, not the repository) — so
+// the push path is now PR + CI + auto-merge, and these three must be gone from the wiring.
+
+const RETIRED_PUSH_HOOKS = ['enforce-push-authority', 'enforce-review-marker', 'enforce-tests-on-push'];
+
+test('the retired push-gate hooks are absent from the settings wiring', () => {
+  const joined = hookCommands().join('\n');
+  for (const retired of RETIRED_PUSH_HOOKS) {
+    assert.doesNotMatch(joined, new RegExp(retired), `${retired} must be unwired (retired in gate-04)`);
+  }
+});
+
+test('the surviving hook wiring is intact after the push-gate retirement', () => {
+  const joined = hookCommands().join('\n');
+  // session/intel + synapse + the demoted managed-advisory + the slice-07 adherence guard all stay.
+  for (const keep of [
+    'session-start', 'synapse-engine', 'reference-detect', 'recall-surface',
+    'enforce-managed-guard', 'enforce-managed-precommit', 'enforce-pipeline-adherence',
+    'code-intel-push', 'drift-detect', 'wiki-lint',
+  ]) {
+    assert.match(joined, new RegExp(keep), `${keep} must remain wired`);
+  }
+});

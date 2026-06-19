@@ -42,7 +42,7 @@ phase skill (never a paraphrase), bounded by the dispatch contract (`lib/executo
 
 - **builder** *(opus)* — the build step. Reads **tdd**; builds the slice red → green → refactor.
 - **reviewer** *(opus)* — the code-review step. Follows **/code-review** (global skill); writes the one
-  review marker the push gate checks.
+  review marker (`review-<id>.md`) the integration step verifies before promoting.
 - **security** *(opus)* — the security-review step. Follows **/security-review** (global skill).
 - **qa-walker** *(sonnet)* — the per-slice **agent qa-walk**. Reads **qa-walk**; walks that slice's
   issue ACs against the real artifact.

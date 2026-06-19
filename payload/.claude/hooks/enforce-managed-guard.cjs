@@ -1,13 +1,15 @@
 #!/usr/bin/env node
 'use strict';
 
-// WRXN managed hook — protect MANAGED kernel files inside an install (the ring-0 reshape).
-// PreToolUse:Edit|Write. Blocks an agent edit/write to a file classified `managed` in the
-// install receipt unless WRXN_MANAGED_CONFIRM is set. Seeded + state files (and anything outside
-// the install) edit freely. Self-contained: hooks ship into installs and cannot import the kernel lib.
+// WRXN managed hook — a non-blocking heads-up on MANAGED kernel files inside an install.
+// PreToolUse:Edit|Write. When an agent edits/writes a file classified `managed` in the install
+// receipt it surfaces an ADVISORY (never a block): a client hook can never be hard enforcement, so
+// byte-level managed-integrity is enforced server-side in CI (gate-redesign gate-04). Seeded + state
+// files (and anything outside the install) are silent. Self-contained: hooks ship into installs and
+// cannot import the kernel lib.
 //
-// Contract: PreToolUse event JSON on stdin → decision JSON on stdout (exit 0).
-//   allow → {}        block → { "decision": "block", "reason": "..." }
+// Contract: PreToolUse event JSON on stdin → JSON on stdout (exit 0). It NEVER blocks:
+//   silent → {}     advisory → { "hookSpecificOutput": { "hookEventName": "PreToolUse", "additionalContext": "..." } }
 
 const fs = require('fs');
 const path = require('path');
@@ -55,13 +57,14 @@ function main() {
   const rel = path.relative(root, path.resolve(filePath));
   if (rel.startsWith('..') || path.isAbsolute(rel)) return emit({}); // outside the install
 
-  if (!managedPaths(root).includes(rel)) return emit({}); // seeded/state/other → free
+  if (!managedPaths(root).includes(rel)) return emit({}); // seeded/state/other → silent
 
-  if (process.env.WRXN_MANAGED_CONFIRM) return emit({}); // explicit confirm → allowed
-
+  // Non-blocking advisory only (gate-04): never block, and the WRXN_MANAGED_CONFIRM token is retired.
   return emit({
-    decision: 'block',
-    reason: `"${rel}" is a MANAGED kernel file — kernel-owned, overwritten on \`wrxn update\`. To change it intentionally, set WRXN_MANAGED_CONFIRM. (Seeded + state files edit freely.)`,
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      additionalContext: `Heads-up: "${rel}" is a MANAGED kernel file — kernel-owned, overwritten on \`wrxn update\`, and verified byte-for-byte by the server-side CI managed-integrity check. Change it only as a deliberate kernel edit (it must land through the PR + CI gate). Seeded + state files edit freely.`,
+    },
   });
 }
 

@@ -1,6 +1,6 @@
 # Domain: global (L1) — WRXN operational invariants. Always-on. Managed kernel file.
-GLOBAL_RULE_0=git push, PR creation, and release tags are deliberate acts held behind a confirmation flag (anti-accidental-push) — they run only once the session sets WRXN_ACTIVE_AGENT=devops in .claude/settings.local.json; `devops` is a dispatch-phase label, not an authority (Constitution Art. I).
+GLOBAL_RULE_0=git push, PR creation, and release tags are deliberate acts: the devops executor promotes via `wrxn ship` (push the branch → open a PR → arm auto-merge), and a server-enforced GitHub ruleset blocks direct pushes to the trunk and merges only when CI is green — no client-side env flag; `devops` is a dispatch-phase label, not an authority (Constitution Art. I).
 GLOBAL_RULE_1=The unit of work is an issue with explicit acceptance criteria — no code is written without one (Constitution Art. II).
 GLOBAL_RULE_2=Before building, apply the decision hierarchy: REUSE (>=90% match) > ADAPT (60-89%, <30% change) > CREATE (justify it).
 GLOBAL_RULE_3=Use conventional commits and reference the issue id (e.g. `feat(x): ... [issue-id]`).
-GLOBAL_RULE_4=Tests and typecheck pass on every commit; the full green suite is the push gate (Constitution Art. III).
+GLOBAL_RULE_4=Tests and typecheck pass on every commit; the server-enforced CI check (project suite + kernel-universal checks) is the gate to the trunk — review + security run as AFK stages before the PR, not a self-written marker (Constitution Art. III).

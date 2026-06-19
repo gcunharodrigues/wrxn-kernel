@@ -28,6 +28,12 @@ function runHook(hookPath, event, env) {
   return out.trim() ? JSON.parse(out) : {};
 }
 
+// The demoted guards surface a non-blocking advisory via hookSpecificOutput.additionalContext
+// (the house style for PreToolUse context, e.g. code-intel-push) — never a block decision.
+function advisory(d) {
+  return (d.hookSpecificOutput && d.hookSpecificOutput.additionalContext) || '';
+}
+
 function freshInstall(prefix) {
   const dir = tmp(prefix);
   init({ pkgRoot: PKG_ROOT, target: dir });
@@ -36,25 +42,29 @@ function freshInstall(prefix) {
 
 // ── enforce-managed-guard (Edit|Write) ────────────────────────────────────────
 
-test('guard BLOCKS an edit to a managed file without the confirm token', () => {
-  const root = freshInstall('wrxn-guard-block-');
+// gate-redesign gate-04: the managed-guard is DEMOTED to a non-blocking advisory. Byte-level
+// managed-integrity is now enforced server-side in CI (slice 01); a client hook can never be hard
+// enforcement, so it must NEVER block — it only surfaces a heads-up. The WRXN_MANAGED_CONFIRM token
+// is retired (the hook no longer reads it).
+
+test('guard ADVISES (never blocks) on a managed-file edit', () => {
+  const root = freshInstall('wrxn-guard-advise-');
   const d = runHook(
     GUARD,
     { tool_input: { file_path: path.join(root, '.claude/constitution.md') } },
-    { CLAUDE_PROJECT_DIR: root, WRXN_MANAGED_CONFIRM: '' }
+    { CLAUDE_PROJECT_DIR: root }
   );
-  assert.equal(d.decision, 'block');
-  assert.match(d.reason, /managed/i);
+  assert.notEqual(d.decision, 'block', 'the demoted guard must never block');
+  assert.match(advisory(d), /managed/i, 'it surfaces a non-blocking managed-file advisory');
 });
 
-test('guard ALLOWS a managed edit with the confirm token', () => {
-  const root = freshInstall('wrxn-guard-confirm-');
-  const d = runHook(
-    GUARD,
-    { tool_input: { file_path: path.join(root, '.claude/constitution.md') } },
-    { CLAUDE_PROJECT_DIR: root, WRXN_MANAGED_CONFIRM: '1' }
-  );
-  assert.deepEqual(d, {});
+test('guard advises identically whether or not WRXN_MANAGED_CONFIRM is set (token retired)', () => {
+  const root = freshInstall('wrxn-guard-tokendead-');
+  const ev = { tool_input: { file_path: path.join(root, '.claude/constitution.md') } };
+  const withToken = runHook(GUARD, ev, { CLAUDE_PROJECT_DIR: root, WRXN_MANAGED_CONFIRM: '1' });
+  const without = runHook(GUARD, ev, { CLAUDE_PROJECT_DIR: root, WRXN_MANAGED_CONFIRM: '' });
+  assert.notEqual(withToken.decision, 'block');
+  assert.deepEqual(withToken, without, 'the confirm token no longer changes the decision');
 });
 
 test('guard ALLOWS a seeded file edit freely', () => {
@@ -88,27 +98,26 @@ function gitInstall(prefix) {
   return { root, git };
 }
 
-test('precommit BLOCKS a commit staging a managed file', () => {
-  const { root, git } = gitInstall('wrxn-pc-block-');
+test('precommit ADVISES (never blocks) on a commit staging a managed file', () => {
+  const { root, git } = gitInstall('wrxn-pc-advise-');
   git('add', '.claude/constitution.md');
   const d = runHook(
     PRECOMMIT,
     { tool_input: { command: 'git commit -m x' } },
-    { CLAUDE_PROJECT_DIR: root, WRXN_MANAGED_CONFIRM: '' }
+    { CLAUDE_PROJECT_DIR: root }
   );
-  assert.equal(d.decision, 'block');
-  assert.match(d.reason, /constitution\.md/);
+  assert.notEqual(d.decision, 'block', 'the demoted precommit guard must never block');
+  assert.match(advisory(d), /constitution\.md/, 'the advisory names the staged managed file');
 });
 
-test('precommit ALLOWS the same commit with the confirm token', () => {
-  const { root, git } = gitInstall('wrxn-pc-confirm-');
+test('precommit advises identically whether or not WRXN_MANAGED_CONFIRM is set (token retired)', () => {
+  const { root, git } = gitInstall('wrxn-pc-tokendead-');
   git('add', '.claude/constitution.md');
-  const d = runHook(
-    PRECOMMIT,
-    { tool_input: { command: 'git commit -m x' } },
-    { CLAUDE_PROJECT_DIR: root, WRXN_MANAGED_CONFIRM: '1' }
-  );
-  assert.deepEqual(d, {});
+  const ev = { tool_input: { command: 'git commit -m x' } };
+  const withToken = runHook(PRECOMMIT, ev, { CLAUDE_PROJECT_DIR: root, WRXN_MANAGED_CONFIRM: '1' });
+  const without = runHook(PRECOMMIT, ev, { CLAUDE_PROJECT_DIR: root, WRXN_MANAGED_CONFIRM: '' });
+  assert.notEqual(withToken.decision, 'block');
+  assert.deepEqual(withToken, without, 'the confirm token no longer changes the decision');
 });
 
 test('precommit ALLOWS a commit staging only seeded/state files', () => {

@@ -20,12 +20,13 @@ const MIGRATION_FILE = '002-seeded-honesty.cjs';
 const migration = require('../migrations/' + MIGRATION_FILE);
 const realMigrationBody = () => fs.readFileSync(path.join(PKG_ROOT, 'migrations', MIGRATION_FILE), 'utf8');
 
-// The shipped honest seeds are the oracle: the migration must bring a stale install to EXACTLY the
-// content a new install gets. Read them off the real payload so any drift between the migration's
-// frozen constants and the shipped template fails the suite.
+// Migration 002 is a FROZEN historical transform of the 0.2.1 release: its oracle is the honest
+// content 002 itself promises. domain.md is still in lockstep with the shipped template (read off the
+// payload). The .synapse/routing seed, however, has since advanced past 0.2.1 to the gate-redesign
+// PR + CI + auto-merge model (gate-04) — so the routing oracle is 002's OWN frozen constant (read off
+// the immutable migration source), not the evolving template, while migration 002 stays byte-identical.
 const HONEST_DOMAIN = fs.readFileSync(path.join(PKG_ROOT, 'payload', 'docs', 'agents', 'domain.md'), 'utf8');
-const HONEST_ROUTING_LINE = fs.readFileSync(path.join(PKG_ROOT, 'payload', '.synapse', 'routing'), 'utf8')
-  .split('\n').find((l) => l.startsWith('ROUTING_RULE_0='));
+const HONEST_ROUTING_LINE = realMigrationBody().match(/'(ROUTING_RULE_0=[^']*)'/)[1];
 
 // The known-stale seeds a pre-0.2.1 install still carries on disk (the migration gates on these).
 const STALE_RULE0 =

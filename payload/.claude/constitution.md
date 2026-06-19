@@ -5,10 +5,11 @@ Project-local preferences live in the seeded `constitution.local.md` addendum, n
 
 ## Article I — Agent Authority (NON-NEGOTIABLE)
 
-- `git push`, PR creation, and release tags are deliberate acts, held behind a
-  confirmation flag to prevent an accidental push: the op proceeds only once the session
-  confirms intent by setting `WRXN_ACTIVE_AGENT=devops` in the machine-local
-  `.claude/settings.local.json`. `devops` here is a dispatch-phase label, not an authority grant.
+- `git push`, PR creation, and release tags are deliberate acts. The deliberate act is a
+  **pull request, not a settings flag**: the `devops` executor promotes via `wrxn ship`
+  (push the branch → open a PR → arm auto-merge), and a server-enforced GitHub ruleset blocks
+  direct pushes to the trunk and merges only once CI is green. No client-side env flag gates
+  the push; `devops` here is a dispatch-phase label, not an authority grant.
 - An agent acts only within its scope; it delegates when out of scope and never assumes
   another agent's authority.
 
@@ -20,8 +21,11 @@ Project-local preferences live in the seeded `constitution.local.md` addendum, n
 
 ## Article III — Quality-First
 
-- Tests and typecheck pass on every commit; the full suite green is the push gate.
-- Code review and security review gate integration; functional QA walks the real artifact.
+- Tests and typecheck pass on every commit; the **server-enforced CI check** (the project suite
+  plus kernel-universal checks) is the gate to the trunk — never a locally self-attested suite.
+- Code review and security review gate integration — run by the AFK `reviewer` + `security` agents
+  before the PR, with CI as the server-side backstop, not a self-written human-review marker;
+  functional QA walks the real artifact.
 - Coverage does not decrease.
 
 ## Article IV — No-Invention

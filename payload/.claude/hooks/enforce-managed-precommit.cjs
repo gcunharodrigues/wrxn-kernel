@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 'use strict';
 
-// WRXN managed hook — the commit-side half of the managed-files guard.
-// PreToolUse:Bash. Blocks a `git commit` that stages any MANAGED kernel file unless
-// WRXN_MANAGED_CONFIRM is set. Seeded + state files commit freely. Self-contained.
+// WRXN managed hook — the commit-side half of the managed-files heads-up.
+// PreToolUse:Bash. When a `git commit` stages any MANAGED kernel file it surfaces an ADVISORY
+// (never a block): managed-integrity is enforced server-side in CI (gate-redesign gate-04), so the
+// local hook only nudges. Seeded + state files are silent. Self-contained.
 //
-// Contract: PreToolUse event JSON on stdin → decision JSON on stdout (exit 0).
+// Contract: PreToolUse event JSON on stdin → JSON on stdout (exit 0). It NEVER blocks:
+//   silent → {}     advisory → { "hookSpecificOutput": { "hookEventName": "PreToolUse", "additionalContext": "..." } }
 
 const fs = require('fs');
 const path = require('path');
@@ -63,11 +65,12 @@ function main() {
   const hits = staged.filter((f) => managed.has(f));
   if (hits.length === 0) return emit({});
 
-  if (process.env.WRXN_MANAGED_CONFIRM) return emit({});
-
+  // Non-blocking advisory only (gate-04): never block, and the WRXN_MANAGED_CONFIRM token is retired.
   return emit({
-    decision: 'block',
-    reason: `Commit stages MANAGED kernel file(s): ${hits.join(', ')}. Set WRXN_MANAGED_CONFIRM to confirm an intentional kernel change.`,
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      additionalContext: `Heads-up: this commit stages MANAGED kernel file(s): ${hits.join(', ')}. Managed files are verified byte-for-byte by the server-side CI managed-integrity check — commit them only as a deliberate kernel change that will land through the PR + CI gate.`,
+    },
   });
 }
 

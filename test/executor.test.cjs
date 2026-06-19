@@ -85,23 +85,23 @@ test('buildDispatchSpec orders the tdd skill, isolation and the boundary constra
     'declares the structured report schema (AC-2)');
 });
 
-// ── devops push guidance honesty (foundation-honesty-01) ──────────────────────
-// Regression: the devops dispatch spec told the agent to push with an INLINE
-// `AIOX_ACTIVE_AGENT=devops` assignment — the wrong variable (the push-authority gate
-// reads WRXN_ACTIVE_AGENT) AND an inline assignment scopes to the git child, never
-// reaching the hook process. The flag must be set in settings.local.json so it reaches
-// the gate; otherwise a correctly-dispatched devops push is rejected by the install's own gate.
+// ── devops promotes via `wrxn ship`, not the retired env-flag dance (gate-redesign gate-04) ──
+// The WRXN_ACTIVE_AGENT / settings.local.json gate was proven a live no-op (2026-06-19 audit F1):
+// CC injects the env additively and a file "revert" never unsets it, so the documented dance
+// degraded to permanent-allow. It is replaced by `wrxn ship` (push the branch → open a PR → arm
+// auto-merge); the server-side CI ruleset is the authority. The devops dispatch spec must carry the
+// new model with NO trace of the retired dance.
 
-test('devops dispatch spec authorizes the push via WRXN_ACTIVE_AGENT in settings.local.json', () => {
+test('devops dispatch spec promotes via `wrxn ship`, with NO WRXN_ACTIVE_AGENT / settings.local.json dance', () => {
   const spec = buildDispatchSpec(FIXTURE_ISSUE, 'devops');
   const guidance = JSON.stringify(spec);
-  assert.match(guidance, /WRXN_ACTIVE_AGENT/, 'references the variable the push-authority gate actually reads');
-  assert.match(guidance, /settings\.local\.json/, 'sets the flag where it reaches the hook process');
-  assert.ok(!/AIOX_ACTIVE_AGENT/.test(guidance), 'no legacy variable name');
-  assert.ok(!/=devops/.test(guidance), 'no inline command-scoped assignment that never reaches the gate');
-  // A flag left set persists across sessions and turns the anti-accidental-push gate into a
-  // permanent no-op — the guidance must tell the agent to clear it after the push.
-  assert.match(guidance, /remove|revert/i, 'instructs removing/reverting the confirm-flag after the push (a persistent flag defeats the gate)');
+  assert.match(guidance, /wrxn ship/, 'promotes via the `wrxn ship` command (PR + auto-merge)');
+  assert.doesNotMatch(guidance, /WRXN_ACTIVE_AGENT/, 'the retired env-flag must be gone (audit F1: a live no-op)');
+  assert.doesNotMatch(guidance, /settings\.local\.json/, 'the settings.local.json dance must be gone');
+  assert.doesNotMatch(guidance, /AIOX_ACTIVE_AGENT/, 'no legacy variable name');
+  // devops is still the single push path — the spec must mark it the authorized pusher.
+  assert.equal(spec.executor, 'devops');
+  assert.match(JSON.stringify(spec.constraints).toLowerCase(), /push/, 'devops carries the push-path constraints');
 });
 
 // ── validateReport (AC-2 structured, AC-1 completion, AC-3 boundary) ──────────

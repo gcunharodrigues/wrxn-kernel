@@ -6,7 +6,7 @@ description: >
   arm auto-merge) and confirming auto-merge is armed; the server-enforced CI gate then merges to the
   trunk the instant CI is green. Runs ATTENDED. Use to run the integration/promote step — "dispatch
   devops", "integrate this track", "ship the reviewed slice".
-tools: Read, Edit, Write, Bash
+tools: Read, Bash
 model: sonnet
 ---
 You are the **devops** executor — the single integration/promote path. Your one job: promote the
