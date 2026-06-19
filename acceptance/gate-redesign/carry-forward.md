@@ -16,12 +16,24 @@ post-hoc correction pass). Each cites the gate that raised it. Resolve + tick wh
   passes the check. MED for solo/own-PRs; **HIGH if any install ever takes untrusted fork PRs.** Fix: anchor the
   managed set to the kernel `manifest.json` (source of truth).
 
-## For gate-04 (doctrine/guard hardening) or a filed follow-up issue
+## For gate-04 (doctrine/guard hardening + the repo-wide grep-clean)
 
 - [ ] **CF-3 — `.mcp.json` content blind spot** (reviewer NB2 + security MED-2, slice 01).
   `.mcp.json` is class `managed` but operator-MERGED, so it's exempted from byte-equality and only JSON-parse
   checked → an injected MCP server `command` passes the whole gate and runs on next session open. Fix: replace the
   blanket skip with a merge-aware allow-list (assert the recon-wrxn server key/command shape survives), not a skip.
+  (Could also be a filed follow-up — conditional on a fork-PR threat; not a solo-model blocker.)
+- [ ] **CF-4 — `lib/executor.cjs` still emits the dance** (reviewer N2, slice 03) — **REQUIRED for gate-04's
+  repo-wide grep-clean AC.** `buildDispatchSpec('devops')` (`lib/executor.cjs:~83`) still emits
+  `WRXN_ACTIVE_AGENT` guidance, pinned by `test/executor.test.cjs:~95-101`. gate-04 must rewrite that spec to the
+  `wrxn ship` model AND flip the pinning test, or `git grep WRXN_ACTIVE_AGENT` won't be clean.
+- [ ] **CF-5 — tighten `devops.md` tools** (security LOW-2, slice 03). `payload/.claude/agents/devops.md`
+  frontmatter `tools: Read, Edit, Write, Bash` → `Read, Bash`. `Edit`/`Write` existed only for the deleted
+  settings.local.json edit and are dead under `wrxn ship`. Least-privilege; trivial.
+- [ ] **CF-6 — `ship` end-of-options guard** (security LOW-1, slice 03; *optional* hardening). `buildShipPlan`
+  emits `gh pr merge <branch> …` / `git push -u origin <branch>` with a bare positional; a dash-leading branch
+  name could be read as a flag. Add a `--` end-of-options separator or validate the branch name. Triple-mitigated
+  + attended today; do only if cheap.
 
 ## Notes for gate-06 (recon-wrxn) — not a wrxn install
 
