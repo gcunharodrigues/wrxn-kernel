@@ -114,6 +114,11 @@
       "profile": "project"
     },
     {
+      "path": ".claude/skills/compass/SKILL.md",
+      "class": "managed",
+      "profile": "project"
+    },
+    {
       "path": ".claude/skills/diagnose/SKILL.md",
       "class": "managed",
       "profile": "project"
