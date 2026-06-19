@@ -17,6 +17,7 @@ const statusline = require('../lib/statusline.cjs');
 const { convert } = require('../lib/convert.cjs');
 const { ingest } = require('../lib/ingest.cjs');
 const { flowStatus } = require('../lib/flow-status.cjs');
+const ciChecks = require('../lib/ci-checks.cjs');
 
 const PKG_ROOT = path.join(__dirname, '..');
 
@@ -157,6 +158,14 @@ Usage:
   wrxn onboard [--root <dir>]    scaffold the Day-1 operator file set under context/ from a filled
                                  aios-intake.md (the deterministic half of the onboard skill;
                                  workspace installs only). Idempotent.
+
+  wrxn ci [--root <dir>]         run the universal CI checks over an install (the kernel-universal
+                                 half of the wrxn-ci gate): managed-file integrity (managed files not
+                                 drifted from kernel source), wiki-lint, synapse-manifest lint, JSON
+                                 validity, and node --check syntax over the shipped .cjs. Exits non-zero
+                                 on any failure. The wrxn-ci workflow runs this after the project's own
+                                 WRXN_TEST_CMD, so CI is never a vacuous pass — even a no-suite repo is
+                                 really gated.
 
   wrxn flow status <prd> [--root <dir>]
                                  print the flow-status board for a PRD's issue set. Reads issues
@@ -633,6 +642,18 @@ async function main(argv) {
     }
     process.stderr.write(`wrxn: unknown flow subcommand "${sub || ''}"\n\n${USAGE}\n`);
     return 2;
+  }
+
+  if (cmd === 'ci') {
+    const root = path.resolve(args.flags.root || process.cwd());
+    const { ok, results } = ciChecks.runChecks(root, { pkgRoot: PKG_ROOT });
+    process.stdout.write(`wrxn-ci (${root})\n`);
+    for (const c of results) {
+      process.stdout.write(`  ${c.ok ? '✓' : '✗'} ${c.name} — ${c.detail}\n`);
+      for (const f of c.failures) process.stdout.write(`      - ${f}\n`);
+    }
+    process.stdout.write(ok ? 'wrxn-ci PASS\n' : 'wrxn-ci FAIL\n');
+    return ok ? 0 : 2;
   }
 
   process.stderr.write(`wrxn: unknown command "${cmd}"\n\n${USAGE}\n`);

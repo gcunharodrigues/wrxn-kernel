@@ -439,6 +439,11 @@
       "profile": "workspace"
     },
     {
+      "path": ".github/workflows/wrxn-ci.yml",
+      "class": "managed",
+      "profile": "project"
+    },
+    {
       "path": ".mcp.json",
       "class": "managed",
       "profile": "project"
