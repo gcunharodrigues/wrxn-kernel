@@ -28,6 +28,13 @@ post-hoc correction pass). Each cites the gate that raised it. Resolve + tick wh
   `x-access-token` tag-push step → no npm step holds the write token. OIDC+provenance+concurrency preserved.
 - **slice-05 security LOW-1** — confirmed safe (only trusted constants — commit SHAs, `major|minor|patch` — in
   `run:` `${{ }}`; no attacker free-text). No change needed.
+- **slice-04 / gate-redesign-09 EPIPE flake** — a full-suite-parallel flake whose ROOT was real code:
+  `lib/protect.cjs defaultInvoke` treated ANY spawn error as fatal, discarding a successful `gh` apply (`status:0`)
+  when an EPIPE raced the stdin-write → real `wrxn protect` could spuriously report "skipped" on a successful
+  apply. **Closed in `d1d55ed`** (fail-soft only when the child never ran/ENOENT; honor exit-0 + EPIPE).
+  Deterministic regression test; 5/5 parallel runs green.
+- **slice-04 security SEC-LOW-1** — 6 agent specs cited the retired `WRXN_MANAGED_CONFIRM`. **Closed in `d25aeac`**
+  (reworded to the advisory + CI-teeth model; doctrine regression test added).
 
 ## Slice-02 deferred (non-blocking; decide at correction pass / bootstrap)
 
@@ -41,18 +48,14 @@ post-hoc correction pass). Each cites the gate that raised it. Resolve + tick wh
 
 ## For gate-04 (doctrine/guard hardening + the repo-wide grep-clean)
 
-- [ ] **CF-3 — `.mcp.json` content blind spot** (reviewer NB2 + security MED-2, slice 01).
-  `.mcp.json` is class `managed` but operator-MERGED, so it's exempted from byte-equality and only JSON-parse
-  checked → an injected MCP server `command` passes the whole gate and runs on next session open. Fix: replace the
-  blanket skip with a merge-aware allow-list (assert the recon-wrxn server key/command shape survives), not a skip.
-  (Could also be a filed follow-up — conditional on a fork-PR threat; not a solo-model blocker.)
-- [ ] **CF-4 — `lib/executor.cjs` still emits the dance** (reviewer N2, slice 03) — **REQUIRED for gate-04's
-  repo-wide grep-clean AC.** `buildDispatchSpec('devops')` (`lib/executor.cjs:~83`) still emits
-  `WRXN_ACTIVE_AGENT` guidance, pinned by `test/executor.test.cjs:~95-101`. gate-04 must rewrite that spec to the
-  `wrxn ship` model AND flip the pinning test, or `git grep WRXN_ACTIVE_AGENT` won't be clean.
-- [ ] **CF-5 — tighten `devops.md` tools** (security LOW-2, slice 03). `payload/.claude/agents/devops.md`
-  frontmatter `tools: Read, Edit, Write, Bash` → `Read, Bash`. `Edit`/`Write` existed only for the deleted
-  settings.local.json edit and are dead under `wrxn ship`. Least-privilege; trivial.
+- **CF-3 — `.mcp.json` content blind spot → FILED as `issues/10-harden-mcp-json-managed-integrity.md`**
+  (reviewer NB2 + security MED-2 slice 01; **slice-04 security SEC-MED-1 WIDENED it** — gate-04's advisory demotion
+  removed the last local backstop). NOT fixed in-build: the clean fix needs design (`.mcp.json` is operator-
+  extensible → can't byte-check or strict-allow-list without false-positives). Conditional on `.mcp.json`-write
+  access; solo-model low-risk. Human decides at correction-pass / accept.
+- [x] **CF-4 — `lib/executor.cjs` still emits the dance** ✅ done in gate-04 (`8071950`): `buildDispatchSpec('devops')`
+  rewritten to the `wrxn ship` model; `test/executor.test.cjs` flipped to assert the dance is absent. (reviewer N2, slice 03.)
+- [x] **CF-5 — tighten `devops.md` tools** ✅ done in gate-04 (`8071950`): `tools: Read, Bash`. (security LOW-2, slice 03.)
 - [ ] **CF-6 — `ship` end-of-options guard** (security LOW-1, slice 03; *optional* hardening). `buildShipPlan`
   emits `gh pr merge <branch> …` / `git push -u origin <branch>` with a bare positional; a dash-leading branch
   name could be read as a flag. Add a `--` end-of-options separator or validate the branch name. Triple-mitigated
@@ -99,3 +102,20 @@ PRD "Bootstrap" + ADR consequences). Captured here so the final human-accept rep
   **WRXN-OS last**. recon-wrxn (slice 06) is a separate one-time apply.
 - **`package.json` is already `0.11.0`** (bumped in gate-02 by the no-inert-migration invariant) — the epic's
   release version; do NOT re-bump. The first merge to `main` carrying `feat:`/`fix:` commits auto-publishes it.
+- **WRXN-OS wiki concept reconcile** (gate-redesign-08, `issues/08-*.md`; review + qa-walk, slice 04): the WRXN-OS
+  install's `.wrxn/wiki/concepts/wrxn-git-push-authority-hook.md` still teaches the `WRXN_ACTIVE_AGENT` dance and
+  its `derived_from` points at the now-deleted hook. It's `seeded` install-state (NOT a kernel file — `wrxn update`
+  won't overwrite it). When WRXN-OS updates to 0.11.0 (last), reconcile this page to the PR+CI+auto-merge model via
+  `dream`/`harvest` or a direct edit.
+
+## Slice-04 deferred (kernel-side correction-pass — non-blocking)
+
+- **synapse skill teaching docs** (review flag-7b, slice 04): `payload/.claude/skills/synapse/{SKILL.md,
+  references/domains.md, references/layers.md}` use the OLD confirmation-flag rule as illustrative format examples
+  (and `domains.md:37` calls `.synapse/global` "the green-suite push gate"). No `WRXN_ACTIVE_AGENT`/dance (no
+  grep-trip); ~9 spots across 3 files. Teaching content outside issue-04's `.synapse/*` rule-text scope. Refresh
+  for consistency.
+- **seeded `.synapse/routing` reach** (review flag-7a, slice 04): the new ROUTING_RULE_0 is class `seeded` → reaches
+  NEW installs only; existing installs keep their old routing echo (the managed GLOBAL_RULE_0 DOES update, carrying
+  the real doctrine). Carrying existing installs' seeded routing forward would need a seed-honesty migration like
+  `002` — decide whether that's worth a migration `006` or just left (managed doctrine already carries the change).
