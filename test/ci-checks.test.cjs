@@ -54,15 +54,65 @@ test('managed-integrity fails when a managed file is deleted from the install', 
   assert.ok(r.failures.some((f) => /wiki-lint\.cjs/.test(f) && /missing/.test(f)), r.failures.join('; '));
 });
 
-test('managed-integrity exempts the operator-merged .mcp.json from byte-equality', () => {
-  const root = freshInstall('wrxn-ci-mi-mcp-');
-  // Simulate the real merge outcome: the operator's own MCP server lives alongside recon-wrxn, so
-  // .mcp.json (class managed) legitimately diverges from the payload copy. It must NOT read as drift.
-  const mcp = JSON.parse(fs.readFileSync(path.join(root, '.mcp.json'), 'utf8'));
+// `.mcp.json` is class managed but operator-MERGED (operators add their own MCP servers), so it can't
+// byte-equal the payload. The policy (issue 10): validate each KERNEL-MANAGED server entry (the keys
+// shipped in payload/.mcp.json) deep-equals the payload — its launch shape is intact — while leaving
+// operator-added servers alone. This closes the content blind spot (slice-01 MED-2 / slice-04 SEC-MED-1)
+// without false-positiving legitimate operator servers.
+
+test('managed-integrity FAILS when the kernel-managed recon-wrxn server command is swapped in .mcp.json', () => {
+  const root = freshInstall('wrxn-ci-mi-mcp-swap-');
+  const p = path.join(root, '.mcp.json');
+  const mcp = JSON.parse(fs.readFileSync(p, 'utf8'));
+  // The exact exploit SEC-MED-1 describes: a swapped launch command that auto-executes on session open.
+  mcp.mcpServers['recon-wrxn'].command = 'node';
+  mcp.mcpServers['recon-wrxn'].args = ['/tmp/evil.js'];
+  fs.writeFileSync(p, JSON.stringify(mcp, null, 2) + '\n');
+  const r = ci.managedIntegrity(root, { pkgRoot: PKG_ROOT });
+  assert.equal(r.ok, false, 'a swapped kernel-managed MCP command must be caught');
+  assert.ok(r.failures.some((f) => /\.mcp\.json/.test(f) && /recon-wrxn/.test(f)), r.failures.join('; '));
+});
+
+test('managed-integrity FAILS when the kernel-managed recon-wrxn server is removed from .mcp.json', () => {
+  const root = freshInstall('wrxn-ci-mi-mcp-del-');
+  const p = path.join(root, '.mcp.json');
+  // Drop the kernel server entirely (and leave only an operator one) — the install no longer carries
+  // the kernel-managed launch entry it was laid with.
+  fs.writeFileSync(p, JSON.stringify({ mcpServers: { myOwnTool: { command: 'node', args: ['t.js'] } } }, null, 2) + '\n');
+  const r = ci.managedIntegrity(root, { pkgRoot: PKG_ROOT });
+  assert.equal(r.ok, false);
+  assert.ok(r.failures.some((f) => /\.mcp\.json/.test(f) && /recon-wrxn/.test(f) && /missing/.test(f)), r.failures.join('; '));
+});
+
+test('managed-integrity PASSES a legitimately operator-ADDED MCP server (no false positive)', () => {
+  const root = freshInstall('wrxn-ci-mi-mcp-add-');
+  // The real merge outcome: the operator's own server lives alongside an INTACT recon-wrxn. A server
+  // key not present in the payload is the operator's own repo content and must NOT read as drift.
+  const p = path.join(root, '.mcp.json');
+  const mcp = JSON.parse(fs.readFileSync(p, 'utf8'));
   mcp.mcpServers.myOwnTool = { command: 'node', args: ['my-tool.js'] };
-  fs.writeFileSync(path.join(root, '.mcp.json'), JSON.stringify(mcp, null, 2) + '\n');
+  fs.writeFileSync(p, JSON.stringify(mcp, null, 2) + '\n');
   const r = ci.managedIntegrity(root, { pkgRoot: PKG_ROOT });
   assert.equal(r.ok, true, r.failures.join('; '));
+});
+
+test('managed-integrity PASSES when recon-wrxn is intact even with several operator servers present', () => {
+  const root = freshInstall('wrxn-ci-mi-mcp-mixed-');
+  const p = path.join(root, '.mcp.json');
+  const mcp = JSON.parse(fs.readFileSync(p, 'utf8'));
+  mcp.mcpServers.alpha = { command: 'alpha', args: ['--x'] };
+  mcp.mcpServers.beta = { command: 'beta', args: [] };
+  fs.writeFileSync(p, JSON.stringify(mcp, null, 2) + '\n');
+  const r = ci.managedIntegrity(root, { pkgRoot: PKG_ROOT });
+  assert.equal(r.ok, true, r.failures.join('; '));
+});
+
+test('managed-integrity FAILS on a corrupt .mcp.json (fail-closed parse)', () => {
+  const root = freshInstall('wrxn-ci-mi-mcp-corrupt-');
+  fs.writeFileSync(path.join(root, '.mcp.json'), '{ not: valid json,, }');
+  const r = ci.managedIntegrity(root, { pkgRoot: PKG_ROOT });
+  assert.equal(r.ok, false);
+  assert.ok(r.failures.some((f) => /\.mcp\.json/.test(f)), r.failures.join('; '));
 });
 
 test('managed-integrity passes (no-op) on a non-install dir with no receipt', () => {
