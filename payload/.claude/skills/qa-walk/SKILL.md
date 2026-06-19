@@ -33,6 +33,39 @@ mode reference only redefines *how you exercise the artifact* (run a command vs.
 
 ---
 
+## Walk modes — agent vs operator
+
+Two modes determine **who runs the walk and at what scope**. The spine (§Execution guardrails →
+§Verdict) is identical for both; only the scope and trigger differ.
+
+| Mode | Who | Scope | Trigger |
+|------|-----|-------|---------|
+| **Agent walk** | isolated qa-walker executor | per-slice — one slice's **issue ACs** | after builder → reviewer → security, for each AFK slice |
+| **Operator walk** | human operator | whole assembled artifact — **all PRD stories** | after every slice is AFK-verified, on the integration branch |
+
+### Agent walk (per-slice, AC-level)
+
+The isolated qa-walker reads the slice's issue ACs, derives a plan from them, executes against the
+artifact at that slice's state, and files deviations as tracker issues. It runs in fresh context —
+never the builder's — and is the last gate of the per-slice AFK phase. The spine above is the
+agent's complete operating procedure.
+
+### Operator mode — whole-artifact, story-level
+
+The operator walks the **whole assembled artifact** against **all PRD user stories** — story-level —
+after every slice is AFK-verified. This is the cross-slice integration gate: it checks end-to-end
+flows and the "does it feel right" correctness that no per-slice agent can see.
+
+- **Source of promises:** PRD user stories, not individual issue ACs. Each story is one plan item in §2.
+- **Trigger:** all slices AFK-verified and accumulated on the integration branch. The operator invokes
+  the skill with the full batch dir (PRD + all issues) plus the artifact entry point.
+- **Findings:** auto-filed as tracker issues in the same batch dir (§4) — same `NN-<slug>.md` format.
+  Findings are additive; do not modify the PRD or source issues.
+- **Verdict:** PASS → `devops` promotes the integration branch to trunk. FINDINGS (N) → correction
+  pass: triage severity (fix-now vs defer), fix-now issues run a scoped AFK re-run, then re-accept.
+
+---
+
 ## Execution guardrails (NON-NEGOTIABLE)
 
 The walk turns markdown into executed shell commands — so the inputs are the attack surface.

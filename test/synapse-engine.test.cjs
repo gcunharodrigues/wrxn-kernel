@@ -91,6 +91,48 @@ test('a generous budget keeps every section and emits no trim marker', () => {
   assert.doesNotMatch(ctx, /\[SYNAPSE-RULES-TRIM\]/);
 });
 
+// ── flow-01: the four-phase build-flow doctrine injects as always-on PIPELINE, within budget ──
+// ADR 0006 rewrites the pipeline domain from the linear unified-dev route into the four-phase flow:
+// HITL phase → AFK phase (per slice) → human qa-walk → correction pass. It must inject as always-on
+// doctrine AND fit the DEFAULT token-budget governor (no trim) alongside GLOBAL — proven black-box
+// through the engine (Seam 2: presence + budget), using the CONTEXT.md "Build flow" glossary terms.
+test('the pipeline domain injects the four-phase flow doctrine within the default budget governor', () => {
+  const root = freshInstall('wrxn-syn-flow-');
+  // DEFAULT budget (no WRXN_RULES_BUDGET) and a prompt with no recall trigger — so the doctrine must
+  // fit the 600-token governor next to GLOBAL or PIPELINE would be the first trimmable section dropped.
+  const ctx = inject({ prompt: 'build me a feature', cwd: root }, { CLAUDE_PROJECT_DIR: root });
+
+  // injects as always-on doctrine within the governor: PIPELINE + GLOBAL present, nothing trimmed.
+  assert.match(ctx, /\[PIPELINE\]/);
+  assert.match(ctx, /\[GLOBAL\]/);
+  assert.doesNotMatch(ctx, /\[SYNAPSE-RULES-TRIM\]/);
+
+  // the four phases, named with the glossary terms, inject in flow order.
+  assert.match(ctx, /HITL phase/);
+  assert.match(ctx, /AFK phase/);
+  assert.match(ctx, /human qa-walk/);
+  assert.match(ctx, /correction pass/);
+  const iHitl = ctx.indexOf('HITL phase');
+  const iAfk = ctx.indexOf('AFK phase');
+  const iHuman = ctx.indexOf('human qa-walk');
+  const iCorr = ctx.indexOf('correction pass');
+  assert.ok(iHitl < iAfk && iAfk < iHuman && iHuman < iCorr, 'the four phases inject in flow order');
+
+  // per-slice AFK gate order + review/security per slice, not batched after the build.
+  assert.match(ctx, /builder → reviewer → security → agent qa-walk/);
+  assert.match(ctx, /per slice/);
+  assert.match(ctx, /not batched/);
+
+  // integration branch staging + the single post-accept trunk push (devops alone).
+  assert.match(ctx, /integration branch/);
+  assert.match(ctx, /trunk/);
+
+  // retained doctrine: scale-to-novelty, executors, and each executor reads its real skill file.
+  assert.match(ctx, /novelty/);
+  assert.match(ctx, /executor/);
+  assert.match(ctx, /reads and follows the actual skill file/);
+});
+
 test('no-op (empty object) when not inside a wrxn install', () => {
   const bare = tmp('wrxn-syn-noinstall-');
   const env = runEngine({ prompt: 'hello', cwd: bare }, { CLAUDE_PROJECT_DIR: bare });

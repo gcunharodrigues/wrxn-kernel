@@ -4,6 +4,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { execFileSync } = require('child_process');
 
 const { init } = require('../lib/install.cjs');
 const { update } = require('../lib/update.cjs');
@@ -15,12 +16,19 @@ const brain = require('../lib/brain.cjs');
 const statusline = require('../lib/statusline.cjs');
 const { convert } = require('../lib/convert.cjs');
 const { ingest } = require('../lib/ingest.cjs');
+const { flowStatus } = require('../lib/flow-status.cjs');
 
 const PKG_ROOT = path.join(__dirname, '..');
 
 function version() {
   const pkg = JSON.parse(fs.readFileSync(path.join(PKG_ROOT, 'package.json'), 'utf8'));
   return pkg.version;
+}
+
+// Escape a dynamic fragment before embedding it in a RegExp. Slice ids derive from the prd slug and
+// issue filenames, so an unescaped metachar would otherwise build an invalid pattern (crash / ReDoS).
+function escapeRegExp(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function parseArgs(argv) {
@@ -149,6 +157,14 @@ Usage:
   wrxn onboard [--root <dir>]    scaffold the Day-1 operator file set under context/ from a filled
                                  aios-intake.md (the deterministic half of the onboard skill;
                                  workspace installs only). Idempotent.
+
+  wrxn flow status <prd> [--root <dir>]
+                                 print the flow-status board for a PRD's issue set. Reads issues
+                                 from .scratch/<prd>/issues/, detects gate artifacts (green commit
+                                 via git log, review-<id>.md, security-<id>.md, walk-findings-<id>.md),
+                                 and prints per-slice gate progress (build/review/sec/qa) plus state
+                                 (done | in-progress | stalled | queued). No separate state store —
+                                 derives from the durable artifacts only.
 
 Profiles: --project (default, the dev pipeline + intelligence + enforcement) |
           --workspace (adds the operator layer: onboard/audit/level-up + intake + decisions log +
@@ -488,6 +504,135 @@ async function main(argv) {
       ? `Enable: wrxn statusline --inject   (appends idempotently to ${detection.scriptPath})\n`
       : 'Enable: wrxn statusline --inject --path <your-statusline-script>\n');
     return 0;
+  }
+
+  if (cmd === 'flow') {
+    const sub = args._[1];
+    if (sub === 'status') {
+      const prd = args._[2];
+      if (!prd) {
+        process.stderr.write('wrxn: flow status requires <prd>\n');
+        return 2;
+      }
+      const root = path.resolve(args.flags.root || process.cwd());
+      // S2: prd flows into a filesystem path — keep it a plain dir name contained within
+      // <root>/.scratch/. Reject "..", absolute paths, and anything that resolves outside .scratch/.
+      const scratchRoot = path.join(root, '.scratch');
+      const issuesDir = path.join(scratchRoot, prd, 'issues');
+      if (prd.includes('..') || path.isAbsolute(prd)
+          || !path.resolve(issuesDir).startsWith(path.resolve(scratchRoot) + path.sep)) {
+        process.stderr.write(`wrxn: invalid prd "${prd}" — must be a directory name under .scratch/\n`);
+        return 2;
+      }
+
+      // Read issue files sorted by filename (numeric ordering preserved by filename prefix)
+      let issueFiles;
+      try {
+        issueFiles = fs.readdirSync(issuesDir).filter((f) => f.endsWith('.md')).sort();
+      } catch (err) {
+        process.stderr.write(`wrxn: cannot read issues from ${issuesDir}: ${err.message}\n`);
+        return 2;
+      }
+
+      // Derive the id prefix from the PRD slug (e.g. "flow-redesign" → "flow", "myprd" → "myprd")
+      const prdPrefix = prd.split('-')[0];
+
+      // Parse each issue file: id from filename, title + blockedBy from content
+      const issues = issueFiles.map((f) => {
+        const stem = f.replace(/\.md$/, '');
+        const numMatch = stem.match(/^(\d+)/);
+        const num = numMatch ? numMatch[1] : stem;
+        const id = `${prdPrefix}-${num}`;
+        let title = stem;
+        const blockedBy = [];
+        try {
+          const text = fs.readFileSync(path.join(issuesDir, f), 'utf8');
+          // First heading: # N — Title (em-dash or hyphen)
+          const titleMatch = text.match(/^#\s+\d+\s*[—\-]\s*(.+)/m);
+          if (titleMatch) title = titleMatch[1].trim();
+          // ## Blocked by section — bullet items
+          let inBlocked = false;
+          for (const line of text.split('\n')) {
+            if (/^##\s+/.test(line)) { inBlocked = /^##\s+blocked by/i.test(line); continue; }
+            if (inBlocked) {
+              const m = line.match(/^\s*-\s+(.+)$/);
+              if (m) {
+                const item = m[1].trim();
+                // B1: the "None — can start immediately." sentinel is not a real dependency.
+                if (/^none\b/i.test(item)) continue;
+                // B2: normalize a "02 (desc)." bullet to the canonical id "<prefix>-02" so it can be
+                // resolved against the done set. A bullet that is already an id is kept as-is.
+                const numM = item.match(/^(\d+)/);
+                blockedBy.push(numM ? `${prdPrefix}-${numM[1]}` : item);
+              }
+            }
+          }
+        } catch { /* id still usable without content */ }
+        return { id, title, blockedBy };
+      });
+
+      // git log for greenCommit detection — fail-open (not a git repo is fine)
+      let gitLog = '';
+      try {
+        gitLog = execFileSync('git', ['-C', root, 'log', '--all', '--oneline'], {
+          encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'],
+        });
+      } catch { /* not a repo, or git unavailable — all build gates stay pending */ }
+
+      // Look for an artifact file in the common locations an executor would write it
+      function findArtifactFile(name) {
+        const candidates = [
+          path.join(root, name),
+          path.join(root, '.scratch', prd, name),
+          path.join(root, '.claude', 'ai', 'output', name),
+        ];
+        for (const c of candidates) {
+          try { if (fs.existsSync(c)) return c; } catch { /* skip */ }
+        }
+        return null;
+      }
+
+      // Build artifact map for flowStatus
+      const artifacts = {};
+      for (const issue of issues) {
+        const { id } = issue;
+        const entry = {};
+        // greenCommit: commit message containing [id] or the bare id word.
+        // S1: escape the id (+ guard construction) so a metachar id can never build an invalid RegExp.
+        const eid = escapeRegExp(id);
+        let re;
+        try { re = new RegExp(`\\[${eid}\\]|\\b${eid}\\b`); } catch { re = null; }
+        const commitLine = re ? gitLog.split('\n').find((l) => re.test(l)) : null;
+        if (commitLine) entry.greenCommit = commitLine.trim().split(/\s+/)[0];
+        // review marker
+        const reviewFile = findArtifactFile(`review-${id}.md`);
+        if (reviewFile) entry.reviewMarker = reviewFile;
+        // security report
+        const secFile = findArtifactFile(`security-${id}.md`);
+        if (secFile) entry.securityReport = secFile;
+        // walk findings (two common naming conventions)
+        const walkFile = findArtifactFile(`walk-findings-${id}.md`) || findArtifactFile(`walk-${id}.md`);
+        if (walkFile) entry.walkFindings = walkFile;
+        artifacts[id] = entry;
+      }
+
+      const board = flowStatus(issues, artifacts);
+
+      // Print readable board: id  build✓ review· sec· qa·  state
+      for (const slice of board) {
+        const g = slice.gates;
+        const cols = [
+          `build${g.build === 'done' ? '✓' : '·'}`,
+          `review${g.review === 'done' ? '✓' : '·'}`,
+          `sec${g.security === 'done' ? '✓' : '·'}`,
+          `qa${g.qa === 'done' ? '✓' : '·'}`,
+        ];
+        process.stdout.write(`${slice.id.padEnd(16)} ${cols.join(' ')}  ${slice.state}\n`);
+      }
+      return 0;
+    }
+    process.stderr.write(`wrxn: unknown flow subcommand "${sub || ''}"\n\n${USAGE}\n`);
+    return 2;
   }
 
   process.stderr.write(`wrxn: unknown command "${cmd}"\n\n${USAGE}\n`);
