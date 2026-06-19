@@ -58,6 +58,11 @@ security report, walk-findings), so it cannot drift.
 - **Create a skill** → **write-a-skill** only — `skill-creator` is **legacy** (kept for its init /
   package / quick-validate scripts; retired in a later issue). Never route new skill authoring to it.
 - **Create an agent / subagent** → **write-an-agent**.
+- **Never delegate a HITL step to a generic agent** — `grill`, `to-prd`, `to-issues`, and the verticality
+  gate are decided in the **main thread** with the operator, never handed to a `general-purpose` (or any
+  non-typed) subagent. Only the six typed executors run unattended. The `enforce-pipeline-adherence` guard
+  (PreToolUse:Task) hard-blocks that delegation and names the right main-thread skill — doctrine alone
+  proved insufficient (the pipeline was skipped this way on 2026-06-19).
 - Anything else → match the request to a bucket below, then to the skill whose `description` fits.
 
 ## Live read (do this every invoke — the map can't go stale)

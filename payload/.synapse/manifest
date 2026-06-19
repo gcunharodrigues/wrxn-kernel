@@ -30,9 +30,10 @@ ROUTING_RECALL=deploy,worktree,push,pull request,release,new project,issue
 # Budget governor — ceiling (in tokens) on the TRIMMABLE sections (everything except the
 # Constitution, which is always kept). Over-budget sections are dropped lowest-priority-first
 # with a visible [SYNAPSE-RULES-TRIM] marker. Override with WRXN_RULES_BUDGET.
-# 800 fits the always-on doctrine (GLOBAL ~188 + the four-phase PIPELINE ~382) plus a firing
-# keyword-recall domain (e.g. ROUTING ~153) with margin, so a recall trigger never trims the doctrine.
-RULES_BUDGET_TOKENS=800
+# 900 fits the always-on doctrine (GLOBAL ~188 + the six-rule PIPELINE ~483, which now carries the
+# pipeline-adherence rule) plus a firing keyword-recall domain (e.g. ROUTING ~153) with margin, so a
+# recall trigger never trims the doctrine.
+RULES_BUDGET_TOKENS=900
 
 # Forced-handoff threshold — fraction of the REAL model window consumed at which the engine injects
 # the NON-BLOCKING [HANDOFF REQUIRED] directive. The window is read from ~/.claude.json ([1m] tag ⇒

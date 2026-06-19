@@ -31,6 +31,12 @@
           { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/enforce-tests-on-push.cjs\"" },
           { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/enforce-review-marker.cjs\"" }
         ]
+      },
+      {
+        "matcher": "Task",
+        "hooks": [
+          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/enforce-pipeline-adherence.cjs\"" }
+        ]
       }
     ],
     "PostToolUse": [
