@@ -5,16 +5,34 @@ post-hoc correction pass). Each cites the gate that raised it. Resolve + tick wh
 
 ## For gate-02 (`wrxn protect` + update/receipt wiring — owns the version/receipt logic)
 
-- [ ] **CF-1 — pin `wrxn ci` to the install's kernel version** (reviewer NB1 + security MED-3, slice 01).
+- [x] **CF-1 — pin `wrxn ci` to the install's kernel version** ✅ folded into gate-02 (`e40721e`). (reviewer NB1 + security MED-3, slice 01).
   `payload/.github/workflows/wrxn-ci.yml` runs `npx --yes @gcunharodrigues/wrxn ci` → floats to `latest`, so
   `managedIntegrity` byte-compares managed files against the *latest* payload, not the version that laid them →
   version-skew reads as drift with zero tampering. Fails closed (safe) but noisy. Fix: pin the invoked kernel to
   the receipt `kernelVersion` (e.g. `npx --yes @gcunharodrigues/wrxn@$VER ci`, VER read from `wrxn.install.json`).
-- [ ] **CF-2 — anchor managed-integrity scope to `manifest.json`, not the receipt** (security MED-1, slice 01).
-  `managedIntegrity` derives its managed-file SET from the install's `wrxn.install.json`, which is itself not in
-  the manifest and never integrity-checked → editing a managed file + dropping/reclassifying its receipt entry
-  passes the check. MED for solo/own-PRs; **HIGH if any install ever takes untrusted fork PRs.** Fix: anchor the
-  managed set to the kernel `manifest.json` (source of truth).
+- [x] **CF-2 — anchor managed-integrity scope to `manifest.json`, not the receipt** ✅ folded into gate-02
+  (`e40721e`). (security MED-1, slice 01.) `managedIntegrity` now anchors its managed SET to the kernel
+  `manifest.json`; the receipt is trusted only for profile, and a present managed file must byte-match regardless
+  → dropping/reclassifying or profile-flipping a receipt entry can no longer hide drift.
+
+## Resolved during the build (not deferred)
+
+- **CF-1 + CF-2** — folded into gate-02 (`e40721e`).
+- **slice-02 security MED-1** — `wrxn update` silently dropped `report.protection` (the epic's own "silent
+  no-op gate" anti-pattern, on the PRIMARY delivery path). **Closed in `4ea456b`**: update now prints
+  `protection: …` / `protection skipped: …`; fail-soft preserved (still exit 0).
+- **slice-02 security LOW-1** — `parseSlug` too permissive. **Closed in `4ea456b`** (strict `owner/repo` grammar
+  rejecting `../x`, spaces, `;`, `$()`, backticks).
+
+## Slice-02 deferred (non-blocking; decide at correction pass / bootstrap)
+
+- **LOW-2** — a fresh `wrxn init` does not apply protection; installs are unprotected until their first
+  `wrxn update` (when a remote usually exists). By-design-ish; bootstrap/onboarding docs should note "protection
+  lands on first update after a remote exists." Note, don't fix unless cheap.
+- **review NB (CF-2 residual)** — for files present ONLY in the workspace profile, the missing-file branch still
+  trusts the receipt profile (a present file always byte-matches regardless). Bounded residual, not the MED-1 hole.
+- **review NB** — standalone `wrxn protect` returns exit 0 even on hard inability (AC-conformant; `update` safety
+  is independent). Optional: non-zero on hard failure for standalone only.
 
 ## For gate-04 (doctrine/guard hardening + the repo-wide grep-clean)
 
