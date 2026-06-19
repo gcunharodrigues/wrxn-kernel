@@ -180,6 +180,20 @@ test('recall matching is case-insensitive', () => {
   assert.match(ctx, /\[RECALL: routing\]/);
 });
 
+// ── flow-redesign polish: full always-on doctrine + a firing recall domain fit the DEFAULT budget ──
+// Regression: the four-phase PIPELINE doctrine (flow-01) grew the always-on layer; together with GLOBAL it
+// must still leave room for a firing keyword-recall domain under the DEFAULT budget — otherwise a routing-
+// trigger prompt silently trims [RECALL: routing]. The recall tests above all use a generous budget, so
+// none guards this. Asserts GLOBAL + PIPELINE + the routing recall all inject with no trim at default.
+test('GLOBAL + PIPELINE + a firing recall domain all fit the default budget (no trim)', () => {
+  const root = freshInstall('wrxn-syn-budget-fit-');
+  const ctx = inject({ prompt: 'how do I deploy this to prod', cwd: root }, { CLAUDE_PROJECT_DIR: root });
+  assert.match(ctx, /\[GLOBAL\]/);
+  assert.match(ctx, /\[PIPELINE\]/);
+  assert.match(ctx, /\[RECALL: routing\]/);
+  assert.doesNotMatch(ctx, /\[SYNAPSE-RULES-TRIM\]/);
+});
+
 // ── 06c token-base + forced handoff ────────────────────────────────────────────
 
 // Write a transcript JSONL whose last assistant line carries the given usage; return its path.
