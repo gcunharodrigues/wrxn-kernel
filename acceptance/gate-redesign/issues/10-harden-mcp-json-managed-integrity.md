@@ -1,6 +1,9 @@
 # 10 — Harden `.mcp.json` managed-integrity (close the content blind spot)
 
-Status: filed-follow-up (non-blocking; conditional on `.mcp.json`-write access — solo-model low-risk)
+Status: **RESOLVED 2026-06-19** in `41cebc0` (correction pass) — `managedIntegrity` now deep-equals each
+kernel-managed `.mcp.json` server vs payload (catches command/args/env tamper + removal; operator-added servers
+pass; corrupt fails closed). Re-gated: review APPROVE / security PASS / qa-walk. Residual (operator-added servers
+un-judged) is the tightest false-positive-free boundary, documented + accepted.
 Raised by: slice-01 review NB2 + slice-01 security MED-2 (CF-3) + slice-04 security SEC-MED-1 (gate-04 widened it)
 
 ## Problem

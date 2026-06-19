@@ -3,6 +3,21 @@
 Non-blocking findings raised by a slice's gates that the *owning* slice should fix (cheaper there than a
 post-hoc correction pass). Each cites the gate that raised it. Resolve + tick when the owning slice lands.
 
+## ✅ Correction pass COMPLETE (2026-06-19) — all actionable items resolved + re-gated (783/783)
+
+Operator said "fix all" → a full correction pass ran (3 builders → reviewer+security+qa-walk, all clean):
+- **issue 10 `.mcp.json` blind spot** → `41cebc0` (deep-equal kernel-managed servers; also closes env-injection).
+- **seeded `.synapse/routing` reach** → migration `006` `4b933de` (refresh existing installs; idempotent + operator-safe).
+- **synapse teaching docs** → `54ada8f` (grep-clean of the old model).
+- **CF-6 `ship --` guard** → `823db31`. **slice-07 null-guard + PRD read-vs-write tighten** → `7821ed4`.
+- Markers: `acceptance/gate-redesign/correction/{review,security,qa-walk}.md`.
+
+**Deliberately NOT fixed (documented, low):** the **CF-2 workspace residual** (a workspace install could delete a
+workspace-only managed file AND flip its receipt profile to hide it) — no clean cheap fix exists (no un-forgeable
+"this is a workspace install" signal; the present-file tamper case IS covered). The WRXN-OS **wiki-concept reconcile**
+stays a bootstrap task (install-state, not a kernel file). 2 cosmetic reviewer nits (gh-pr-create `--head=`,
+gate-10/jsonValidity double-parse) left as optional.
+
 ## For gate-02 (`wrxn protect` + update/receipt wiring — owns the version/receipt logic)
 
 - [x] **CF-1 — pin `wrxn ci` to the install's kernel version** ✅ folded into gate-02 (`e40721e`). (reviewer NB1 + security MED-3, slice 01).

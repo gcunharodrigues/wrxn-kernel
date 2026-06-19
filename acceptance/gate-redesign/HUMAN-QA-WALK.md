@@ -39,11 +39,15 @@ contradiction in the live payload). The only things NOT demonstrated here are de
 
 Recommend **ACCEPT**, then proceed to the bootstrap (the L-tails ARE the bootstrap's acceptance walk).
 
-## Still open (operator decides)
+## Still open
 
-1. **Filed follow-up — `issues/10-harden-mcp-json-managed-integrity.md`** (SEC-MED, conditional on `.mcp.json`-write,
-   needs design — operator-extensible file). Fix-before-land or accept-and-track? Solo-model low-risk.
-2. **Kernel-side correction-pass deferrals** (`carry-forward.md`): synapse skill teaching-docs refresh; seeded
-   `.synapse/routing` reach (decide: a migration `006` to refresh existing installs, or leave — managed doctrine
-   already carries the change). Optional LOW nits (CF-6 `ship --` guard, slice-07 null-guard).
+**Correction pass COMPLETE (2026-06-19)** — operator said "fix all"; every actionable item fixed + re-gated
+(suite 783/783, reviewer APPROVE / security PASS / qa-walk 22/22 — `correction/` markers):
+- issue 10 `.mcp.json` blind spot → `41cebc0` · seeded routing → migration `006` `4b933de` · synapse teaching
+  docs → `54ada8f` · CF-6 ship `--` guard → `823db31` · slice-07 null-guard + PRD tighten → `7821ed4`.
+
+Remaining (not kernel-fixable now):
+1. **CF-2 workspace residual** — deliberately not fixed (no clean cheap fix; documented, low; the tamper case IS
+   covered). See `carry-forward.md`.
+2. **Story 17 — WRXN-OS wiki concept** reconcile — bootstrap task (install-state, happens at the WRXN-OS update).
 3. **The bootstrap sequence** (land-then-apply) — operator/devops act, fresh session + npm auth (see BUILD-SUMMARY).

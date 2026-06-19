@@ -37,12 +37,12 @@ check → auto-merge lands it on green. No clicks, no env flag.
 - **slice-04 SEC-LOW-1** — 6 agent specs cited the retired `WRXN_MANAGED_CONFIRM` → `d25aeac`.
 - Plus CF-1/CF-2 (gate-02), CF-4/CF-5 (gate-04), slice-03 + slice-06 LOW runbook additions.
 
-## Open items (operator decides at correction-pass / accept)
+## Open items
 
-- **`issues/10-harden-mcp-json-managed-integrity.md`** (SEC-MED, CONDITIONAL) — `.mcp.json` content blind spot;
-  gate-04 widened it. Clean fix needs design (operator-extensible file). Solo-model low-risk. **Filed, not fixed.**
-- Non-blocking deferrals + the **bootstrap sequence** are in `carry-forward.md` (synapse teaching-docs refresh,
-  seeded-routing reach, WRXN-OS wiki-concept reconcile, etc.).
+**Correction pass COMPLETE (2026-06-19)** — "fix all": issue 10 (`.mcp.json` deep-equal, `41cebc0`), seeded routing
+(migration `006`, `4b933de`), synapse teaching docs (`54ada8f`), CF-6 ship `--` + slice-07 null/PRD (`823db31`,
+`7821ed4`). Re-gated clean (783/783; `correction/` markers). Remaining (not kernel-fixable now): CF-2 workspace
+residual (no clean fix, documented low), the WRXN-OS wiki-concept reconcile (bootstrap), and the bootstrap itself.
 
 ## NOT done by design (the slice boundary)
 
