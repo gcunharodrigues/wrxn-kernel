@@ -212,6 +212,29 @@ test('applyProtection is repo-agnostic: the SAME logic protects recon-wrxn (slug
   );
 });
 
+// ── parseSlug: accept ONLY a well-formed owner/repo; reject junk (gate-02 LOW-1, defense-in-depth) ──
+// Not exploitable today (gh is spawned via an args array, no shell) but the no-injection guarantee
+// must not rest solely on the absence of `shell:true` — a malformed remote fail-soft-skips instead.
+
+test('parseSlug accepts well-formed owner/repo (bare + ssh + https) → owner/repo', () => {
+  assert.equal(protect.parseSlug('owner/repo'), 'owner/repo');
+  assert.equal(protect.parseSlug('git@github.com:owner/repo.git'), 'owner/repo');
+  assert.equal(protect.parseSlug('https://github.com/owner/repo.git'), 'owner/repo');
+});
+
+test('parseSlug rejects junk — .. traversal, spaces/flags, ; $() and backticks → null (LOW-1)', () => {
+  const junk = [
+    'git@github.com:owner/../../x',          // path traversal segment survives capture as `../x`
+    'git@github.com:owner/repo;evil',        // shell metacharacter
+    'git@github.com:o/r --method DELETE',    // space + flag-looking text
+    'git@github.com:owner/repo$(touch pwned)', // command-substitution syntax
+    'git@github.com:owner/repo`id`',         // backticks
+  ];
+  for (const bad of junk) {
+    assert.equal(protect.parseSlug(bad), null, `rejected: ${bad}`);
+  }
+});
+
 // ── originSlug: derive owner/repo from `origin`, repo-agnostic, fail-soft (injected git) ──
 
 // A git stand-in answering only `git -C <root> remote get-url origin`.

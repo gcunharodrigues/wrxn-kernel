@@ -12,6 +12,7 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 
 const PKG_ROOT = path.join(__dirname, '..');
+const WRXN = path.join(__dirname, '..', 'bin', 'wrxn.cjs');
 const { init } = require('../lib/install.cjs');
 const { update } = require('../lib/update.cjs');
 
@@ -74,4 +75,37 @@ test('update on an already-protected repo is a no-op (PUT in place, no duplicate
   });
   assert.equal(report.protection.action, 'updated', 'idempotent: updates in place, never re-creates');
   assert.ok(!gh.calls.some((c) => c.args.includes('POST')), 'no duplicate create on a protected repo');
+});
+
+// ── MED-1: `wrxn update` must SURFACE the protection outcome (a silent skip recreates the exact
+// "silent no-op gate" defect this epic exists to kill). Process-level CLI tests of the real handler;
+// execFileSync throws on a non-zero exit, so returning stdout IS the exit-0 (fail-soft) proof. ──
+
+test('CLI: wrxn update surfaces a protection SKIP on a no-remote install (MED-1; exit 0, fail-soft)', () => {
+  const target = tmp('wrxn-upd-protect-cli-skip-');
+  init({ pkgRoot: PKG_ROOT, target });
+  execFileSync('git', ['init', '-q', target]); // a real repo with NO origin → protection soft-skips
+  const out = execFileSync('node', [WRXN, 'update', '--root', target], { encoding: 'utf8' });
+  assert.match(out, /protection/i, 'the update output surfaces the protection outcome — not silent');
+  assert.match(out, /skip/i, 'the soft-skip is announced (operator learns the gate did not apply)');
+});
+
+test('CLI: wrxn update surfaces protection APPLIED when origin is a github repo (MED-1; exit 0)', () => {
+  const target = tmp('wrxn-upd-protect-cli-apply-');
+  init({ pkgRoot: PKG_ROOT, target });
+  execFileSync('git', ['init', '-q', target]);
+  execFileSync('git', ['-C', target, 'remote', 'add', 'origin', 'git@github.com:fake-owner/fake-repo.git']);
+  // A stub `gh` on PATH intercepts the apply — NO real mutating `gh api` is ever issued (the list call
+  // returns `[]`, the --method create returns ok). This exercises the real CLI's applied-print path.
+  const stubDir = tmp('wrxn-stub-gh-');
+  const ghStub = path.join(stubDir, 'gh');
+  fs.writeFileSync(ghStub, '#!/bin/sh\ncase "$*" in\n  *--method*) echo "{}" ;;\n  *) echo "[]" ;;\nesac\nexit 0\n');
+  fs.chmodSync(ghStub, 0o755);
+  const out = execFileSync('node', [WRXN, 'update', '--root', target], {
+    encoding: 'utf8',
+    env: { ...process.env, PATH: `${stubDir}:${process.env.PATH}` },
+  });
+  assert.match(out, /protection/i, 'the applied outcome is surfaced on the primary delivery path');
+  assert.match(out, /wrxn-main-gate|created|updated/i, 'names the ruleset action that landed');
+  assert.doesNotMatch(out, /protection skipped/i, 'an applied gate is not reported as skipped');
 });

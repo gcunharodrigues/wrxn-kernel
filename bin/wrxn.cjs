@@ -277,6 +277,14 @@ async function main(argv) {
     if (report.migrationsRan && report.migrationsRan.length) {
       process.stdout.write(`migrations applied: ${report.migrationsRan.join(', ')}\n`);
     }
+    // Surface the server-side gate outcome (gate-02 MED-1). A soft-skip on the PRIMARY delivery path
+    // must NOT be silent — a silent skip is the very "no-op gate believed active" defect this epic kills.
+    // Mirrors `wrxn protect`; fail-soft is preserved (this only prints, never throws, still exit 0).
+    if (report.protection) {
+      process.stdout.write(report.protection.ok
+        ? `protection: ${report.protection.detail}\n`
+        : `protection skipped: ${report.protection.reason}\n`);
+    }
     return 0;
   }
 
