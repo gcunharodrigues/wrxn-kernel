@@ -23,6 +23,11 @@ post-hoc correction pass). Each cites the gate that raised it. Resolve + tick wh
   `protection: …` / `protection skipped: …`; fail-soft preserved (still exit 0).
 - **slice-02 security LOW-1** — `parseSlug` too permissive. **Closed in `4ea456b`** (strict `owner/repo` grammar
   rejecting `../x`, spaces, `;`, `$()`, backticks).
+- **slice-05 security MED-1** — `release.yml` ran `npm ci`/`test`/`publish` (third-party lifecycle code) with an
+  ambient `contents: write` token. **Closed in `6ad5745`**: `persist-credentials: false` + an isolated, env-scoped
+  `x-access-token` tag-push step → no npm step holds the write token. OIDC+provenance+concurrency preserved.
+- **slice-05 security LOW-1** — confirmed safe (only trusted constants — commit SHAs, `major|minor|patch` — in
+  `run:` `${{ }}`; no attacker free-text). No change needed.
 
 ## Slice-02 deferred (non-blocking; decide at correction pass / bootstrap)
 
@@ -71,3 +76,26 @@ post-hoc correction pass). Each cites the gate that raised it. Resolve + tick wh
 - **slice-07 PRD-doc over-block** (review NB1): the `\bPRD\b…\b(document|doc)\b` branch fires on a read-only
   "summarize the PRD document" delegated to a generic agent — safe-direction false positive (over-block is
   recoverable). Optional tighten; not worth a re-dispatch.
+- **slice-05 NB1** (review): a release-type merge where the dev forgot to bump `package.json.version` silently
+  no-publishes (the `npm view` guard sees the version already on npm → skip). A future `wrxn-ci` check could flag
+  "commit types warrant a release but the version is already published." Low priority; the operator notices no
+  publish. Candidate gate-01/wrxn-ci enhancement.
+- **slice-05 NB3/NB4** (review): a 3+-rapid-merge concurrency edge could skip an intermediate version (mitigated
+  by gate-02 require-up-to-date); the fail-safe git read can miss-but-never-mis-publish a release. Acceptable.
+- **slice-05 residual** (security): `permissions: contents: write` kept at workflow scope — cosmetic with the
+  single `release` job (the token-reachability vector is already closed). Move to job scope IF a 2nd job is added.
+
+## Bootstrap requirements (self-host / land-then-apply — capture for the final sequence)
+
+These are NOT slice work; they are steps the operator/devops runs when landing + self-hosting the epic (per the
+PRD "Bootstrap" + ADR consequences). Captured here so the final human-accept report is precise.
+
+- **Kernel-root `wrxn-ci.yml` copy** (review slice-05 NB2): the payload `payload/.github/workflows/wrxn-ci.yml`
+  lands in *installs*. The **kernel itself is not an install**, so for the kernel's OWN PRs to run the `wrxn-ci`
+  check (which the `wrxn-main-gate` ruleset requires), the self-host step must copy that workflow to the kernel
+  root `.github/workflows/wrxn-ci.yml`. `release.yml` is already at the kernel root (slices 05 edits it directly).
+- **Land-once via direct-push** to kernel `main` (no ruleset there yet) → run `wrxn protect` on the kernel to
+  apply `wrxn-main-gate` to itself → publish `0.11.0` (OIDC) → `npx @gcunharodrigues/wrxn update` all 5 installs,
+  **WRXN-OS last**. recon-wrxn (slice 06) is a separate one-time apply.
+- **`package.json` is already `0.11.0`** (bumped in gate-02 by the no-inert-migration invariant) — the epic's
+  release version; do NOT re-bump. The first merge to `main` carrying `feat:`/`fix:` commits auto-publishes it.
