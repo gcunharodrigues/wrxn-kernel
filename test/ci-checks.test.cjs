@@ -71,6 +71,37 @@ test('managed-integrity passes (no-op) on a non-install dir with no receipt', ()
   assert.equal(r.ok, true);
 });
 
+test('managed-integrity anchors the managed SET to the manifest, not the receipt — dropping a receipt entry cannot hide drift (CF-2)', () => {
+  const root = freshInstall('wrxn-ci-mi-cf2-drop-');
+  // Tamper a managed file AND drop its entry from the unprotected receipt. The OLD receipt-scoped check
+  // derived its set from receipt.files, so it would skip the dropped entry and pass; the manifest-anchored
+  // check (the kernel source of truth) still catches the drift.
+  fs.writeFileSync(path.join(root, '.claude/constitution.md'), 'TAMPERED — receipt entry dropped\n');
+  const receipt = JSON.parse(fs.readFileSync(path.join(root, 'wrxn.install.json'), 'utf8'));
+  receipt.files = receipt.files.filter((f) => f.path !== '.claude/constitution.md');
+  fs.writeFileSync(path.join(root, 'wrxn.install.json'), JSON.stringify(receipt, null, 2) + '\n');
+
+  const r = ci.managedIntegrity(root, { pkgRoot: PKG_ROOT });
+  assert.equal(r.ok, false, 'manifest-anchored check still catches the drift after the receipt entry is dropped');
+  assert.ok(r.failures.some((f) => /constitution\.md/.test(f)), r.failures.join('; '));
+});
+
+test('managed-integrity catches a drifted managed file even if the receipt PROFILE is flipped to hide it (CF-2 defense-in-depth)', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wrxn-ci-mi-cf2-profile-'));
+  init({ pkgRoot: PKG_ROOT, target: root, profile: 'workspace' });
+  // Tamper a workspace-only managed file, then flip the receipt profile to project — which would drop
+  // workspace files from a profile-filtered set. The file is still ON DISK, so it must still be verified.
+  const wsManaged = '.claude/skills/audit/SKILL.md';
+  fs.writeFileSync(path.join(root, wsManaged), 'TAMPERED workspace-managed file\n');
+  const receipt = JSON.parse(fs.readFileSync(path.join(root, 'wrxn.install.json'), 'utf8'));
+  receipt.profile = 'project';
+  fs.writeFileSync(path.join(root, 'wrxn.install.json'), JSON.stringify(receipt, null, 2) + '\n');
+
+  const r = ci.managedIntegrity(root, { pkgRoot: PKG_ROOT });
+  assert.equal(r.ok, false, 'a present, drifted managed file is caught regardless of the claimed profile');
+  assert.ok(r.failures.some((f) => /audit\/SKILL\.md/.test(f)), r.failures.join('; '));
+});
+
 // ── wiki-lint ─────────────────────────────────────────────────────────────────
 
 test('wiki-lint passes on a clean install (empty wiki tiers)', () => {
@@ -249,6 +280,15 @@ test('wrxn-ci.yml runs the project test command but skips the true/empty stub', 
   assert.match(body, /WRXN_TEST_CMD/, 'workflow does not reference WRXN_TEST_CMD');
   // the never-vacuous guard: the stub `true`/empty command is skipped, the universal checks still run
   assert.match(body, /!=\s*["']?true["']?/, 'workflow does not skip the `true` stub test command');
+});
+
+test('wrxn-ci.yml pins `wrxn ci` to the install receipt kernel version (CF-1, no version-float drift)', () => {
+  const body = fs.readFileSync(WORKFLOW, 'utf8');
+  // managed-integrity byte-compares against the kernel that LAID the files; floating npx to `latest`
+  // reads a version skew as drift. The workflow must read the receipt's kernelVersion and pin to it.
+  assert.match(body, /wrxn\.install\.json/, 'workflow does not read the install receipt');
+  assert.match(body, /kernelVersion/, 'workflow does not read the receipt kernelVersion');
+  assert.match(body, /@gcunharodrigues\/wrxn@"\$VER"/, 'workflow does not pin npx to the receipt version');
 });
 
 // ── workflow is a managed payload file (laid by init/update) ───────────────────

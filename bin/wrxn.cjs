@@ -13,6 +13,7 @@ const executor = require('../lib/executor.cjs');
 const onboard = require('../lib/onboard.cjs');
 const connect = require('../lib/connect.cjs');
 const ship = require('../lib/ship.cjs');
+const protect = require('../lib/protect.cjs');
 const brain = require('../lib/brain.cjs');
 const statusline = require('../lib/statusline.cjs');
 const { convert } = require('../lib/convert.cjs');
@@ -138,6 +139,14 @@ Usage:
                                  the repo's current branch. --dry-run prints the promote plan without
                                  running it (a non-destructive preview). Stops at the first failing
                                  step (a failed push never opens a PR).
+
+  wrxn protect [--root <dir>]    apply the wrxn-main-gate server-side ruleset to this repo's origin —
+                                 the hard gate that replaces the settings.local.json env-flag dance:
+                                 block direct push to the default branch, require a PR + the wrxn-ci
+                                 check, require the branch up to date, no bypass actor. Idempotent
+                                 (create-or-update by name) and fail-soft (no gh / not admin / no remote
+                                 → a clear message, exit 0). Repo-agnostic: the slug is read from origin,
+                                 so the SAME command protects the kernel, any install, and recon-wrxn.
 
   wrxn brain query "<q>" [--json] [--limit <n>] [--type <prose|code|NodeType>] [--neighbors] [--root <dir>]
                                  ask the warm Brain (recon-wrxn's code+prose graph) from the terminal.
@@ -505,6 +514,19 @@ async function main(argv) {
     }
     process.stderr.write(`wrxn: ship failed at "${res.failed}" — promote halted (no PR/auto-merge past the failure)\n`);
     return 2;
+  }
+
+  if (cmd === 'protect') {
+    // Apply the wrxn-main-gate server-side ruleset to this repo's origin — the hard gate that replaces
+    // the disarmable settings.local.json env-flag dance (ADR 0007). Repo-agnostic: the slug is read from
+    // origin (protect.protectOrigin), so the SAME command protects the kernel, any install, and the
+    // recon-wrxn sibling. Real git/gh run via protect's defaultInvoke (no injected invoker) — that is
+    // what makes the application "validated by invocation". Fail-soft: no gh / not admin / no remote → a
+    // clear message and exit 0, so it never breaks a remote-less checkout.
+    const root = path.resolve(args.flags.root || process.cwd());
+    const res = protect.protectOrigin(root);
+    process.stdout.write(res.ok ? `wrxn protect → ${res.detail}\n` : `wrxn protect → skipped: ${res.reason}\n`);
+    return 0;
   }
 
   if (cmd === 'brain') {

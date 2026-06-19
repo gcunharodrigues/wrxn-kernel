@@ -39,4 +39,16 @@ jobs:
             echo "WRXN_TEST_CMD is empty or the 'true' stub — skipping; the universal checks below still gate"
           fi
       - name: universal kernel checks (managed-integrity, wiki-lint, synapse, json, node --check)
-        run: npx --yes @gcunharodrigues/wrxn ci
+        # Pin the invoked kernel to the version that LAID the managed files (the receipt's kernelVersion),
+        # so managed-integrity byte-compares against the right payload. Floating to npm `latest` would
+        # read a version skew as drift with zero tampering (CF-1). A non-install repo (no
+        # wrxn.install.json, e.g. recon-wrxn) has no managed files to verify → fall back to `latest`.
+        run: |
+          VER=$(node -p "require('./wrxn.install.json').kernelVersion || ''" 2>/dev/null || true)
+          if [ -n "$VER" ]; then
+            echo "pinning wrxn ci to the install kernel version: $VER"
+            npx --yes @gcunharodrigues/wrxn@"$VER" ci
+          else
+            echo "no wrxn.install.json kernelVersion — running wrxn ci from latest"
+            npx --yes @gcunharodrigues/wrxn ci
+          fi
