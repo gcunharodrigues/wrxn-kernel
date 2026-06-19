@@ -310,6 +310,35 @@ test('protectOrigin is a fail-soft no-op when origin is absent (remote-less inst
   assert.equal(ghCalled, false, 'no gh call when there is no origin');
 });
 
+// defaultInvoke: a child that RAN is judged by its EXIT STATUS, not by whether we finished writing its
+// stdin (gate-redesign-09). The real `gh api ... --input -` reads the request body from stdin; a stub
+// (or a real gh that errors out before draining the body) that does NOT read stdin makes spawnSync's
+// stdin write race the child's exit -> EPIPE. spawnSync still captures the child's exit status (0) and
+// stdout, so defaultInvoke must honor them, not misreport a successful run as a command-not-found skip.
+// This was the full-suite flake: the update-protect stub `gh` does not drain stdin, so under parallel
+// load the POST-body write EPIPEd and a real exit-0 apply was surfaced as "protection skipped". A body
+// larger than the OS pipe buffer (64KB) forces the EPIPE deterministically -> reproducible every run.
+
+test('defaultInvoke: an stdin-write EPIPE from a child that exited 0 is a SUCCESS, not a skip (gate-09)', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wrxn-protect-epipe-'));
+  // A `gh`-shaped stub that echoes to stdout and exits 0 but NEVER reads stdin (mirrors the
+  // update-protect stub, and a real gh that exits before draining the `--input -` body).
+  const stub = path.join(dir, 'gh');
+  fs.writeFileSync(stub, '#!/bin/sh\necho "{}"\nexit 0\n');
+  fs.chmodSync(stub, 0o755);
+  const body = 'x'.repeat(200 * 1024); // > 64KB pipe buffer -> the stdin write EPIPEs deterministically
+  const r = protect.defaultInvoke({ cmd: stub, args: ['api', '--method', 'POST', '/x', '--input', '-'], input: body });
+  assert.equal(r.ok, true, 'a child that exited 0 is a success even when its stdin write EPIPEd');
+  assert.equal(r.status, 0, 'the real exit status is honored, not discarded as null');
+  assert.match(r.stdout, /\{\}/, 'the child stdout is captured, not thrown away as a command-not-found skip');
+});
+
+test('defaultInvoke: a genuinely missing binary (never ran, status null) is still a soft failure', () => {
+  const r = protect.defaultInvoke({ cmd: 'definitely-not-a-real-binary-xyz', args: ['api'] });
+  assert.equal(r.ok, false, 'an unspawnable command is a failure (the fail-soft skip path is preserved)');
+  assert.equal(r.status, null, 'a command that never ran has no exit status');
+});
+
 // ── CLI: `wrxn protect` wiring (fail-soft exit 0 — no real `gh api` is issued on a no-remote repo) ──
 
 test('CLI: wrxn protect on a no-remote repo prints a skip and exits 0 (fail-soft wiring)', () => {
