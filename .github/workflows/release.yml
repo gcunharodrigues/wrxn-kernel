@@ -45,6 +45,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # MED-1 (gate-05 security): do NOT persist GITHUB_TOKEN into git config. The npm
+          # ci/test/publish steps below run third-party lifecycle code and must not have an ambient
+          # contents:write credential. The release tag is pushed by an isolated final step that
+          # injects the token narrowly via env.
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -67,6 +72,7 @@ jobs:
         run: npm test
 
       - name: publish to npm (OIDC + provenance) when release-worthy and unpublished
+        id: publish
         if: steps.decide.outputs.release == 'true'
         run: |
           VER=$(node -p "require('./package.json').version")
@@ -78,5 +84,18 @@ jobs:
           fi
           echo "publishing $PKG@$VER (bump: ${{ steps.decide.outputs.bump }})"
           npm publish --provenance --access public
+          echo "published=true" >> "$GITHUB_OUTPUT"
+
+      # MED-1 (gate-05 security): the ONLY step that holds a write-capable token. checkout used
+      # persist-credentials: false, so no contents:write credential was ambient to the npm
+      # ci/test/publish steps above; the token is injected narrowly here, via env, and used only to
+      # push the v<version> tag through an explicit token URL. Runs only when a publish just happened.
+      - name: push the release tag (isolated write step)
+        if: steps.publish.outputs.published == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          VER=$(node -p "require('./package.json').version")
           git tag "v$VER"
-          git push origin "v$VER"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}" "v$VER"
