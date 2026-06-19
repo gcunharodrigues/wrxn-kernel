@@ -9,6 +9,11 @@
   ],
   "files": [
     {
+      "path": ".claude/agents/builder.md",
+      "class": "managed",
+      "profile": "project"
+    },
+    {
       "path": ".claude/constitution.local.md",
       "class": "seeded",
       "profile": "project"
