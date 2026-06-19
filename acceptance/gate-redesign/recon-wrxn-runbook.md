@@ -33,6 +33,13 @@ applied to `recon-wrxn` as a documented one-time bootstrap, reusing:
 | publish identity | OIDC trusted-publishing is **already** configured (`publishConfig.provenance: true`; existing `release.yml` publishes via OIDC, no `NPM_TOKEN`) |
 | existing workflows | `ci.yml` (test matrix 20/22 **+ a legacy `NPM_TOKEN` tag-gated publish job**), `release.yml` (tag-`v*`-triggered OIDC publish), `recon-review.yml` (its own blast-radius PR dogfood — unrelated, keep) |
 
+## Prerequisite
+
+Run this AFTER the epic is published — **kernel `@gcunharodrigues/wrxn` ≥ 0.11.0 must be on npm**, since both
+`npx @gcunharodrigues/wrxn protect` (Step 1) and `npx @gcunharodrigues/wrxn release-check` (Step 3) are 0.11.0
+commands. Per the bootstrap sequence this recon-wrxn apply is a separate one-time setup that follows the kernel
+self-host + publish (review nit, slice 06). Also need `gh` installed + authenticated as a `recon-wrxn` admin.
+
 ## Apply order (matters)
 
 A required status check that has never reported on a branch will **block** PRs forever. So land the workflow
@@ -274,6 +281,9 @@ jobs:
   gated on `refs/tags/v*` that runs `npm publish` with `NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}`). It is
   superseded by OIDC release-on-merge; leaving it would re-publish on the `v*` tag this workflow pushes AND
   keep a long-lived `NPM_TOKEN` secret the OIDC model removes.
+  Removing the *job* does not remove the *secret*: also **delete the `NPM_TOKEN` repo secret** (`gh secret delete
+  NPM_TOKEN -R gcunharodrigues/recon-wrxn`, or Settings → Secrets) **and revoke that token on npmjs.com**, so
+  tokenless OIDC + provenance is the SOLE publish path (security SEC-LOW-1, slice 06).
 - The **old tag-triggered `release.yml` is replaced** by the file above (its tag `v*` trigger would otherwise
   double-fire on the tag the new CD pushes). If the operator prefers to keep a tag-publish path, it must be
   made idempotent against the `npm view` guard; the recommendation is a clean replace.
