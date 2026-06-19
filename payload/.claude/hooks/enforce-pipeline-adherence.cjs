@@ -34,8 +34,12 @@ const TYPED_EXECUTORS = new Set(['builder', 'reviewer', 'security', 'qa-walker',
 const HITL_STEPS = [
   {
     skill: 'to-prd',
-    // a creation verb within range of "PRD" (the doc), in either order
-    re: /\b(writ\w*|creat\w*|draft\w*|author\w*|produc\w*|generat\w*|prepar\w*|build\w*|put together)\b[\s\S]{0,40}\bPRD\b|\bPRD\b[\s\S]{0,25}\b(document|doc)\b/i,
+    // Block delegating PRD CREATION. Two ways to match:
+    //   1. a creation verb within range BEFORE "PRD" (write/create/draft a PRD …), OR
+    //   2. a "PRD document/doc" mention — but NOT when a READ verb (summarize/read/review/list/
+    //      explain/open/show) sits just before it, which is a safe read, not a creation (gate-07 NB).
+    // A creation verb still wins via branch 1, so "create the PRD document" stays blocked.
+    re: /\b(writ\w*|creat\w*|draft\w*|author\w*|produc\w*|generat\w*|prepar\w*|build\w*|put together)\b[\s\S]{0,40}\bPRD\b|(?<!\b(?:summar\w*|read\w*|review\w*|list\w*|explain\w*|open\w*|show\w*)\b[\s\S]{0,40})\bPRD\b[\s\S]{0,25}\b(document|doc)\b/i,
   },
   {
     skill: 'to-issues',
@@ -89,6 +93,10 @@ function main() {
   } catch {
     return emit({}); // unparseable -> fail open
   }
+
+  // JSON.parse("null") (and bare scalars) parse WITHOUT throwing, so a null/non-object event would
+  // reach event.tool_name and throw uncaught past the try. Guard it -> fail open. (gate-07 INFO)
+  if (!event || typeof event !== 'object') return emit({});
 
   // Only gate the Task (subagent-spawn) tool; anything else -> allow.
   if (event.tool_name && event.tool_name !== 'Task') return emit({});

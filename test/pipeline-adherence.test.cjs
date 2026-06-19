@@ -93,6 +93,24 @@ test('does not block "summarize the PRD.md" — no creation verb near PRD', () =
   assert.equal(d.block, false);
 });
 
+// gate-07 review NB: a READ verb near "PRD document" is a safe-direction false positive — don't block it.
+test('does not block a READ delegation: "summarize the PRD document" (review NB false positive)', () => {
+  const d = decide({ subagent_type: 'general-purpose', prompt: 'Summarize the PRD document for me in two bullets.' });
+  assert.equal(d.block, false);
+});
+
+test('STILL blocks "write a PRD" delegated to a generic agent (the real block survives the tighten)', () => {
+  const d = decide({ subagent_type: 'general-purpose', prompt: 'Write a PRD for the onboarding flow.' });
+  assert.equal(d.block, true);
+  assert.match(d.reason, /to-prd/);
+});
+
+test('STILL blocks "create the PRD document" — a creation verb wins over the read carve-out', () => {
+  const d = decide({ subagent_type: 'general-purpose', prompt: 'Create the PRD document for the billing epic.' });
+  assert.equal(d.block, true);
+  assert.match(d.reason, /to-prd/);
+});
+
 // ── fail open on malformed / partial input ────────────────────────────────────────────
 
 test('fails open on an empty object', () => {
@@ -130,6 +148,10 @@ test('CLI ignores a non-Task tool (defensive short-circuit)', () => {
 
 test('CLI fails open on malformed stdin', () => {
   assert.deepEqual(runHook('{ not json'), {});
+});
+
+test('CLI fails open on a bare JSON null (JSON.parse("null") must not throw past the parse) [gate-07 INFO]', () => {
+  assert.deepEqual(runHook('null'), {});
 });
 
 test('CLI folds the description field into the keyword scan', () => {
