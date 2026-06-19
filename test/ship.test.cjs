@@ -23,9 +23,9 @@ test('buildShipPlan returns the ordered promote commands: push, gh pr create, gh
   assert.deepEqual(
     plan.map((s) => [s.cmd, ...s.args]),
     [
-      ['git', 'push', '-u', 'origin', 'track/foo'],
+      ['git', 'push', '-u', 'origin', '--', 'track/foo'],
       ['gh', 'pr', 'create', '--base', 'main', '--head', 'track/foo', '--title', 'feat: foo', '--body', 'why'],
-      ['gh', 'pr', 'merge', 'track/foo', '--auto', '--squash'],
+      ['gh', 'pr', 'merge', '--auto', '--squash', '--', 'track/foo'],
     ],
     'the promote sequence is push → open PR → arm auto-merge'
   );
@@ -47,6 +47,20 @@ test('buildShipPlan THROWS on a missing branch or title (a malformed promote is 
   assert.throws(() => ship.buildShipPlan({ branch: '   ', title: '   ' }), /branch is required|title is required/);
 });
 
+test('buildShipPlan fences a dash-leading branch behind an end-of-options "--" so it is never read as a flag (CF-6 / SEC-LOW-1)', () => {
+  const branch = '--oops';
+  const byLabel = Object.fromEntries(ship.buildShipPlan({ branch, title: 'feat: x' }).map((s) => [s.label, s.args]));
+  // git push: options/remote first, then `--`, then the branch as a bare positional VALUE
+  assert.deepEqual(byLabel.push, ['push', '-u', 'origin', '--', branch], 'push terminates options before the branch');
+  // gh pr merge: the real flags MUST stay before `--` (so they still parse as flags), branch after it
+  assert.deepEqual(byLabel['auto-merge'], ['pr', 'merge', '--auto', '--squash', '--', branch], 'merge keeps its flags, then --, then the branch');
+  // structural invariant: wherever the branch is a bare positional, a `--` precedes it
+  for (const args of [byLabel.push, byLabel['auto-merge']]) {
+    const dd = args.indexOf('--');
+    assert.ok(dd !== -1 && args.indexOf(branch) > dd, 'the branch sits after the -- terminator');
+  }
+});
+
 // ── ship({ invoker }) runs the plan through an INJECTED invoker (no real network) ──
 
 test('ship runs every planned step IN ORDER through the injected invoker', () => {
@@ -55,9 +69,9 @@ test('ship runs every planned step IN ORDER through the injected invoker', () =>
   const res = ship.ship({ invoker: fakeInvoker, branch: 'track/foo', title: 'feat: foo', base: 'main' });
   assert.equal(res.ok, true);
   assert.deepEqual(seen, [
-    ['git', 'push', '-u', 'origin', 'track/foo'],
+    ['git', 'push', '-u', 'origin', '--', 'track/foo'],
     ['gh', 'pr', 'create', '--base', 'main', '--head', 'track/foo', '--title', 'feat: foo', '--body', ''],
-    ['gh', 'pr', 'merge', 'track/foo', '--auto', '--squash'],
+    ['gh', 'pr', 'merge', '--auto', '--squash', '--', 'track/foo'],
   ], 'the injected invoker ran the planned commands in promote order');
   assert.deepEqual(res.steps.map((s) => s.step), ['push', 'pr-create', 'auto-merge']);
   assert.ok(res.steps.every((s) => s.ok));
@@ -85,9 +99,9 @@ test('CLI: wrxn ship --dry-run prints the promote plan WITHOUT running it (non-d
   );
   const plan = JSON.parse(out);
   assert.deepEqual(plan.map((s) => [s.cmd, ...s.args]), [
-    ['git', 'push', '-u', 'origin', 'track/foo'],
+    ['git', 'push', '-u', 'origin', '--', 'track/foo'],
     ['gh', 'pr', 'create', '--base', 'main', '--head', 'track/foo', '--title', 'feat: foo', '--body', ''],
-    ['gh', 'pr', 'merge', 'track/foo', '--auto', '--squash'],
+    ['gh', 'pr', 'merge', '--auto', '--squash', '--', 'track/foo'],
   ], 'the CLI wires branch/title/base into the right promote commands');
 });
 
