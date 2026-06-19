@@ -23,6 +23,25 @@ test('no shipped doctrine references the retired WRXN_ACTIVE_AGENT / settings.lo
   }
 });
 
+// The synapse skill TEACHING docs are managed files that propagate to every install on `wrxn update`.
+// Their illustrative examples must teach the PR + CI + auto-merge model, not the retired "confirmation
+// flag" / "green-suite push gate" env-flag dance (gate-04 doc fix).
+const SYNAPSE_TEACHING = [
+  '.claude/skills/synapse/SKILL.md',
+  '.claude/skills/synapse/references/domains.md',
+  '.claude/skills/synapse/references/layers.md',
+];
+
+test('no synapse teaching doc still teaches the retired flag / green-suite gate model', () => {
+  for (const rel of SYNAPSE_TEACHING) {
+    const body = read(rel);
+    assert.doesNotMatch(body, /confirmation flag/i, `${rel} still teaches the retired confirmation-flag model`);
+    assert.doesNotMatch(body, /green-suite push gate/i, `${rel} still calls it the green-suite push gate`);
+    assert.doesNotMatch(body, /WRXN_ACTIVE_AGENT/, `${rel} still names the retired env flag`);
+    assert.doesNotMatch(body, /settings\.local\.json/, `${rel} still names the retired settings.local.json dance`);
+  }
+});
+
 test('the constitution describes the PR + CI + auto-merge promote model', () => {
   const c = read('.claude/constitution.md');
   assert.match(c, /wrxn ship/, 'Art. I names the `wrxn ship` promote path');

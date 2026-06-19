@@ -22,7 +22,7 @@ the rules ascending. Blank lines and `#` comments are ignored.
 
 ```
 # .synapse/global  (always-on, L1)
-GLOBAL_RULE_0=git push, PR creation, and release tags are deliberate acts held behind a confirmation flag (anti-accidental-push) — `devops` is a dispatch-phase label, not an authority.
+GLOBAL_RULE_0=git push, PR creation, and release tags are deliberate acts: devops promotes via `wrxn ship` (push the branch → open a PR → arm auto-merge) and a server-enforced ruleset merges only when CI is green — `devops` is a dispatch-phase label, not an authority.
 GLOBAL_RULE_1=The unit of work is an issue with explicit acceptance criteria.
 GLOBAL_RULE_2=Before building, apply the decision hierarchy: REUSE > ADAPT > CREATE.
 ```
@@ -34,7 +34,7 @@ always-on domain, `[RECALL: routing]` for a recall domain.
 
 | File | Kind | What it carries |
 |------|------|-----------------|
-| `.synapse/global` | always-on | WRXN operational invariants (devops-only push, issue-driven work, the decision hierarchy, conventional commits, the green-suite push gate). |
+| `.synapse/global` | always-on | WRXN operational invariants (devops promotes via `wrxn ship`, issue-driven work, the decision hierarchy, conventional commits, the server-enforced CI push gate). |
 | `.synapse/pipeline` | always-on | The unified-dev build route and how to scale it to the task. |
 | `.synapse/routing` | keyword-recall | Representative recall rules (worktrees, deploys, the unit of work). |
 
