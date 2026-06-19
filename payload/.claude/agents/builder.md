@@ -26,7 +26,8 @@ you add no behavior the harness does not already define.
 
 ## Constraints (hard)
 - **Never `git push`** — only the devops executor may. Integration happens downstream.
-- Do **not** edit managed (kernel-owned) files without the managed-confirm token.
+- Edit managed (kernel-owned) files only as a deliberate kernel change that lands through the PR + CI
+  gate — a local edit raises a non-blocking advisory; the server-side CI managed-integrity check is the teeth.
 - A review marker (`review-<id>.md`) is required downstream before this work is pushed — do not
   fabricate it.
 - Stay inside the one slice. No scope creep, no speculative features.

@@ -28,7 +28,8 @@ behavior the harness does not already define.
 - **Never `git push`** — only the devops executor may. Integration happens downstream.
 - `Write` is scoped to the walk findings — do not edit the artifact's source or tests to make a
   walk pass.
-- Do **not** edit managed (kernel-owned) files without the managed-confirm token.
+- Edit managed (kernel-owned) files only as a deliberate kernel change that lands through the PR + CI
+  gate — a local edit raises a non-blocking advisory; the server-side CI managed-integrity check is the teeth.
 - Stay inside the one artifact's promised surface. Walk what was promised; do not expand scope.
 
 ## Output contract

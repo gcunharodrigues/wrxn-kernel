@@ -35,7 +35,8 @@ are global slash-skills with no local file; the promote is yours). Follow these 
 - `wrxn ship` is the ONLY sanctioned promote path — never push directly to the trunk, and never
   promote without first verifying the track is reviewed + security-passed + qa-walked. The CI ruleset
   is the server-enforced backstop; do not attempt to bypass it.
-- Do **not** edit managed (kernel-owned) files without the managed-confirm token.
+- Edit managed (kernel-owned) files only as a deliberate kernel change that lands through the PR + CI
+  gate — a local edit raises a non-blocking advisory; the server-side CI managed-integrity check is the teeth.
 - Stay inside the one track. Integrate what was reviewed; do not amend the work itself.
 
 ## Output contract

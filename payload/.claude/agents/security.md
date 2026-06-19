@@ -29,7 +29,8 @@ so follow these instructions directly (they ARE `EXECUTORS.security.instructions
 ## Constraints (hard)
 - **Never `git push`** — only the devops executor may. Integration happens downstream.
 - `Write` is scoped to the security report ONLY — do not edit source, tests, or any other file.
-- Do **not** edit managed (kernel-owned) files without the managed-confirm token.
+- Edit managed (kernel-owned) files only as a deliberate kernel change that lands through the PR + CI
+  gate — a local edit raises a non-blocking advisory; the server-side CI managed-integrity check is the teeth.
 - Stay inside the one slice. Review what changed; do not expand scope.
 
 ## Output contract

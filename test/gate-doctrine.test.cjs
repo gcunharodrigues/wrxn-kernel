@@ -41,3 +41,17 @@ test('the slice-07 pipeline-adherence rule (PIPELINE_RULE_5) survives', () => {
   assert.match(p, /^PIPELINE_RULE_5=/m, 'PIPELINE_RULE_5 must remain');
   assert.match(p, /enforce-pipeline-adherence/, 'it names the adherence hook');
 });
+
+// gate-04 retired WRXN_MANAGED_CONFIRM: the managed guard no longer reads it (it is an advisory now,
+// the server-side CI managed-integrity check is the teeth). No agent spec may keep telling agents to
+// gate a managed-file edit behind that inert token (SEC-LOW-1) — a doctrine-vs-reality contradiction.
+const AGENT_SPECS = ['builder', 'devops', 'qa-walker', 'researcher', 'reviewer', 'security']
+  .map((n) => `.claude/agents/${n}.md`);
+
+test('no agent spec cites the retired managed-confirm token (gate-04 demoted the guard to advisory)', () => {
+  for (const rel of AGENT_SPECS) {
+    const body = read(rel);
+    assert.doesNotMatch(body, /managed-confirm/i, `${rel} still cites the retired managed-confirm token`);
+    assert.doesNotMatch(body, /WRXN_MANAGED_CONFIRM/, `${rel} still names the retired WRXN_MANAGED_CONFIRM flag`);
+  }
+});
