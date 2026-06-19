@@ -15,7 +15,7 @@ const fs = require('fs');
 const path = require('path');
 
 const PKG_ROOT = path.join(__dirname, '..');
-const { validateAgentFile } = require('../lib/agent-conformance.cjs');
+const { validateAgentFile, parseAgentFile } = require('../lib/agent-conformance.cjs');
 const { EXECUTORS } = require('../lib/executor.cjs');
 
 // A conforming builder definition (pre-parsed): least-priv tools, a model, and an output
@@ -83,4 +83,57 @@ test('the shipped payload/.claude/agents/builder.md passes validateAgentFile(...
   const raw = fs.readFileSync(builderMd, 'utf8');
   const r = validateAgentFile(raw, 'builder');
   assert.equal(r.ok, true, JSON.stringify(r.errors));
+});
+
+// ── the SHIPPED remaining five conform to their type, with the locked-fleet model ──
+// (flow-03). builder is covered above; each of these is a thin wrapper of EXECUTORS[type]:
+// it parses, declares a least-privilege tools allowlist + the fleet model, and its output
+// contract set-equals that type's reportSchema.
+const agentFile = (type) => path.join(PKG_ROOT, 'payload', '.claude', 'agents', `${type}.md`);
+const FLEET = [
+  { type: 'reviewer', model: 'opus' },
+  { type: 'security', model: 'opus' },
+  { type: 'qa-walker', model: 'sonnet' },
+  { type: 'researcher', model: 'sonnet' },
+  { type: 'devops', model: 'sonnet' },
+];
+
+for (const { type, model } of FLEET) {
+  test(`the shipped payload/.claude/agents/${type}.md passes validateAgentFile(..., '${type}')`, () => {
+    const file = agentFile(type);
+    assert.ok(fs.existsSync(file), `payload/.claude/agents/${type}.md not shipped`);
+    const raw = fs.readFileSync(file, 'utf8');
+
+    const r = validateAgentFile(raw, type);
+    assert.equal(r.ok, true, JSON.stringify(r.errors));
+
+    // declares a (non-empty) least-privilege tools allowlist + the locked-fleet model
+    const parsed = parseAgentFile(raw);
+    assert.ok(parsed.tools.length > 0, `${type} declares no tools`);
+    assert.equal(parsed.model, model, `${type} model must be ${model}`);
+  });
+}
+
+// ── least-privilege: only devops may push (the locked fleet's canPush) ──────────
+// Pins the push capability across the whole fleet so granting push to any other executor
+// (in EXECUTORS) trips the suite. Seam 1a: an over-privileged fleet fails.
+test('least-privilege: only the devops executor declares push capability (canPush)', () => {
+  for (const { type } of FLEET) {
+    if (type === 'devops') continue;
+    assert.equal(EXECUTORS[type].canPush, false, `${type} must NOT declare push capability`);
+  }
+  assert.equal(EXECUTORS.builder.canPush, false, 'builder must NOT declare push capability');
+  assert.equal(EXECUTORS.devops.canPush, true, 'only devops declares push capability');
+});
+
+// ── only the devops agent body encodes the push-gate dance ──────────────────────
+test('only devops encodes the push-gate dance; the others state they never push', () => {
+  const body = (type) => fs.readFileSync(agentFile(type), 'utf8');
+  const devops = body('devops');
+  assert.match(devops, /WRXN_ACTIVE_AGENT/, 'devops must set the push-gate env flag');
+  assert.match(devops, /settings\.local\.json/, 'devops must toggle .claude/settings.local.json');
+  for (const { type } of FLEET) {
+    if (type === 'devops') continue;
+    assert.match(body(type), /never .*push/i, `${type} body must state it never pushes`);
+  }
 });

@@ -14,6 +14,31 @@
       "profile": "project"
     },
     {
+      "path": ".claude/agents/devops.md",
+      "class": "managed",
+      "profile": "project"
+    },
+    {
+      "path": ".claude/agents/qa-walker.md",
+      "class": "managed",
+      "profile": "project"
+    },
+    {
+      "path": ".claude/agents/researcher.md",
+      "class": "managed",
+      "profile": "project"
+    },
+    {
+      "path": ".claude/agents/reviewer.md",
+      "class": "managed",
+      "profile": "project"
+    },
+    {
+      "path": ".claude/agents/security.md",
+      "class": "managed",
+      "profile": "project"
+    },
+    {
       "path": ".claude/constitution.local.md",
       "class": "seeded",
       "profile": "project"
