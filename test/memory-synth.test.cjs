@@ -37,6 +37,28 @@ test('loadConfig returns the default tiering when no memory.config.json is prese
   assert.deepEqual(dream.fallback, { engine: 'gemini', model: 'gemini-3.1-flash-lite' });
 });
 
+test('loadConfig deep-merges a partial operator override over the defaults so every task still resolves both engines', () => {
+  const root = tmp('wrxn-synth-cfg-merge-');
+  fs.mkdirSync(path.join(root, '.wrxn'), { recursive: true });
+  // an operator overrides ONE field of ONE task — just the handoff primary model.
+  fs.writeFileSync(
+    path.join(root, '.wrxn', 'memory.config.json'),
+    JSON.stringify({ tasks: { handoff: { primary: { model: 'claude-opus-4-8' } } } }),
+  );
+
+  const cfg = synth.loadConfig(root);
+
+  // the overridden field wins; the rest of that pair keeps its default (engine unchanged).
+  const handoff = synth.resolveTask(cfg, 'handoff');
+  assert.deepEqual(handoff.primary, { engine: 'claude', model: 'claude-opus-4-8' }, 'override merges over the default primary');
+  assert.deepEqual(handoff.fallback, { engine: 'gemini', model: 'gemini-3.1-flash-lite' }, 'the un-touched fallback survives');
+
+  // a task the operator never mentioned is still fully resolved from the defaults.
+  const dream = synth.resolveTask(cfg, 'dream');
+  assert.deepEqual(dream.primary, { engine: 'claude', model: 'claude-sonnet-4-6' });
+  assert.deepEqual(dream.fallback, { engine: 'gemini', model: 'gemini-3.1-flash-lite' });
+});
+
 // ── transcript-blob builder ─────────────────────────────────────────────────────
 // Adapted from the proven aimem-handoff-synth.sh python: one chunk per JSONL line, prefixed `[role] `;
 // content parts become text / `[thinking] …` (≤600) / `[tool_use NAME] {input}` (≤300) /

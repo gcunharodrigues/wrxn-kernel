@@ -214,6 +214,8 @@ function readTranscriptBlob(transcriptPath) {
 const CLAUDE_TIMEOUT_MS = 120000; // headless sonnet handoff/dream — generous but bounded.
 const GEMINI_TIMEOUT_MS = 30000; // mirrors the proven aimem `curl -m 30` fallback.
 const SENTINEL = 'WRXN_MEMORY_SYNTH'; // recursion guard: set on every engine spawn (the spawn hook no-ops when it sees it).
+// 1200 (vs the aimem reference's 900): the handoff prompt self-caps at ~400 words, so the extra
+// headroom is for the denser `dream` consolidation that shares this engine (lands in slice 04).
 const GEMINI_MAX_OUTPUT_TOKENS = 1200;
 
 /** Assemble the model input: the task system prompt, then the transcript blob (mirrors the reference). */
