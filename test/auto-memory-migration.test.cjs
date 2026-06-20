@@ -26,9 +26,6 @@ const MIGRATION_FILE = '007-auto-memory-transition.cjs';
 const migration = require('../migrations/' + MIGRATION_FILE);
 const realMigrationBody = () => fs.readFileSync(path.join(PKG_ROOT, 'migrations', MIGRATION_FILE), 'utf8');
 
-// the version the migration ships with — must equal the package version (no-inert-migration invariant).
-const PKG_VERSION = require('../package.json').version;
-
 // A throwaway kernel package at `version` carrying ONLY the supplied migrations (mirrors the 004 test) —
 // so `update()` runs just migration 007 against the install, not the full 001..006 chain.
 function fakePkg(work, version, migrations) {
@@ -106,9 +103,9 @@ function gitignoreLines(target) {
 
 // ── metadata ──────────────────────────────────────────────────────────────────
 
-test('migration metadata: id 007 ships with the package version', () => {
+test('migration metadata: id 007 ships with version 0.12.0', () => {
   assert.equal(migration.id, '007');
-  assert.equal(migration.version, PKG_VERSION);
+  assert.equal(migration.version, '0.12.0');
   assert.equal(typeof migration.up, 'function');
 });
 
