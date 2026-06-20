@@ -690,3 +690,131 @@ test('AC4 (pure): the stamp is shape-safe — a malicious score cannot inject fr
   assert.match(stampImportance(page, 1.5), /^importance: 1$/m);
   assert.match(stampImportance(page, -0.3), /^importance: 0$/m);
 });
+
+// ── --source quote-verification (auto-memory-01) ──────────────────────────────
+// The single mechanical control that makes auto-dream safe without a human: when check/commit are
+// given a --source transcript blob, every evidence quote must verifiably appear in it (normalized:
+// whitespace-collapsed + case-insensitive). A quote NOT in the source → quote_not_in_source. With NO
+// --source the path is byte-identical to today (the manual dream skill is a trusted proposer).
+
+// Write a raw text source blob under the install and return its absolute path.
+function writeSource(target, name, text) {
+  const p = path.join(target, name);
+  fs.writeFileSync(p, text);
+  return p;
+}
+
+// check a single proposal WITH a --source blob (the auto-dream verification path).
+function checkOneSource(target, proposal, sourceText) {
+  const pf = writeJson(target, 'p.json', proposal);
+  const sf = writeSource(target, 'src.txt', sourceText);
+  return JSON.parse(dream(target, ['check', pf, '--source', sf]));
+}
+
+// commit BY REFERENCE WITH a --source blob (the re-gate at the write boundary, source-verified).
+function commitSource(target, approved, sourceText) {
+  const af = writeJson(target, 'approved.json', approved);
+  const sf = writeSource(target, 'src.txt', sourceText);
+  return JSON.parse(dream(target, ['commit', af, '--source', sf]));
+}
+
+test('check --source: a proposal whose evidence quote is NOT in the source → quote_not_in_source', () => {
+  const t = freshInstall('dream-src-absent-');
+  const v = checkOneSource(t, validProposal(), 'a transcript that never mentions that decision at all');
+  assert.equal(v.ok, false);
+  assert.equal(v.reason, 'quote_not_in_source');
+});
+
+test('SECURITY (commit --source): a staged proposal whose quote is not in the source is NOT written', () => {
+  const t = freshInstall('dream-src-commit-');
+  const p = validProposal({ slug: 'halluc', title: 'Hallucinated', body: '# Hallucinated\n\nfabricated memory.', evidence: [{ quote: 'a sentence never spoken in the transcript' }] });
+  seedStaged(t, [{ ts: 'x', op: 'stage', slug: 'halluc', tier: 'decisions', proposal: p }]);
+  const out = commitSource(t, ['halluc'], 'a transcript that does not contain that sentence');
+  assert.equal(out.written.length, 0, 'the hallucinated proposal is blocked at the commit re-gate');
+  assert.equal(out.skipped[0].slug, 'halluc');
+  assert.equal(out.skipped[0].reason, 'quote_not_in_source');
+  assert.ok(!fs.existsSync(path.join(t, '.wrxn', 'wiki', 'decisions', 'halluc.md')), 'nothing reached the recall surface');
+});
+
+test('check --source: every evidence quote substring-matches the source → accepted', () => {
+  const t = freshInstall('dream-src-present-');
+  const src = 'In turn 12, after debate, we decided to merge to main behind required gates.';
+  assert.deepEqual(checkOneSource(t, validProposal(), src), { ok: true });
+});
+
+test('no --source: the legacy path is unchanged — a quote in no transcript still passes (trusted proposer)', () => {
+  const t = freshInstall('dream-src-legacy-');
+  // omitting --source means NO quote-verify: the manual dream skill is a trusted main-agent proposer
+  assert.deepEqual(checkOne(t, validProposal({ evidence: [{ quote: 'a quote that appears in no transcript anywhere' }] })), { ok: true });
+});
+
+test('check --source: quote matching is whitespace-collapsed + case-insensitive (no false reject)', () => {
+  const t = freshInstall('dream-src-normalize-');
+  // the source differs from the quote only in CASE + line wraps + indentation — must still match
+  const src = 'WE DECIDED to merge\n     to main   behind\n\trequired GATES today.';
+  const p = validProposal({ evidence: [{ quote: 'we decided to merge to main behind required gates' }] });
+  assert.deepEqual(checkOneSource(t, p, src), { ok: true });
+});
+
+test('check --source: a quote present only as scattered words (not contiguous) is rejected → quote_not_in_source', () => {
+  const t = freshInstall('dream-src-noncontiguous-');
+  // every word of the quote appears in the source but never as the contiguous substantive phrase
+  const src = 'we discussed gates. later, required reviews. separately, merge plans for main.';
+  const p = validProposal({ evidence: [{ quote: 'we decided to merge to main behind required gates' }] });
+  assert.equal(checkOneSource(t, p, src).reason, 'quote_not_in_source');
+});
+
+test('check --source composes: a present quote does NOT bypass the confidence floor', () => {
+  const t = freshInstall('dream-src-compose-conf-');
+  const src = 'we decided to merge to main behind required gates';
+  assert.equal(checkOneSource(t, validProposal({ confidence: 0.5 }), src).reason, 'confidence_below_threshold');
+});
+
+test('check --source composes: a present quote does NOT bypass the negative filters', () => {
+  const t = freshInstall('dream-src-compose-neg-');
+  const quote = 'the recon tool is broken';
+  const src = `session log: ${quote}, the user noted in frustration.`;
+  // the quote is REAL (in source) yet the authored body still trips the anti-superstition filter
+  const p = validProposal({ kind: 'gotcha', tier: 'gotchas', slug: 'recon-broken', title: 'recon note', body: '# recon\n\nThe recon tool is broken and does not work.', evidence: [{ quote }] });
+  assert.equal(checkOneSource(t, p, src).reason, 'negative_filter_tool_broken');
+});
+
+test('check --source precedence: quote_not_in_source is reported BEFORE a negative-filter trip (documented order)', () => {
+  const t = freshInstall('dream-src-precedence-');
+  // the body WOULD trip negative_filter_tool_broken, but the quote is absent from the source: quote-verify wins
+  const p = validProposal({ kind: 'gotcha', tier: 'gotchas', slug: 'recon-broken', title: 'recon note', body: '# recon\n\nThe recon tool is broken and does not work.', evidence: [{ quote: 'a quote absent from the source' }] });
+  assert.equal(checkOneSource(t, p, 'a transcript with no such quote in it').reason, 'quote_not_in_source');
+});
+
+test('check --source (batch): an unverifiable quote is rejected while the verifiable proposal is accepted', () => {
+  const t = freshInstall('dream-src-batch-');
+  const good = validProposal({ kind: 'concept', tier: 'concepts', slug: 'use-pino', title: 'Use pino', body: '# Pino\n\nWe log with pino.', evidence: [{ quote: 'we will log with pino' }] });
+  const bad = validProposal({ kind: 'gotcha', tier: 'gotchas', slug: 'cache-trap', title: 'Cache trap', body: '# Cache trap\n\nWarm the cache.', evidence: [{ quote: 'a fabricated never-said sentence' }] });
+  const src = 'in this session we will log with pino for everything.';
+  const res = JSON.parse(dream(t, ['check', writeJson(t, 'b.json', { proposals: [good, bad] }), '--source', writeSource(t, 'src.txt', src)]));
+  assert.equal(res.accepted.length, 1);
+  assert.equal(res.accepted[0].slug, 'use-pino');
+  assert.equal(res.rejected.length, 1);
+  assert.deepEqual({ slug: res.rejected[0].slug, reason: res.rejected[0].reason }, { slug: 'cache-trap', reason: 'quote_not_in_source' });
+});
+
+test('commit --source: a staged proposal whose quote IS in the source is written to the recall surface', () => {
+  const t = freshInstall('dream-src-commit-ok-');
+  const p = validProposal({ slug: 'verified', title: 'Verified', body: '# Verified\n\nreal memory.', evidence: [{ quote: 'we agreed to ship the verified path' }] });
+  seedStaged(t, [{ ts: 'x', op: 'stage', slug: 'verified', tier: 'decisions', proposal: p }]);
+  const out = commitSource(t, ['verified'], 'late in the session we agreed to ship the verified path.');
+  assert.equal(out.written.length, 1);
+  assert.equal(out.written[0].slug, 'verified');
+  assert.ok(fs.existsSync(path.join(t, '.wrxn', 'wiki', 'decisions', 'verified.md')), 'the verified page reaches the wiki');
+});
+
+test('SECURITY: check --source with an UNREADABLE source file fails (exit 2) — never silently disables the gate', () => {
+  const t = freshInstall('dream-src-missing-');
+  let err;
+  try {
+    dream(t, ['check', writeJson(t, 'p.json', validProposal()), '--source', path.join(t, 'does-not-exist.txt')]);
+  } catch (e) { err = e; }
+  assert.ok(err, 'check exited non-zero');
+  assert.equal(err.status, 2);
+  assert.match(String(err.stderr || ''), /--source/);
+});

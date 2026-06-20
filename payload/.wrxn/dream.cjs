@@ -11,6 +11,9 @@
 //          · a single Proposal object  → a single Verdict { ok, reason? }.
 //          · an array / { proposals:[…] } / { abstain:true } → a batch result
 //            { abstained, accepted[], rejected[{index,slug,reason}] } (applies the ≤5 run cap + restraint).
+//          · --source <file> (optional, auto-memory-01): the session transcript blob. When present,
+//            every evidence quote must verifiably appear in it (normalized substring) or the proposal
+//            is rejected quote_not_in_source. Absent ⇒ no quote-verify (the trusted manual-dream path).
 //   stage  <batch.json>                   record the VALIDATED (accepted) batch into the audit trail
 //          under .wrxn/dream/ as .jsonl (NEVER .md, so recon's prose ingestion never recalls a
 //          staged-but-unapproved proposal). Nothing is written to the wiki.
@@ -22,6 +25,8 @@
 //          can never reach recall even if its slug is force-approved. Additive + dedup-SKIP; a slug not
 //          staged (not_staged) or one that fails re-validation is recorded skipped with the reason, and
 //          the rest of the batch still writes. Then the outcome is appended to the .wrxn/dream/ audit log.
+//          · --source <file> (optional, auto-memory-01): re-verifies every quote at the write boundary,
+//            so a hallucinated proposal is blocked from recall even if its slug is force-approved.
 //   set-focus <focus.json>                write/OVERWRITE the durable standing-focus slot
 //          `_slots/current-focus.md` (input { title?, body }) via the wiki adapter's --force path, then
 //          log it. This is the LONE update-exception: only the focus slot may be overwritten; the
@@ -29,7 +34,8 @@
 //          continuity baton (`.wrxn/continuity/latest.md`, single-writer = the handoff skill) — set-focus
 //          NEVER reads or writes that baton (different path, different writer: the continuity doctrine).
 //
-// Flag: --root <dir> (override the install-root walk-up; mainly for tests).
+// Flags: --root <dir> (override the install-root walk-up; mainly for tests).
+//        --source <file> (check|commit only) — the transcript blob for quote-verification (auto-memory-01).
 //
 // Proposal { kind:"concept"|"decision"|"gotcha"|"rule"; tier:"concepts"|"decisions"|"gotchas"|"_rules";
 //            slug; title; body /* starts "# " */; confidence /*0–1*/; rationale; evidence:[{quote,source?}] }
@@ -235,11 +241,37 @@ function secretScan(text) {
   return null;
 }
 
+// ── source quote-verification (auto-memory-01) ────────────────────────────────
+// The single mechanical control that lets a NON-human proposer (auto-dream) write durable memory
+// without poisoning recall: when a --source transcript blob is supplied, every evidence quote must
+// VERIFIABLY appear in it, else the proposal is a hallucination → quote_not_in_source. Matching is
+// normalized — lowercased + whitespace-collapsed — so transcript formatting (line wraps, indentation,
+// case) never causes a false reject, while the substantive quote text must still be present contiguously
+// (we do NOT strip punctuation: the AC scopes normalization to whitespace + case only). When no source
+// is supplied (the manual dream skill — a trusted main-agent proposer) this is a no-op, so behavior is
+// byte-identical to today. A non-string quote never reaches here: the evidence-presence check rejects it.
+function normalizeForMatch(s) {
+  return String(s == null ? '' : s).toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function quotesInSource(p, source) {
+  const hay = normalizeForMatch(source);
+  return p.evidence.every((e) => hay.includes(normalizeForMatch(e.quote)));
+}
+
 // ── the pure per-proposal gate ────────────────────────────────────────────────
-// Deterministic given (proposal, io). `io` injects the dedup IO so the gate stays a pure, unit-testable
-// function (mirrors Phase-2 decideRecall): io.pathExists(tier,slug) / io.titleExists(title,tier,slug).
-// Precedence: routing validity → quality → content safety → dedup (the last, most-expensive check).
-function validateProposal(p, io) {
+// Deterministic given (proposal, io, source). `io` injects the dedup IO so the gate stays a pure,
+// unit-testable function (mirrors Phase-2 decideRecall): io.pathExists(tier,slug) /
+// io.titleExists(title,tier,slug). `source` (auto-memory-01) is the optional transcript blob: when a
+// non-null string, every evidence quote must verifiably appear in it (quote_not_in_source); when null
+// (the manual dream path) the quote-verify is skipped — behavior is byte-identical to today.
+// PRECEDENCE (deterministic, documented): routing validity (tier, kind↔tier) → confidence floor →
+// evidence presence → SOURCE quote-verify → rationale → body → negative filters → secret-scan →
+// identity → dedup. So quote_not_in_source is reported AFTER the cheap structural checks the quote
+// itself depends on (it needs evidence to exist) and the confidence floor, but BEFORE the negative
+// filters, secret-scan, identity and the expensive dedup IO. Quote-verify composes with — never
+// bypasses — every existing check: a proposal that passes quote-verify still faces all later gates.
+function validateProposal(p, io, source) {
   if (!p || typeof p !== 'object' || Array.isArray(p)) return { ok: false, reason: 'invalid_proposal' };
   if (!TIERS.includes(p.tier)) return { ok: false, reason: 'unsupported_tier' };
   if (KIND_TIER[p.kind] !== p.tier) return { ok: false, reason: 'kind_tier_mismatch' };
@@ -248,6 +280,10 @@ function validateProposal(p, io) {
       !p.evidence.every((e) => e && typeof e.quote === 'string' && e.quote.trim().length > 0)) {
     return { ok: false, reason: 'missing_evidence' };
   }
+  // SOURCE quote-verify (auto-memory-01): runs ONLY when a --source blob is supplied. The evidence is
+  // known present + non-blank here, so each quote must normalize-substring-match the source or the
+  // proposal is a hallucination. Null source (manual dream) ⇒ skipped ⇒ byte-identical to today.
+  if (source != null && !quotesInSource(p, source)) return { ok: false, reason: 'quote_not_in_source' };
   if (typeof p.rationale !== 'string' || p.rationale.trim().length === 0) return { ok: false, reason: 'missing_rationale' };
   if (typeof p.body !== 'string' || !p.body.startsWith('# ')) return { ok: false, reason: 'body_missing_h1' };
   if (p.body.length > BODY_MAX) return { ok: false, reason: 'body_too_large' };
@@ -266,14 +302,15 @@ function validateProposal(p, io) {
   return { ok: true };
 }
 
-// Run-level gate: restraint (empty/abstain ⇒ write nothing) + the ≤5 accepted cap.
-function validateRun(proposals, io) {
+// Run-level gate: restraint (empty/abstain ⇒ write nothing) + the ≤5 accepted cap. `source` threads
+// the optional --source blob to every per-proposal quote-verify (auto-memory-01); null ⇒ legacy path.
+function validateRun(proposals, io, source) {
   const accepted = [];
   const rejected = [];
   let acceptedCount = 0;
   for (let i = 0; i < proposals.length; i++) {
     const p = proposals[i];
-    const v = validateProposal(p, io);
+    const v = validateProposal(p, io, source);
     if (v.ok) {
       acceptedCount += 1;
       if (acceptedCount > MAX_ACCEPTED) {
@@ -342,6 +379,21 @@ function readJson(file) {
   }
 }
 
+// Read the optional --source transcript blob (auto-memory-01). Absent ⇒ null (the legacy path, no
+// quote-verify). Present-but-unreadable ⇒ HARD fail (exit 2): a missing source must NEVER silently
+// disable the gate — that would let a broken/unreadable file turn off the one defense against a
+// hallucinated memory. The blob is raw text (the transcript), so it is read as-is, not parsed.
+function readSource() {
+  const file = flag('source');
+  if (file === undefined) return null;
+  try {
+    return fs.readFileSync(file, 'utf8');
+  } catch (err) {
+    fail(`cannot read --source file "${file}": ${err.message}`);
+    return undefined;
+  }
+}
+
 function appendLine(file, obj) {
   fs.appendFileSync(file, JSON.stringify(obj) + '\n');
 }
@@ -357,12 +409,13 @@ function runCheck() {
   const input = readJson(positionalFile());
   const root = installRoot();
   const io = makeIo(root);
+  const source = readSource(); // null ⇒ legacy path (no quote-verify); string ⇒ verify every quote
   if (isBatchInput(input)) {
     const { proposals, abstain } = normalizeBatch(input);
     if (abstain) return print({ abstained: true, accepted: [], rejected: [] });
-    return print(validateRun(proposals, io));
+    return print(validateRun(proposals, io, source));
   }
-  return print(validateProposal(input, io)); // single proposal → single Verdict
+  return print(validateProposal(input, io, source)); // single proposal → single Verdict
 }
 
 function runStage() {
@@ -427,6 +480,7 @@ function runCommit() {
   const root = installRoot();
   const approved = approvedSlugs(input);
   const io = makeIo(root);
+  const source = readSource(); // null ⇒ legacy re-gate; string ⇒ re-verify every quote at the write boundary
   const staged = readStaged(root);
   const written = [];
   const skipped = [];
@@ -437,7 +491,7 @@ function runCommit() {
       skipped.push({ slug: key, reason: 'not_staged' });
       continue;
     }
-    const v = validateProposal(p, io); // the re-gate — additive + dedup-skip + every quality/safety check
+    const v = validateProposal(p, io, source); // the re-gate — additive + dedup-skip + quote-verify + every quality/safety check
     if (!v.ok) {
       skipped.push({ slug: key, reason: v.reason });
       continue;
