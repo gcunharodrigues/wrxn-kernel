@@ -62,8 +62,13 @@ test('AC1 payload no longer ships session-end.cjs or session-history.cjs', () =>
   assert.equal(fs.existsSync(path.join(HOOKS, 'session-start.cjs')), true, 'session-start.cjs kept');
 });
 
-test('AC1 settings.json drops the SessionEnd event entirely', () => {
-  assert.ok(!('SessionEnd' in (settings().hooks || {})), 'no SessionEnd event remains');
+// harvest-01's true invariant is that the RETIRED session-end episodic writer is gone — not that the
+// SessionEnd event can never exist again. auto-memory-03 re-occupies SessionEnd with the auto-handoff
+// synth spawn hook (memory-synth-spawn.cjs), which is a different, deliberate writer. So: no
+// session-end.cjs on SessionEnd; the new synth spawn hook is allowed.
+test('AC1 settings.json does not wire the retired session-end writer on SessionEnd', () => {
+  const sessionEnd = JSON.stringify((settings().hooks || {}).SessionEnd || []);
+  assert.ok(!sessionEnd.includes('session-end.cjs'), 'the retired session-end.cjs is not wired on SessionEnd');
 });
 
 test('AC1 settings.json unwires session-history from the UserPromptSubmit chain, keeping synapse-engine + the rest', () => {

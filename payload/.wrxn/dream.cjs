@@ -6,11 +6,14 @@
 // (node stdlib only). The dream SKILL (the LLM, dream-02) PROPOSES; THIS adapter JUDGES (a
 // deterministic gate) and records — "bad memory is worse than no memory".
 //
-// In THIS slice the adapter is driven by hand-fed proposal JSON (no LLM). Four subcommands:
+// In THIS slice the adapter is driven by hand-fed proposal JSON (no LLM). Three subcommands:
 //   check  <proposal.json | batch.json>   run the Validation gate.
 //          · a single Proposal object  → a single Verdict { ok, reason? }.
 //          · an array / { proposals:[…] } / { abstain:true } → a batch result
 //            { abstained, accepted[], rejected[{index,slug,reason}] } (applies the ≤5 run cap + restraint).
+//          · --source <file> (optional, auto-memory-01): the session transcript blob. When present,
+//            every evidence quote must verifiably appear in it (normalized substring) or the proposal
+//            is rejected quote_not_in_source. Absent ⇒ no quote-verify (the trusted manual-dream path).
 //   stage  <batch.json>                   record the VALIDATED (accepted) batch into the audit trail
 //          under .wrxn/dream/ as .jsonl (NEVER .md, so recon's prose ingestion never recalls a
 //          staged-but-unapproved proposal). Nothing is written to the wiki.
@@ -22,21 +25,18 @@
 //          can never reach recall even if its slug is force-approved. Additive + dedup-SKIP; a slug not
 //          staged (not_staged) or one that fails re-validation is recorded skipped with the reason, and
 //          the rest of the batch still writes. Then the outcome is appended to the .wrxn/dream/ audit log.
-//   set-focus <focus.json>                write/OVERWRITE the durable standing-focus slot
-//          `_slots/current-focus.md` (input { title?, body }) via the wiki adapter's --force path, then
-//          log it. This is the LONE update-exception: only the focus slot may be overwritten; the
-//          knowledge gate/commit above stay additive + dedup-skip. The focus slot is DISJOINT from the
-//          continuity baton (`.wrxn/continuity/latest.md`, single-writer = the handoff skill) — set-focus
-//          NEVER reads or writes that baton (different path, different writer: the continuity doctrine).
+//          · --source <file> (optional, auto-memory-01): re-verifies every quote at the write boundary,
+//            so a hallucinated proposal is blocked from recall even if its slug is force-approved.
 //
-// Flag: --root <dir> (override the install-root walk-up; mainly for tests).
+// Flags: --root <dir> (override the install-root walk-up; mainly for tests).
+//        --source <file> (check|commit only) — the transcript blob for quote-verification (auto-memory-01).
 //
 // Proposal { kind:"concept"|"decision"|"gotcha"|"rule"; tier:"concepts"|"decisions"|"gotchas"|"_rules";
 //            slug; title; body /* starts "# " */; confidence /*0–1*/; rationale; evidence:[{quote,source?}] }
 // Verdict  { ok:boolean; reason?:string /* machine code on reject */ }
 // NOTE: `_slots` is NOT a knowledge-gate tier — KIND_TIER stays {concepts,decisions,gotchas,_rules}; a
-//       knowledge proposal targeting `_slots` is rejected `unsupported_tier`. The slot is reached ONLY
-//       via set-focus.
+//       knowledge proposal targeting `_slots` is rejected `unsupported_tier`. (The standing-focus slot and
+//       its set-focus op were retired in auto-memory-05; the auto-handoff baton carries "where we are".)
 
 const fs = require('fs');
 const path = require('path');
@@ -51,13 +51,7 @@ const BODY_MAX = 32000; // size cap (chars) — a durable page, not a transcript
 const MAX_ACCEPTED = 5; // one run can't flood the wiki.
 const DREAM_DIR = ['.wrxn', 'dream'];
 const STAGED_FILE = 'staged.jsonl'; // the validated-but-unapproved batch (full proposals).
-const AUDIT_FILE = 'audit.jsonl'; // the append-only outcome log (stage + commit + set-focus events).
-
-// The durable standing-focus slot — a FIXED wiki path (tier + slug). set-focus is its ONLY writer and
-// overwrites it in place (the lone update-exception). `_slots` is deliberately ABSENT from KIND_TIER /
-// TIERS above: it is not a knowledge-gate tier, so the additive + dedup-skip knowledge gate is untouched.
-const FOCUS_TIER = '_slots';
-const FOCUS_SLUG = 'current-focus';
+const AUDIT_FILE = 'audit.jsonl'; // the append-only outcome log (stage + commit events).
 
 // ── install-root resolution (mirrors wiki.cjs / enforce-managed-guard.cjs) ─────
 function findInstallRoot(start) {
@@ -131,14 +125,6 @@ function wikiQuery(root, terms, opts) {
 function wikiWritePage(root, tier, slug, description, body) {
   guardArgv([slug, String(description || ''), String(body || '')]);
   const args = [wikiAdapter(), 'write-page', tier, slug, '--description', String(description || ''), '--body', String(body || ''), '--root', root];
-  return JSON.parse(execFileSync('node', args, { encoding: 'utf8' }));
-}
-
-// Overwrite a page in place via the wiki adapter's --force path (the indirection contract — never a
-// direct .md write). wiki.cjs restricts --force to the `_slots` tier, so only the focus slot is reachable.
-function wikiForceWritePage(root, tier, slug, description, body) {
-  guardArgv([slug, String(description || ''), String(body || '')]);
-  const args = [wikiAdapter(), 'write-page', tier, slug, '--description', String(description || ''), '--body', String(body || ''), '--force', '--root', root];
   return JSON.parse(execFileSync('node', args, { encoding: 'utf8' }));
 }
 
@@ -235,11 +221,66 @@ function secretScan(text) {
   return null;
 }
 
+// ── source quote-verification (auto-memory-01 + F1 substantive floor) ──────────
+// The single mechanical control that lets a NON-human proposer (auto-dream) write durable memory
+// without poisoning recall: when a --source transcript blob is supplied, every evidence quote must be a
+// SUBSTANTIVE verbatim span that VERIFIABLY appears in it, else the proposal is a hallucination. Matching
+// is normalized — lowercased + whitespace-collapsed — so transcript formatting (line wraps, indentation,
+// case) never causes a false reject, while the substantive quote text must still be present contiguously
+// (we do NOT strip punctuation: the AC scopes normalization to whitespace + case only). When no source
+// is supplied (the manual dream skill — a trusted main-agent proposer) this is a no-op, so behavior is
+// byte-identical to today. A non-string quote never reaches here: the evidence-presence check rejects it.
+//
+// F1 (security MED): a bare substring match is satisfied by a trivially-present quote — "the" is a
+// substring of essentially every transcript — so the proposer needed only ANY real word to clear the
+// gate, under-delivering the PRD's load-bearing "a hallucination can't poison recall" claim. So a quote
+// must FIRST be substantive before its presence counts: the NORMALIZED quote must be ≥ QUOTE_MIN_CHARS
+// chars AND ≥ QUOTE_MIN_TOKENS whitespace-delimited word tokens, else quote_not_substantive. The token
+// floor rejects single/two-word fragments ("the", "it works"); the char floor backstops it against tiny
+// 3-token spans ("a b c"). The bar is low enough never to false-reject a terse real decision quote
+// ("use pino logs"), and a proposer grounding a real decision can always cite a fuller span.
+function normalizeForMatch(s) {
+  return String(s == null ? '' : s).toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+// The substantive-quote floor (F1). Operates on the NORMALIZED quote so it is independent of transcript
+// formatting/case. Tunable here; pinned in BOTH directions (reject "the"/"authentication"; admit
+// "use pino logs") by test/dream.test.cjs.
+const QUOTE_MIN_CHARS = 12;
+const QUOTE_MIN_TOKENS = 3;
+
+function isSubstantiveQuote(quote) {
+  const norm = normalizeForMatch(quote);
+  if (norm.length < QUOTE_MIN_CHARS) return false;
+  return norm.split(' ').filter(Boolean).length >= QUOTE_MIN_TOKENS;
+}
+
+// Quote-verify (auto-memory-01 + F1): returns a reject reason or null. PRECEDENCE — substantiveness is a
+// property of the quote ALONE, so it is a global precondition checked BEFORE any source-presence match:
+// if ANY quote is non-substantive → quote_not_substantive; else if ANY quote is absent from the source →
+// quote_not_in_source. (So quote_not_substantive is reported before quote_not_in_source.)
+function verifyQuotes(p, source) {
+  if (!p.evidence.every((e) => isSubstantiveQuote(e.quote))) return 'quote_not_substantive';
+  const hay = normalizeForMatch(source);
+  if (!p.evidence.every((e) => hay.includes(normalizeForMatch(e.quote)))) return 'quote_not_in_source';
+  return null;
+}
+
 // ── the pure per-proposal gate ────────────────────────────────────────────────
-// Deterministic given (proposal, io). `io` injects the dedup IO so the gate stays a pure, unit-testable
-// function (mirrors Phase-2 decideRecall): io.pathExists(tier,slug) / io.titleExists(title,tier,slug).
-// Precedence: routing validity → quality → content safety → dedup (the last, most-expensive check).
-function validateProposal(p, io) {
+// Deterministic given (proposal, io, source). `io` injects the dedup IO so the gate stays a pure,
+// unit-testable function (mirrors Phase-2 decideRecall): io.pathExists(tier,slug) /
+// io.titleExists(title,tier,slug). `source` (auto-memory-01) is the optional transcript blob: when a
+// non-null string, every evidence quote must be substantive (quote_not_substantive) and verifiably appear
+// in it (quote_not_in_source); when null (the manual dream path) the quote-verify is skipped — behavior is
+// byte-identical to today.
+// PRECEDENCE (deterministic, documented): routing validity (tier, kind↔tier) → confidence floor →
+// evidence presence → SOURCE quote-verify [substantive floor (quote_not_substantive) BEFORE
+// source-presence (quote_not_in_source)] → rationale → body → negative filters → secret-scan →
+// identity → dedup. So the quote-verify reasons are reported AFTER the cheap structural checks the quote
+// itself depends on (it needs evidence to exist) and the confidence floor, but BEFORE the negative
+// filters, secret-scan, identity and the expensive dedup IO. Quote-verify composes with — never
+// bypasses — every existing check: a proposal that passes quote-verify still faces all later gates.
+function validateProposal(p, io, source) {
   if (!p || typeof p !== 'object' || Array.isArray(p)) return { ok: false, reason: 'invalid_proposal' };
   if (!TIERS.includes(p.tier)) return { ok: false, reason: 'unsupported_tier' };
   if (KIND_TIER[p.kind] !== p.tier) return { ok: false, reason: 'kind_tier_mismatch' };
@@ -247,6 +288,14 @@ function validateProposal(p, io) {
   if (!Array.isArray(p.evidence) || p.evidence.length === 0 ||
       !p.evidence.every((e) => e && typeof e.quote === 'string' && e.quote.trim().length > 0)) {
     return { ok: false, reason: 'missing_evidence' };
+  }
+  // SOURCE quote-verify (auto-memory-01 + F1): runs ONLY when a --source blob is supplied. The evidence is
+  // known present + non-blank here, so each quote must be a substantive span (quote_not_substantive) AND
+  // normalize-substring-match the source (quote_not_in_source) or the proposal is a hallucination. Null
+  // source (manual dream) ⇒ skipped ⇒ byte-identical to today.
+  if (source != null) {
+    const qr = verifyQuotes(p, source);
+    if (qr) return { ok: false, reason: qr };
   }
   if (typeof p.rationale !== 'string' || p.rationale.trim().length === 0) return { ok: false, reason: 'missing_rationale' };
   if (typeof p.body !== 'string' || !p.body.startsWith('# ')) return { ok: false, reason: 'body_missing_h1' };
@@ -266,14 +315,15 @@ function validateProposal(p, io) {
   return { ok: true };
 }
 
-// Run-level gate: restraint (empty/abstain ⇒ write nothing) + the ≤5 accepted cap.
-function validateRun(proposals, io) {
+// Run-level gate: restraint (empty/abstain ⇒ write nothing) + the ≤5 accepted cap. `source` threads
+// the optional --source blob to every per-proposal quote-verify (auto-memory-01); null ⇒ legacy path.
+function validateRun(proposals, io, source) {
   const accepted = [];
   const rejected = [];
   let acceptedCount = 0;
   for (let i = 0; i < proposals.length; i++) {
     const p = proposals[i];
-    const v = validateProposal(p, io);
+    const v = validateProposal(p, io, source);
     if (v.ok) {
       acceptedCount += 1;
       if (acceptedCount > MAX_ACCEPTED) {
@@ -342,6 +392,30 @@ function readJson(file) {
   }
 }
 
+// Read the optional --source transcript blob (auto-memory-01). Absent ⇒ null (the legacy path, no
+// quote-verify). PRESENT ⇒ it MUST carry a real, readable file value: a value-less / empty / --leading
+// token (F2) or an unreadable path ⇒ HARD fail (exit 2). A missing source must NEVER silently disable the
+// gate — that would let a malformed argv (or a broken file) turn off the one defense against a
+// hallucinated memory. We read argv DIRECTLY here (not flag()): flag('source') collapses "flag absent"
+// and "flag present-but-valueless" both to undefined, but only the former may fall through to legacy.
+// The blob is raw text (the transcript), read as-is, not parsed.
+function readSource() {
+  const i = process.argv.indexOf('--source');
+  if (i === -1) return null; // the flag is truly absent → legacy path (the trusted manual-dream proposer)
+  const file = process.argv[i + 1];
+  // --source WAS asked for, so it must not silently revert to no-verify: a trailing token (undefined), an
+  // empty value, or another flag (e.g. `--root`) is a fail-CLOSED malformed argv, never "gate off" (F2).
+  if (file === undefined || file === '' || file.startsWith('--')) {
+    fail('--source was given without a readable file value — refusing to silently disable quote-verify');
+  }
+  try {
+    return fs.readFileSync(file, 'utf8');
+  } catch (err) {
+    fail(`cannot read --source file "${file}": ${err.message}`);
+    return undefined;
+  }
+}
+
 function appendLine(file, obj) {
   fs.appendFileSync(file, JSON.stringify(obj) + '\n');
 }
@@ -357,12 +431,13 @@ function runCheck() {
   const input = readJson(positionalFile());
   const root = installRoot();
   const io = makeIo(root);
+  const source = readSource(); // null ⇒ legacy path (no quote-verify); string ⇒ verify every quote
   if (isBatchInput(input)) {
     const { proposals, abstain } = normalizeBatch(input);
     if (abstain) return print({ abstained: true, accepted: [], rejected: [] });
-    return print(validateRun(proposals, io));
+    return print(validateRun(proposals, io, source));
   }
-  return print(validateProposal(input, io)); // single proposal → single Verdict
+  return print(validateProposal(input, io, source)); // single proposal → single Verdict
 }
 
 function runStage() {
@@ -427,6 +502,7 @@ function runCommit() {
   const root = installRoot();
   const approved = approvedSlugs(input);
   const io = makeIo(root);
+  const source = readSource(); // null ⇒ legacy re-gate; string ⇒ re-verify every quote at the write boundary
   const staged = readStaged(root);
   const written = [];
   const skipped = [];
@@ -437,7 +513,7 @@ function runCommit() {
       skipped.push({ slug: key, reason: 'not_staged' });
       continue;
     }
-    const v = validateProposal(p, io); // the re-gate — additive + dedup-skip + every quality/safety check
+    const v = validateProposal(p, io, source); // the re-gate — additive + dedup-skip + quote-verify + every quality/safety check
     if (!v.ok) {
       skipped.push({ slug: key, reason: v.reason });
       continue;
@@ -458,34 +534,6 @@ function runCommit() {
   return print({ written, skipped });
 }
 
-// set-focus — write/overwrite the durable standing-focus slot. The LONE update-exception: it is the
-// only op that overwrites a wiki page, and only ever `_slots/current-focus.md`. It is NOT a knowledge
-// proposal (no gate, no dedup) — the skill drafts a short standing-focus statement, the operator
-// confirms, then this writes it via the wiki --force path. DISJOINT from the continuity baton:
-// set-focus never reads or writes `.wrxn/continuity/latest.md` (single-writer = the handoff skill).
-function runSetFocus() {
-  const input = readJson(positionalFile());
-  const root = installRoot();
-  const obj = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
-  const title = obj.title ? String(obj.title) : 'Current focus';
-  const body = obj.body;
-  if (typeof body !== 'string' || body.trim().length === 0) {
-    fail('set-focus needs a non-empty "body" — the standing-focus statement to pin');
-  }
-  // Gate the focus slot too (security M1): it is an ungated --force write, so run the same content-safety
-  // checks the knowledge gate runs — the anti-superstition negative filters + the credential secret-scan
-  // — over the focus title+body, and refuse a `--`-leading flag-injection value. Reject ⇒ nothing written.
-  const scan = `${title}\n${body}`;
-  const neg = negativeFilter(scan);
-  if (neg) fail(`set-focus rejected — the focus body trips a negative filter (${neg}); state durable standing context, not a transient note`);
-  const sec = secretScan(scan);
-  if (sec) fail(`set-focus rejected — the focus body contains a credential (${sec}); never pin a session secret`);
-  if (title.startsWith('--') || body.startsWith('--')) fail('set-focus rejected — a --leading title/body is refused (flag-injection guard)');
-  const r = wikiForceWritePage(root, FOCUS_TIER, FOCUS_SLUG, title, body);
-  appendLine(path.join(dreamDir(root), AUDIT_FILE), { ts: new Date().toISOString(), op: 'set-focus', file: r.written });
-  return print({ focus: r.written });
-}
-
 function main() {
   const cmd = process.argv[2];
   switch (cmd) {
@@ -495,10 +543,8 @@ function main() {
       return runStage();
     case 'commit':
       return runCommit();
-    case 'set-focus':
-      return runSetFocus();
     default:
-      process.stdout.write('Usage: node .wrxn/dream.cjs <check|stage|commit|set-focus> <file.json> [--root <dir>]\n');
+      process.stdout.write('Usage: node .wrxn/dream.cjs <check|stage|commit> <file.json> [--root <dir>]\n');
       process.exit(cmd ? 2 : 0);
   }
 }

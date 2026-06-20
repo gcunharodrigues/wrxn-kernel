@@ -502,114 +502,28 @@ test('the .wrxn/dream audit dir gitkeep is classified state in the manifest and 
   assert.equal(r.class, 'state');
 });
 
-// ── set-focus: the _slots focus slot + the lone update-exception (dream-04) ────
-// The focus slot is the project's durable STANDING focus — NOT a knowledge proposal. set-focus
-// creates AND overwrites _slots/current-focus.md (the lone exception to additive + dedup-skip), goes
-// through wiki.cjs (the indirection contract), and is DISJOINT from the continuity baton.
+// ── set-focus + the _slots focus slot are RETIRED (auto-memory-05) ────────────
+// The stale `_slots/current-focus` slot and its `set-focus` op are removed: the auto-handoff baton +
+// recalled dream pages now carry "where we are / what's next", so the redundant rot-prone slot is gone.
+// `set-focus` is no longer a dream.cjs subcommand (it falls through to usage, exit 2, writes nothing).
 
-function setFocus(t, focus) {
-  return JSON.parse(dream(t, ['set-focus', writeJson(t, 'focus.json', focus)]));
-}
-
-test('set-focus creates _slots/current-focus.md, and a LATER set-focus UPDATES it in place', () => {
-  const t = freshInstall('dream-focus-');
-  const page = path.join(t, '.wrxn', 'wiki', '_slots', 'current-focus.md');
-  setFocus(t, { title: 'Current focus', body: '# Current focus\n\nShip dream-04: the focus slot.' });
-  assert.ok(fs.existsSync(page), 'focus slot created as a real .md under .wrxn/wiki/_slots');
-  assert.match(fs.readFileSync(page, 'utf8'), /Ship dream-04/);
-
-  // a LATER set-focus OVERWRITES the same path in place — the lone update-exception
-  setFocus(t, { title: 'Current focus', body: '# Current focus\n\nNow onto dream-05: the handoff nudge.' });
-  const txt = fs.readFileSync(page, 'utf8');
-  assert.match(txt, /dream-05/, 'slot updated to the new standing focus');
-  assert.doesNotMatch(txt, /dream-04/, 'the prior focus is overwritten in place, not appended');
-});
-
-test('set-focus writes the slot via wiki.cjs as an indexable .md the wiki query can recall', () => {
-  const t = freshInstall('dream-focus-md-');
-  const marker = 'WQZX-distinctive-focus-marker';
-  setFocus(t, { body: `# Current focus\n\n${marker}` });
-  const res = JSON.parse(wiki(t, ['query', marker]));
-  assert.ok(res.total >= 1, 'the focus slot is a queryable wiki page (recon prose-ingests it)');
-  assert.equal(res.hits[0].tier, '_slots');
-});
-
-test('set-focus records the update in the .wrxn/dream audit log (.jsonl)', () => {
-  const t = freshInstall('dream-focus-audit-');
-  setFocus(t, { body: '# Current focus\n\nfocus body' });
-  const audit = fs.readFileSync(path.join(t, '.wrxn', 'dream', 'audit.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
-  const ev = audit.find((e) => e.op === 'set-focus');
-  assert.ok(ev, 'a set-focus event is appended to the audit log');
-  assert.match(ev.file, /_slots\/current-focus\.md$/);
-});
-
-test('INVARIANT: the slot updates while every OTHER tier stays additive + dedup-skip', () => {
-  const t = freshInstall('dream-focus-invariant-');
-  // a dream proposal for 'use-pino' is staged BEFORE any curated page exists
-  const dup = validProposal({ slug: 'use-pino', title: 'Use pino', body: '# Pino\n\nWOULD-CLOBBER if written.' });
-  stage(t, [dup]);
-  // a curated knowledge page with the same slug is then laid by hand
-  wiki(t, ['write-page', 'decisions', 'use-pino', '--description', 'Use pino', '--body', 'CURATED original']);
-
-  // committing the staged slug is re-gate dedup-SKIPPED (additive — never clobbers a knowledge page)
-  const out = commit(t, ['use-pino']);
-  assert.equal(out.written.length, 0, 'the duplicate knowledge page is not written');
-  assert.equal(out.skipped[0].reason, 'duplicate_existing_path');
-  assert.match(fs.readFileSync(path.join(t, '.wrxn', 'wiki', 'decisions', 'use-pino.md'), 'utf8'), /CURATED original/, 'knowledge tier NOT clobbered');
-
-  // …but the focus slot DOES overwrite in place across two set-focus calls
-  setFocus(t, { body: '# Current focus\n\nfocus v1' });
-  setFocus(t, { body: '# Current focus\n\nfocus v2' });
-  const slot = fs.readFileSync(path.join(t, '.wrxn', 'wiki', '_slots', 'current-focus.md'), 'utf8');
-  assert.match(slot, /focus v2/);
-  assert.doesNotMatch(slot, /focus v1/, 'the slot is the LONE updatable page');
-});
-
-test('CONTINUITY DOCTRINE: set-focus never reads or writes the handoff baton (disjoint paths)', () => {
-  const t = freshInstall('dream-focus-baton-');
-  // pre-seed the deliberate handoff baton (single writer = the handoff skill) with a distinctive marker
-  const baton = path.join(t, '.wrxn', 'continuity', 'latest.md');
-  fs.mkdirSync(path.dirname(baton), { recursive: true });
-  const batonMarker = 'BATON-ONLY-marker-must-survive';
-  fs.writeFileSync(baton, `# Handoff\n\n${batonMarker}\n`);
-
-  const focusMarker = 'FOCUS-ONLY-marker';
-  setFocus(t, { body: `# Current focus\n\n${focusMarker}` });
-
-  // the baton is untouched (set-focus never WROTE it) and never absorbed the focus content
-  const batonTxt = fs.readFileSync(baton, 'utf8');
-  assert.match(batonTxt, new RegExp(batonMarker), 'baton content survives — set-focus did not write it');
-  assert.doesNotMatch(batonTxt, new RegExp(focusMarker), 'the focus was not written into the baton');
-  // the focus slot carries ONLY its own marker (set-focus never READ/copied the baton)
-  const slotTxt = fs.readFileSync(path.join(t, '.wrxn', 'wiki', '_slots', 'current-focus.md'), 'utf8');
-  assert.match(slotTxt, new RegExp(focusMarker));
-  assert.doesNotMatch(slotTxt, new RegExp(batonMarker), 'the slot did not absorb the baton (disjoint paths + writers)');
-});
-
-// ── set-focus is gated too (dream-review #4, security M1): negative filters + secret-scan ──
-
-test('SECURITY (M1): set-focus refuses a focus body containing a credential (slot not written)', () => {
-  const t = freshInstall('dream-focus-secret-');
-  const page = path.join(t, '.wrxn', 'wiki', '_slots', 'current-focus.md');
+test('set-focus is no longer a dream subcommand — it falls through to usage and writes no slot', () => {
+  const t = freshInstall('dream-no-setfocus-');
   let err;
   try {
-    dream(t, ['set-focus', writeJson(t, 'focus.json', { body: '# Current focus\n\nrotate AKIAIOSFODNN7EXAMPLE before Friday.' })]);
+    dream(t, ['set-focus', writeJson(t, 'focus.json', { body: '# Current focus\n\nany body' })]);
   } catch (e) { err = e; }
-  assert.ok(err, 'set-focus exited non-zero');
-  assert.match(String(err.stderr || ''), /contains_secret|credential/i);
-  assert.ok(!fs.existsSync(page), 'the focus slot was not written');
-});
-
-test('SECURITY (M1): set-focus refuses a focus body that trips a negative filter (slot not written)', () => {
-  const t = freshInstall('dream-focus-neg-');
-  const page = path.join(t, '.wrxn', 'wiki', '_slots', 'current-focus.md');
-  let err;
-  try {
-    dream(t, ['set-focus', writeJson(t, 'focus.json', { body: '# Current focus\n\nthe recon tool is broken and does not work.' })]);
-  } catch (e) { err = e; }
-  assert.ok(err, 'set-focus exited non-zero');
-  assert.match(String(err.stderr || ''), /negative_filter|negative filter/i);
-  assert.ok(!fs.existsSync(page), 'the focus slot was not written');
+  assert.ok(err, 'set-focus exits non-zero (unknown subcommand → usage)');
+  assert.equal(err.status, 2, 'usage exit code 2');
+  assert.match(String(err.stdout || '') + String(err.stderr || ''), /Usage:/, 'prints the usage banner');
+  // the usage banner no longer advertises set-focus
+  assert.doesNotMatch(String(err.stdout || '') + String(err.stderr || ''), /set-focus/, 'usage no longer lists set-focus');
+  // no focus slot is created by the retired op
+  assert.equal(
+    fs.existsSync(path.join(t, '.wrxn', 'wiki', '_slots', 'current-focus.md')),
+    false,
+    'no _slots/current-focus.md is written',
+  );
 });
 
 test('the knowledge gate does NOT gain _slots — a proposal targeting _slots is unsupported_tier', () => {
@@ -689,4 +603,208 @@ test('AC4 (pure): the stamp is shape-safe — a malicious score cannot inject fr
   // and an out-of-range numeric is clamped both ways
   assert.match(stampImportance(page, 1.5), /^importance: 1$/m);
   assert.match(stampImportance(page, -0.3), /^importance: 0$/m);
+});
+
+// ── --source quote-verification (auto-memory-01) ──────────────────────────────
+// The single mechanical control that makes auto-dream safe without a human: when check/commit are
+// given a --source transcript blob, every evidence quote must verifiably appear in it (normalized:
+// whitespace-collapsed + case-insensitive). A quote NOT in the source → quote_not_in_source. With NO
+// --source the path is byte-identical to today (the manual dream skill is a trusted proposer).
+
+// Write a raw text source blob under the install and return its absolute path.
+function writeSource(target, name, text) {
+  const p = path.join(target, name);
+  fs.writeFileSync(p, text);
+  return p;
+}
+
+// check a single proposal WITH a --source blob (the auto-dream verification path).
+function checkOneSource(target, proposal, sourceText) {
+  const pf = writeJson(target, 'p.json', proposal);
+  const sf = writeSource(target, 'src.txt', sourceText);
+  return JSON.parse(dream(target, ['check', pf, '--source', sf]));
+}
+
+// commit BY REFERENCE WITH a --source blob (the re-gate at the write boundary, source-verified).
+function commitSource(target, approved, sourceText) {
+  const af = writeJson(target, 'approved.json', approved);
+  const sf = writeSource(target, 'src.txt', sourceText);
+  return JSON.parse(dream(target, ['commit', af, '--source', sf]));
+}
+
+test('check --source: a proposal whose evidence quote is NOT in the source → quote_not_in_source', () => {
+  const t = freshInstall('dream-src-absent-');
+  const v = checkOneSource(t, validProposal(), 'a transcript that never mentions that decision at all');
+  assert.equal(v.ok, false);
+  assert.equal(v.reason, 'quote_not_in_source');
+});
+
+test('SECURITY (commit --source): a staged proposal whose quote is not in the source is NOT written', () => {
+  const t = freshInstall('dream-src-commit-');
+  const p = validProposal({ slug: 'halluc', title: 'Hallucinated', body: '# Hallucinated\n\nfabricated memory.', evidence: [{ quote: 'a sentence never spoken in the transcript' }] });
+  seedStaged(t, [{ ts: 'x', op: 'stage', slug: 'halluc', tier: 'decisions', proposal: p }]);
+  const out = commitSource(t, ['halluc'], 'a transcript that does not contain that sentence');
+  assert.equal(out.written.length, 0, 'the hallucinated proposal is blocked at the commit re-gate');
+  assert.equal(out.skipped[0].slug, 'halluc');
+  assert.equal(out.skipped[0].reason, 'quote_not_in_source');
+  assert.ok(!fs.existsSync(path.join(t, '.wrxn', 'wiki', 'decisions', 'halluc.md')), 'nothing reached the recall surface');
+});
+
+test('check --source: every evidence quote substring-matches the source → accepted', () => {
+  const t = freshInstall('dream-src-present-');
+  const src = 'In turn 12, after debate, we decided to merge to main behind required gates.';
+  assert.deepEqual(checkOneSource(t, validProposal(), src), { ok: true });
+});
+
+test('no --source: the legacy path is unchanged — a quote in no transcript still passes (trusted proposer)', () => {
+  const t = freshInstall('dream-src-legacy-');
+  // omitting --source means NO quote-verify: the manual dream skill is a trusted main-agent proposer
+  assert.deepEqual(checkOne(t, validProposal({ evidence: [{ quote: 'a quote that appears in no transcript anywhere' }] })), { ok: true });
+});
+
+test('check --source: quote matching is whitespace-collapsed + case-insensitive (no false reject)', () => {
+  const t = freshInstall('dream-src-normalize-');
+  // the source differs from the quote only in CASE + line wraps + indentation — must still match
+  const src = 'WE DECIDED to merge\n     to main   behind\n\trequired GATES today.';
+  const p = validProposal({ evidence: [{ quote: 'we decided to merge to main behind required gates' }] });
+  assert.deepEqual(checkOneSource(t, p, src), { ok: true });
+});
+
+test('check --source: a quote present only as scattered words (not contiguous) is rejected → quote_not_in_source', () => {
+  const t = freshInstall('dream-src-noncontiguous-');
+  // every word of the quote appears in the source but never as the contiguous substantive phrase
+  const src = 'we discussed gates. later, required reviews. separately, merge plans for main.';
+  const p = validProposal({ evidence: [{ quote: 'we decided to merge to main behind required gates' }] });
+  assert.equal(checkOneSource(t, p, src).reason, 'quote_not_in_source');
+});
+
+test('check --source composes: a present quote does NOT bypass the confidence floor', () => {
+  const t = freshInstall('dream-src-compose-conf-');
+  const src = 'we decided to merge to main behind required gates';
+  assert.equal(checkOneSource(t, validProposal({ confidence: 0.5 }), src).reason, 'confidence_below_threshold');
+});
+
+test('check --source composes: a present quote does NOT bypass the negative filters', () => {
+  const t = freshInstall('dream-src-compose-neg-');
+  const quote = 'the recon tool is broken';
+  const src = `session log: ${quote}, the user noted in frustration.`;
+  // the quote is REAL (in source) yet the authored body still trips the anti-superstition filter
+  const p = validProposal({ kind: 'gotcha', tier: 'gotchas', slug: 'recon-broken', title: 'recon note', body: '# recon\n\nThe recon tool is broken and does not work.', evidence: [{ quote }] });
+  assert.equal(checkOneSource(t, p, src).reason, 'negative_filter_tool_broken');
+});
+
+test('check --source precedence: quote_not_in_source is reported BEFORE a negative-filter trip (documented order)', () => {
+  const t = freshInstall('dream-src-precedence-');
+  // the body WOULD trip negative_filter_tool_broken, but the quote is absent from the source: quote-verify wins
+  const p = validProposal({ kind: 'gotcha', tier: 'gotchas', slug: 'recon-broken', title: 'recon note', body: '# recon\n\nThe recon tool is broken and does not work.', evidence: [{ quote: 'a quote absent from the source' }] });
+  assert.equal(checkOneSource(t, p, 'a transcript with no such quote in it').reason, 'quote_not_in_source');
+});
+
+test('check --source (batch): an unverifiable quote is rejected while the verifiable proposal is accepted', () => {
+  const t = freshInstall('dream-src-batch-');
+  const good = validProposal({ kind: 'concept', tier: 'concepts', slug: 'use-pino', title: 'Use pino', body: '# Pino\n\nWe log with pino.', evidence: [{ quote: 'we will log with pino' }] });
+  const bad = validProposal({ kind: 'gotcha', tier: 'gotchas', slug: 'cache-trap', title: 'Cache trap', body: '# Cache trap\n\nWarm the cache.', evidence: [{ quote: 'a fabricated never-said sentence' }] });
+  const src = 'in this session we will log with pino for everything.';
+  const res = JSON.parse(dream(t, ['check', writeJson(t, 'b.json', { proposals: [good, bad] }), '--source', writeSource(t, 'src.txt', src)]));
+  assert.equal(res.accepted.length, 1);
+  assert.equal(res.accepted[0].slug, 'use-pino');
+  assert.equal(res.rejected.length, 1);
+  assert.deepEqual({ slug: res.rejected[0].slug, reason: res.rejected[0].reason }, { slug: 'cache-trap', reason: 'quote_not_in_source' });
+});
+
+test('commit --source: a staged proposal whose quote IS in the source is written to the recall surface', () => {
+  const t = freshInstall('dream-src-commit-ok-');
+  const p = validProposal({ slug: 'verified', title: 'Verified', body: '# Verified\n\nreal memory.', evidence: [{ quote: 'we agreed to ship the verified path' }] });
+  seedStaged(t, [{ ts: 'x', op: 'stage', slug: 'verified', tier: 'decisions', proposal: p }]);
+  const out = commitSource(t, ['verified'], 'late in the session we agreed to ship the verified path.');
+  assert.equal(out.written.length, 1);
+  assert.equal(out.written[0].slug, 'verified');
+  assert.ok(fs.existsSync(path.join(t, '.wrxn', 'wiki', 'decisions', 'verified.md')), 'the verified page reaches the wiki');
+});
+
+test('SECURITY: check --source with an UNREADABLE source file fails (exit 2) — never silently disables the gate', () => {
+  const t = freshInstall('dream-src-missing-');
+  let err;
+  try {
+    dream(t, ['check', writeJson(t, 'p.json', validProposal()), '--source', path.join(t, 'does-not-exist.txt')]);
+  } catch (e) { err = e; }
+  assert.ok(err, 'check exited non-zero');
+  assert.equal(err.status, 2);
+  assert.match(String(err.stderr || ''), /--source/);
+});
+
+// ── F1 (security MED): the substantive-quote floor (auto-memory-01 follow-up) ───
+// A bare substring match is satisfied by a trivially-present quote ("the" is in every transcript), so the
+// quote-verify under-delivered the PRD's load-bearing "a hallucination can't poison recall" claim — a
+// proposer needed only ANY real word. Each evidence quote must now be a SUBSTANTIVE verbatim span (the
+// NORMALIZED quote ≥ 12 chars AND ≥ 3 word-tokens) before its source match counts, else
+// quote_not_substantive. The trivial quotes below are deliberately PRESENT in the source, so only the new
+// floor (not the presence check) can reject them.
+
+test('check --source (F1): a trivially-present quote ("the") is rejected quote_not_substantive', () => {
+  const t = freshInstall('dream-src-trivial-');
+  // "the" IS a substring of the source — only the substantive floor (not presence) can reject it
+  const p = validProposal({ evidence: [{ quote: 'the' }] });
+  const v = checkOneSource(t, p, 'we talked about the cache and the queue at length today.');
+  assert.equal(v.ok, false);
+  assert.equal(v.reason, 'quote_not_substantive');
+});
+
+test('check --source (F1): the char floor — a 3-token but <12-char quote ("we go now") → quote_not_substantive', () => {
+  const t = freshInstall('dream-src-charfloor-');
+  // 3 word-tokens but only 9 normalized chars: present in source, rejected solely by the char floor
+  const p = validProposal({ evidence: [{ quote: 'we go now' }] });
+  assert.equal(checkOneSource(t, p, 'we go now and circle back later.').reason, 'quote_not_substantive');
+});
+
+test('check --source (F1): the token floor — a long single-word quote ("authentication") → quote_not_substantive', () => {
+  const t = freshInstall('dream-src-tokenfloor-');
+  // 14 chars but a single word-token: present in source, rejected solely by the token floor
+  const p = validProposal({ evidence: [{ quote: 'authentication' }] });
+  assert.equal(checkOneSource(t, p, 'we discussed authentication at length today.').reason, 'quote_not_substantive');
+});
+
+test('check --source (F1): a terse but legitimate multi-word decision quote ("use pino logs") is NOT false-rejected', () => {
+  const t = freshInstall('dream-src-terse-ok-');
+  // 13 chars + 3 tokens clears the floor — a real short decision quote must still be accepted
+  const p = validProposal({ evidence: [{ quote: 'use pino logs' }] });
+  assert.deepEqual(checkOneSource(t, p, 'in this session we will use pino logs for everything.'), { ok: true });
+});
+
+test('check --source (F1) precedence: a trivial quote that is ALSO absent → quote_not_substantive (substantive floor wins)', () => {
+  const t = freshInstall('dream-src-trivial-absent-');
+  // "the" is both trivial AND absent from this source; the documented order reports substantive first
+  const p = validProposal({ evidence: [{ quote: 'the' }] });
+  assert.equal(checkOneSource(t, p, 'a session log lacking that token').reason, 'quote_not_substantive');
+});
+
+// ── F2 (security LOW): a value-less --source must fail CLOSED (auto-memory-01 follow-up) ──
+// A trailing/value-less `--source` token used to fall through to the no-verify legacy path — a silent
+// gate-off. When the caller asks for the gate it must NEVER silently disable: a present-but-valueless
+// --source fails exit 2, like an unreadable source.
+
+test('SECURITY (F2): a value-less trailing --source fails closed (exit 2) — never silently disables the gate', () => {
+  const t = freshInstall('dream-src-valueless-');
+  const pf = writeJson(t, 'p.json', validProposal());
+  let err;
+  try {
+    // --source is the LAST argv token (no value follows). Run cwd INSIDE the install so root resolves.
+    execFileSync('node', [path.join(t, DREAM), 'check', pf, '--root', t, '--source'], { encoding: 'utf8', cwd: t });
+  } catch (e) { err = e; }
+  assert.ok(err, 'check exited non-zero on a value-less --source (did not silently fall to the legacy path)');
+  assert.equal(err.status, 2);
+  assert.match(String(err.stderr || ''), /--source/);
+});
+
+// ── NB-3: pin the documented gate ordering — confidence floor BEFORE quote-verify ──
+// The compose-confidence test above uses a PRESENT quote, so it can't tell "confidence before
+// quote-verify" from "after". This pins the full precedence: a low-confidence proposal whose quote is
+// ABSENT (yet substantive) must report confidence_below_threshold — only possible if confidence is gated
+// first. Reorder quote-verify ahead of the confidence floor and this test flips to quote_not_in_source.
+
+test('check --source precedence (NB-3): the confidence floor is checked BEFORE quote-verify', () => {
+  const t = freshInstall('dream-src-prec-conf-');
+  // low confidence AND a substantive-but-absent quote: confidence is gated first → confidence_below_threshold
+  const p = validProposal({ confidence: 0.5, evidence: [{ quote: 'a substantive quote absent from the transcript' }] });
+  assert.equal(checkOneSource(t, p, 'a transcript that does not contain that phrase at all').reason, 'confidence_below_threshold');
 });

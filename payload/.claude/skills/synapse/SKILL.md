@@ -62,9 +62,10 @@ marker records what was dropped. One budget, applied flat. See
 
 When real consumed context reaches the handoff threshold (`HANDOFF_PCT`, default 0.40; override
 `WRXN_HANDOFF_PCT`) of the model window, SYNAPSE appends a **non-blocking** `[HANDOFF REQUIRED]`
-directive: finish the current request, run the handoff skill to write the baton, then `/clear` and
-resume in a fresh session. It never refuses work. The math runs on real token usage (resident tokens
-from the transcript ÷ the resolved model window), not an assumed window. See
+directive: finish the current request, then `/clear` and resume in a fresh session — the continuity
+baton writes automatically on session end (the memory synth) and injects on resume, so there is no
+manual step. It never refuses work. The math runs on real token usage (resident tokens from the
+transcript ÷ the resolved model window), not an assumed window. See
 [token budget & handoff](references/brackets.md).
 
 ## Output shape
@@ -89,8 +90,7 @@ Article I — Agent Authority (NON-NEGOTIABLE)
 [HANDOFF REQUIRED]
   Context is at ~42% of the model window (>= the 40% handoff threshold). NON-BLOCKING — do NOT stop work:
   1. Finish the current request.
-  2. Run the handoff skill to write the baton (a compact handoff document).
-  3. Tell the operator to /clear and open a fresh session, where the baton injects on resume.
+  2. Tell the operator to /clear and open a fresh session. No manual step: the continuity baton writes automatically when this session ends (the memory synth) and injects on resume.
 
 </synapse-rules>
 ```

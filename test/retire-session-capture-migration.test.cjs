@@ -207,7 +207,10 @@ test('wrxn update sweeps the subsystem on a stale install and records 004 (resum
   assert.equal(fs.existsSync(path.join(target, '.wrxn', 'history', 'sid-old.trail')), false, 'orphaned trail swept after update');
   assert.equal(fs.existsSync(path.join(target, '.wrxn', 'history', 'sid-old.touched')), false, 'orphaned touched swept after update');
   const cfg = settingsOf(target);
-  assert.ok(!('SessionEnd' in cfg.hooks), 'SessionEnd unwired after update');
+  // The retired writers are gone; the new payload's auto-handoff synth (memory-synth-spawn.cjs,
+  // auto-memory-03) legitimately re-occupies SessionEnd, so assert the writers are unwired rather than
+  // that the SessionEnd event never exists.
+  assert.ok(!hookCommands(cfg).some((c) => c.includes('session-end.cjs')), 'retired session-end unwired after update');
   assert.ok(!hookCommands(cfg).some((c) => c.includes('session-history.cjs')), 'session-history unwired after update');
 
   // re-update at the same version: 004 does not re-run

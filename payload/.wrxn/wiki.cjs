@@ -12,26 +12,21 @@
 //   query <text...>              grep-style substring search → JSON {query, tier, total, hits[]}
 //   recall <text...>             alias of query (page-level recall; same substring engine)
 //   write-page <tier> <slug>     create <tier>/<slug>.md (refuses to overwrite); prints the path.
-//                                --force overwrites in place, but ONLY for the `_slots` focus slot.
 //   delete-page <tier> <slug>    delete <tier>/<slug>.md (harvest-03 merge: the absorbed-page removal).
 //                                Confined to the wiki tiers BY CONSTRUCTION (tier ∈ TIERS + kebab slug),
 //                                so the path can never escape .wrxn/wiki/. Errors if the page is absent.
 //
 // Flags: --tier <concepts|decisions|gotchas|sessions|_rules|_slots|all> (default all) · --limit <N> (default 20)
-//        --force (write-page only; overwrite the `_slots` slot in place) · --root <dir> (test override)
+//        --root <dir> (test override)
 
 const fs = require('fs');
 const path = require('path');
 
 // `_rules` is the dream-written tier (durable always/never project conventions) — recalled like the
 // prose tiers, but machine-written by the dream adapter (dream-03), hence the `_` prefix.
-// `_slots` (dream-04) holds the durable standing-focus page (`_slots/current-focus.md`) — the LONE
-// wiki page that may be overwritten in place, and only via `write-page --force`.
+// `_slots` is a retained (now inert) tier: the standing-focus slot it once held + its writer were retired
+// in auto-memory-05, but the tier stays valid so an existing install's `_slots/` dir keeps querying.
 const TIERS = ['concepts', 'decisions', 'gotchas', 'sessions', '_rules', '_slots'];
-// The one page `--force` may overwrite — `_slots/current-focus.md`, the durable focus slot. Every other
-// page (any other tier, or any other slug in `_slots`) stays create-only / refuse-overwrite.
-const OVERWRITABLE_TIER = '_slots';
-const OVERWRITABLE_SLUG = 'current-focus';
 
 // ── install-root resolution (walk up to the wrxn.install.json receipt) ────────
 // Mirrors payload/.claude/hooks/enforce-managed-guard.cjs findInstallRoot.
@@ -127,26 +122,19 @@ function runQuery() {
 function runWritePage() {
   const [tier, slug] = positionals();
   if (!tier || !slug) {
-    process.stdout.write('Usage: node .wrxn/wiki.cjs write-page <tier> <slug> [--description "..."] [--body "..."] [--force]\n');
+    process.stdout.write('Usage: node .wrxn/wiki.cjs write-page <tier> <slug> [--description "..."] [--body "..."]\n');
     process.exit(2);
   }
   if (!TIERS.includes(tier)) fail(`unknown tier "${tier}" — one of ${TIERS.join(', ')}`);
   if (!/^[a-z0-9][a-z0-9-]*$/.test(slug)) fail(`slug must be kebab-case ([a-z0-9-]): "${slug}"`);
 
-  // `--force` is the LONE overwrite-exception (dream-04): it overwrites a page in place, and ONLY for
-  // the single `_slots/current-focus` slot. Every other write-page (no `--force`, any other tier, or any
-  // other slug in `_slots`) still refuses to clobber — so the wiki stays additive/curated and only the
-  // one standing-focus page may be updated (dream-qa-07: path-scoped, not tier-scoped).
-  const force = process.argv.includes('--force');
-  if (force && (tier !== OVERWRITABLE_TIER || slug !== OVERWRITABLE_SLUG)) {
-    fail(`--force overwrite is only permitted for the ${OVERWRITABLE_TIER}/${OVERWRITABLE_SLUG} focus slot (the lone update-exception), not "${tier}/${slug}"`);
-  }
-
+  // write-page is create-only — it never overwrites a page, so the wiki stays additive/curated. (The
+  // lone `--force` overwrite-exception for the focus slot was retired in auto-memory-05 with set-focus.)
   const root = wikiRoot();
   const dir = path.join(root, tier);
   fs.mkdirSync(dir, { recursive: true });
   const dest = path.join(dir, `${slug}.md`);
-  if (fs.existsSync(dest) && !force) fail(`page already exists, refusing to overwrite: ${path.relative(root, dest)}`);
+  if (fs.existsSync(dest)) fail(`page already exists, refusing to overwrite: ${path.relative(root, dest)}`);
 
   const description = flag('description') || '';
   const body = flag('body') || '';

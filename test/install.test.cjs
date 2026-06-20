@@ -77,6 +77,24 @@ test('init lays the full payload and classifies each laid file', () => {
   assert.equal(receipt.files.length, PROJECT_PATHS.length);
 });
 
+// ── secret hygiene: the gemini-fallback key lives in a gitignored .env ──────────
+// The memory-synth fallback reads GEMINI_API_KEY from `<install>/.env` and documents it as the
+// install's "gitignored .env". init must make that true so an operator who commits cannot leak the
+// key (idempotent, alongside .recon-wrxn/ and .wrxn/reinforce.json).
+
+test('init gitignores .env so the gemini-fallback key is never committed', () => {
+  const target = tmp('wrxn-env-gi-');
+  init({ pkgRoot: PKG_ROOT, target, profile: 'project' });
+
+  const gi = fs.readFileSync(path.join(target, '.gitignore'), 'utf8');
+  assert.match(gi, /^\.env$/m, '.env is gitignored after init');
+
+  // idempotent: a second init does not duplicate the line
+  init({ pkgRoot: PKG_ROOT, target, profile: 'project' });
+  const lines = fs.readFileSync(path.join(target, '.gitignore'), 'utf8').split('\n').filter((l) => l.trim() === '.env');
+  assert.equal(lines.length, 1, '.env appears exactly once');
+});
+
 // ── idempotency ───────────────────────────────────────────────────────────────
 
 test('re-running init is a no-op (idempotent)', () => {
