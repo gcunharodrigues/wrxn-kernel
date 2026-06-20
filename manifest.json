@@ -489,6 +489,16 @@
       "profile": "project"
     },
     {
+      "path": ".wrxn/memory-synth.cjs",
+      "class": "managed",
+      "profile": "project"
+    },
+    {
+      "path": ".wrxn/memory.config.json",
+      "class": "seeded",
+      "profile": "project"
+    },
+    {
       "path": ".wrxn/sync.cjs",
       "class": "managed",
       "profile": "project"

@@ -1,0 +1,12 @@
+{
+  "tasks": {
+    "handoff": {
+      "primary": { "engine": "claude", "model": "claude-sonnet-4-6" },
+      "fallback": { "engine": "gemini", "model": "gemini-3.1-flash-lite" }
+    },
+    "dream": {
+      "primary": { "engine": "claude", "model": "claude-sonnet-4-6" },
+      "fallback": { "engine": "gemini", "model": "gemini-3.1-flash-lite" }
+    }
+  }
+}
