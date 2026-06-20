@@ -6,7 +6,7 @@
 // (node stdlib only). The dream SKILL (the LLM, dream-02) PROPOSES; THIS adapter JUDGES (a
 // deterministic gate) and records — "bad memory is worse than no memory".
 //
-// In THIS slice the adapter is driven by hand-fed proposal JSON (no LLM). Four subcommands:
+// In THIS slice the adapter is driven by hand-fed proposal JSON (no LLM). Three subcommands:
 //   check  <proposal.json | batch.json>   run the Validation gate.
 //          · a single Proposal object  → a single Verdict { ok, reason? }.
 //          · an array / { proposals:[…] } / { abstain:true } → a batch result
@@ -27,12 +27,6 @@
 //          the rest of the batch still writes. Then the outcome is appended to the .wrxn/dream/ audit log.
 //          · --source <file> (optional, auto-memory-01): re-verifies every quote at the write boundary,
 //            so a hallucinated proposal is blocked from recall even if its slug is force-approved.
-//   set-focus <focus.json>                write/OVERWRITE the durable standing-focus slot
-//          `_slots/current-focus.md` (input { title?, body }) via the wiki adapter's --force path, then
-//          log it. This is the LONE update-exception: only the focus slot may be overwritten; the
-//          knowledge gate/commit above stay additive + dedup-skip. The focus slot is DISJOINT from the
-//          continuity baton (`.wrxn/continuity/latest.md`, single-writer = the handoff skill) — set-focus
-//          NEVER reads or writes that baton (different path, different writer: the continuity doctrine).
 //
 // Flags: --root <dir> (override the install-root walk-up; mainly for tests).
 //        --source <file> (check|commit only) — the transcript blob for quote-verification (auto-memory-01).
@@ -41,8 +35,8 @@
 //            slug; title; body /* starts "# " */; confidence /*0–1*/; rationale; evidence:[{quote,source?}] }
 // Verdict  { ok:boolean; reason?:string /* machine code on reject */ }
 // NOTE: `_slots` is NOT a knowledge-gate tier — KIND_TIER stays {concepts,decisions,gotchas,_rules}; a
-//       knowledge proposal targeting `_slots` is rejected `unsupported_tier`. The slot is reached ONLY
-//       via set-focus.
+//       knowledge proposal targeting `_slots` is rejected `unsupported_tier`. (The standing-focus slot and
+//       its set-focus op were retired in auto-memory-05; the auto-handoff baton carries "where we are".)
 
 const fs = require('fs');
 const path = require('path');
@@ -57,13 +51,7 @@ const BODY_MAX = 32000; // size cap (chars) — a durable page, not a transcript
 const MAX_ACCEPTED = 5; // one run can't flood the wiki.
 const DREAM_DIR = ['.wrxn', 'dream'];
 const STAGED_FILE = 'staged.jsonl'; // the validated-but-unapproved batch (full proposals).
-const AUDIT_FILE = 'audit.jsonl'; // the append-only outcome log (stage + commit + set-focus events).
-
-// The durable standing-focus slot — a FIXED wiki path (tier + slug). set-focus is its ONLY writer and
-// overwrites it in place (the lone update-exception). `_slots` is deliberately ABSENT from KIND_TIER /
-// TIERS above: it is not a knowledge-gate tier, so the additive + dedup-skip knowledge gate is untouched.
-const FOCUS_TIER = '_slots';
-const FOCUS_SLUG = 'current-focus';
+const AUDIT_FILE = 'audit.jsonl'; // the append-only outcome log (stage + commit events).
 
 // ── install-root resolution (mirrors wiki.cjs / enforce-managed-guard.cjs) ─────
 function findInstallRoot(start) {
@@ -137,14 +125,6 @@ function wikiQuery(root, terms, opts) {
 function wikiWritePage(root, tier, slug, description, body) {
   guardArgv([slug, String(description || ''), String(body || '')]);
   const args = [wikiAdapter(), 'write-page', tier, slug, '--description', String(description || ''), '--body', String(body || ''), '--root', root];
-  return JSON.parse(execFileSync('node', args, { encoding: 'utf8' }));
-}
-
-// Overwrite a page in place via the wiki adapter's --force path (the indirection contract — never a
-// direct .md write). wiki.cjs restricts --force to the `_slots` tier, so only the focus slot is reachable.
-function wikiForceWritePage(root, tier, slug, description, body) {
-  guardArgv([slug, String(description || ''), String(body || '')]);
-  const args = [wikiAdapter(), 'write-page', tier, slug, '--description', String(description || ''), '--body', String(body || ''), '--force', '--root', root];
   return JSON.parse(execFileSync('node', args, { encoding: 'utf8' }));
 }
 
@@ -554,34 +534,6 @@ function runCommit() {
   return print({ written, skipped });
 }
 
-// set-focus — write/overwrite the durable standing-focus slot. The LONE update-exception: it is the
-// only op that overwrites a wiki page, and only ever `_slots/current-focus.md`. It is NOT a knowledge
-// proposal (no gate, no dedup) — the skill drafts a short standing-focus statement, the operator
-// confirms, then this writes it via the wiki --force path. DISJOINT from the continuity baton:
-// set-focus never reads or writes `.wrxn/continuity/latest.md` (single-writer = the handoff skill).
-function runSetFocus() {
-  const input = readJson(positionalFile());
-  const root = installRoot();
-  const obj = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
-  const title = obj.title ? String(obj.title) : 'Current focus';
-  const body = obj.body;
-  if (typeof body !== 'string' || body.trim().length === 0) {
-    fail('set-focus needs a non-empty "body" — the standing-focus statement to pin');
-  }
-  // Gate the focus slot too (security M1): it is an ungated --force write, so run the same content-safety
-  // checks the knowledge gate runs — the anti-superstition negative filters + the credential secret-scan
-  // — over the focus title+body, and refuse a `--`-leading flag-injection value. Reject ⇒ nothing written.
-  const scan = `${title}\n${body}`;
-  const neg = negativeFilter(scan);
-  if (neg) fail(`set-focus rejected — the focus body trips a negative filter (${neg}); state durable standing context, not a transient note`);
-  const sec = secretScan(scan);
-  if (sec) fail(`set-focus rejected — the focus body contains a credential (${sec}); never pin a session secret`);
-  if (title.startsWith('--') || body.startsWith('--')) fail('set-focus rejected — a --leading title/body is refused (flag-injection guard)');
-  const r = wikiForceWritePage(root, FOCUS_TIER, FOCUS_SLUG, title, body);
-  appendLine(path.join(dreamDir(root), AUDIT_FILE), { ts: new Date().toISOString(), op: 'set-focus', file: r.written });
-  return print({ focus: r.written });
-}
-
 function main() {
   const cmd = process.argv[2];
   switch (cmd) {
@@ -591,10 +543,8 @@ function main() {
       return runStage();
     case 'commit':
       return runCommit();
-    case 'set-focus':
-      return runSetFocus();
     default:
-      process.stdout.write('Usage: node .wrxn/dream.cjs <check|stage|commit|set-focus> <file.json> [--root <dir>]\n');
+      process.stdout.write('Usage: node .wrxn/dream.cjs <check|stage|commit> <file.json> [--root <dir>]\n');
       process.exit(cmd ? 2 : 0);
   }
 }

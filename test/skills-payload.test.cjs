@@ -15,6 +15,8 @@ function tmp(prefix) {
 
 // The dev-pipeline skills this track ships into the install payload (tdd is shipped
 // by a sibling track; code-review/security-review are global slash-skills with no file).
+// NOTE: `handoff` was retired in auto-memory-05 — the SessionEnd synth (memory-synth.cjs) is the sole
+// baton writer now, so the manual handoff skill no longer ships (see the regression guard below).
 const PIPELINE_SKILLS = [
   'grill-me',
   'grill-with-docs',
@@ -22,7 +24,6 @@ const PIPELINE_SKILLS = [
   'to-issues',
   'triage',
   'diagnose',
-  'handoff',
   'dream',
   'prototype',
   'qa-walk',
@@ -44,6 +45,33 @@ test('init lays every pipeline skill with a SKILL.md', () => {
     const skillMd = path.join(target, '.claude', 'skills', skill, 'SKILL.md');
     assert.ok(fs.existsSync(skillMd), `.claude/skills/${skill}/SKILL.md not laid`);
   }
+});
+
+// ── handoff is retired (auto-memory-05): the synth is the sole baton writer ────
+// The manual handoff skill is gone from the payload + the manifest. Guards against it returning on a
+// future install (migration 007 removes it from existing installs).
+
+test('the handoff skill is no longer shipped (payload + manifest + install)', () => {
+  // not in the payload tree
+  assert.equal(
+    fs.existsSync(path.join(PKG_ROOT, 'payload', '.claude', 'skills', 'handoff')),
+    false,
+    'payload/.claude/skills/handoff must be deleted',
+  );
+  // not in the manifest
+  const manifest = JSON.parse(fs.readFileSync(path.join(PKG_ROOT, 'manifest.json'), 'utf8'));
+  assert.ok(
+    !manifest.files.some((f) => f.path.includes('skills/handoff')),
+    'manifest must not list any skills/handoff entry',
+  );
+  // not laid into a fresh install
+  const target = tmp('wrxn-no-handoff-');
+  init({ pkgRoot: PKG_ROOT, target, profile: 'project' });
+  assert.equal(
+    fs.existsSync(path.join(target, '.claude', 'skills', 'handoff')),
+    false,
+    'a fresh install must not carry the handoff skill',
+  );
 });
 
 // ── grill-with-docs is present + parseable (frontmatter) ─────────────────────

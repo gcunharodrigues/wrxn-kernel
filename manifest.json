@@ -149,11 +149,6 @@
       "profile": "project"
     },
     {
-      "path": ".claude/skills/handoff/SKILL.md",
-      "class": "managed",
-      "profile": "project"
-    },
-    {
       "path": ".claude/skills/harvest/SKILL.md",
       "class": "managed",
       "profile": "project"

@@ -175,52 +175,45 @@ test('the laid receipt classifies the _rules tier gitkeep as state', () => {
   assert.equal(gitkeep.class, 'state');
 });
 
-// ── _slots tier + the force-overwrite exception (dream-04) ────────────────────
-// `_slots/current-focus.md` is the durable standing-focus page — the LONE wiki page that may be
-// overwritten, and only via `write-page --force`. Every other tier stays create-only / refuse-overwrite.
+// ── _slots tier is retained but the force-overwrite path is RETIRED (auto-memory-05) ──
+// The standing-focus slot + its writer (dream's set-focus) were dropped, and `--force` was its ONLY
+// caller — so the wiki adapter no longer overwrites ANY page. The `_slots` tier itself stays a valid
+// (inert) query tier so an existing install's `_slots/` dir keeps working; write-page is now create-only
+// everywhere, and `--force` no longer overwrites.
 
-test('write-page creates a page in the _slots tier and query finds it', () => {
+test('the _slots tier is still a valid query tier (retained, inert)', () => {
   const { target } = freshInstall('wrxn-wiki-slots-');
-  const out = JSON.parse(runAdapter(target, ['write-page', '_slots', 'current-focus', '--body', 'shipping the dream slice']));
+  // a page placed in the _slots tier is still queryable (the tier survives the focus-slot retirement)
+  const out = JSON.parse(runAdapter(target, ['write-page', '_slots', 'a-note', '--body', 'shipping the slice']));
   assert.equal(out.tier, '_slots');
-  const page = path.join(target, '.wrxn', 'wiki', '_slots', 'current-focus.md');
-  assert.ok(fs.existsSync(page), 'page laid in the _slots tier');
-  const res = JSON.parse(runAdapter(target, ['query', 'shipping the dream slice']));
+  const res = JSON.parse(runAdapter(target, ['query', 'shipping the slice', '--tier', '_slots']));
   assert.ok(res.total >= 1, 'query found the _slots page');
   assert.equal(res.hits[0].tier, '_slots');
 });
 
-test('write-page --force overwrites the focus slot in place (create then update)', () => {
+test('write-page --force no longer overwrites the focus slot — a second write is refused (create-only)', () => {
   const { target } = freshInstall('wrxn-wiki-force-');
   runAdapter(target, ['write-page', '_slots', 'current-focus', '--body', 'FIRST focus statement']);
-  runAdapter(target, ['write-page', '_slots', 'current-focus', '--force', '--body', 'SECOND focus statement']);
+  // --force is retired: a re-write of an existing page is refused like any other tier (no overwrite path)
+  assert.throws(
+    () => runAdapter(target, ['write-page', '_slots', 'current-focus', '--force', '--body', 'SECOND focus statement']),
+    /already exists/,
+    '--force no longer overwrites; the existing page is refused'
+  );
   const txt = fs.readFileSync(path.join(target, '.wrxn', 'wiki', '_slots', 'current-focus.md'), 'utf8');
-  assert.match(txt, /SECOND focus statement/, 'force overwrote with the new content');
-  assert.doesNotMatch(txt, /FIRST focus statement/, 'the prior content is gone (overwritten in place, not appended)');
+  assert.match(txt, /FIRST focus statement/, 'the original content is preserved (no overwrite happened)');
+  assert.doesNotMatch(txt, /SECOND focus statement/, 'the second write did not overwrite in place');
 });
 
-test('write-page --force is refused for any tier other than _slots (the lone update-exception)', () => {
+test('write-page --force does not overwrite a knowledge page either (no lone update-exception remains)', () => {
   const { target } = freshInstall('wrxn-wiki-force-guard-');
   runAdapter(target, ['write-page', 'concepts', 'pinned', '--body', 'curated original']);
   assert.throws(
     () => runAdapter(target, ['write-page', 'concepts', 'pinned', '--force', '--body', 'would clobber']),
-    /only permitted for the _slots/
+    /already exists/
   );
-  // the curated knowledge page is intact — --force cannot touch it
+  // the curated knowledge page is intact — --force is inert
   assert.match(fs.readFileSync(path.join(target, '.wrxn', 'wiki', 'concepts', 'pinned.md'), 'utf8'), /curated original/);
-});
-
-test('write-page --force is refused for a non-current-focus slug even inside _slots (path-scoped, not tier-scoped) [dream-qa-07]', () => {
-  const { target } = freshInstall('wrxn-wiki-force-slug-');
-  assert.throws(
-    () => runAdapter(target, ['write-page', '_slots', 'probe-slot', '--force', '--body', 'forged slot']),
-    /only permitted for the _slots\/current-focus/
-  );
-  // no forged page was laid in the _slots tier
-  assert.ok(
-    !fs.existsSync(path.join(target, '.wrxn', 'wiki', '_slots', 'probe-slot.md')),
-    'a forged _slots slug must not be created via --force'
-  );
 });
 
 test('.wrxn/wiki/_slots/.gitkeep is classified state in the manifest', () => {
