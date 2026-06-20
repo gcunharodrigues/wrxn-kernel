@@ -1,0 +1,54 @@
+name: wrxn-ci
+
+# The single required status check the `wrxn-main-gate` branch ruleset gates on (ADR 0007). Runs on
+# every pull request. NEVER a vacuous pass: the project's own suite runs only when WRXN_TEST_CMD is a
+# real command (skipped for the `true`/empty stub), but the kernel-universal checks always run via
+# `wrxn ci` — managed-file integrity, wiki-lint, synapse-manifest lint, JSON validity, and
+# `node --check` over the shipped .cjs. So even a repo with no suite is really gated. Laid into every
+# install as a managed payload file by `wrxn init`/`update`.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  wrxn-ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: install project dependencies (node projects only)
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            echo "no package-lock.json — not a node project, skipping npm ci"
+          fi
+      - name: project test command (WRXN_TEST_CMD; the true/empty stub is skipped)
+        env:
+          WRXN_TEST_CMD: ${{ vars.WRXN_TEST_CMD }}
+        run: |
+          if [ -n "$WRXN_TEST_CMD" ] && [ "$WRXN_TEST_CMD" != "true" ]; then
+            echo "running project test command: $WRXN_TEST_CMD"
+            eval "$WRXN_TEST_CMD"
+          else
+            echo "WRXN_TEST_CMD is empty or the 'true' stub — skipping; the universal checks below still gate"
+          fi
+      - name: universal kernel checks (managed-integrity, wiki-lint, synapse, json, node --check)
+        # Pin the invoked kernel to the version that LAID the managed files (the receipt's kernelVersion),
+        # so managed-integrity byte-compares against the right payload. Floating to npm `latest` would
+        # read a version skew as drift with zero tampering (CF-1). A non-install repo (no
+        # wrxn.install.json, e.g. recon-wrxn) has no managed files to verify → fall back to `latest`.
+        run: |
+          VER=$(node -p "require('./wrxn.install.json').kernelVersion || ''" 2>/dev/null || true)
+          if [ -n "$VER" ]; then
+            echo "pinning wrxn ci to the install kernel version: $VER"
+            npx --yes @gcunharodrigues/wrxn@"$VER" ci
+          else
+            echo "no wrxn.install.json kernelVersion — running wrxn ci from latest"
+            npx --yes @gcunharodrigues/wrxn ci
+          fi
