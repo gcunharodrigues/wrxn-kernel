@@ -72,7 +72,30 @@ FORMAT (markdown, exactly these sections; omit one only if empty):
 **Open / to confirm** - pending items, blockers, questions.
 **Don't repeat** - dead ends already tried / gotchas discovered.`;
 
-const PROMPTS = { handoff: HANDOFF_PROMPT };
+// The dream task: propose durable wiki pages from the session, each grounded in a SUBSTANTIVE VERBATIM
+// quote copied from the transcript. The quote rule is load-bearing: auto-dream is unattended, so the only
+// thing that keeps a hallucinated "memory" out of permanent recall is dream.cjs's `--source` quote-verify
+// (every quote must be a ≥12-char, ≥3-token span that appears in the transcript). We instruct the model
+// explicitly so its quotes survive the gate; a quote it cannot ground verbatim must be dropped, not
+// invented. Output is STRICT JSON the synth parses — no prose, no fences.
+const DREAM_PROMPT = `You consolidate the DURABLE learnings of a work session into wiki pages for long-term recall. You are an UNATTENDED proposer: there is no human to approve your output, and a hardened gate will REJECT any page whose evidence quote is not literally in the transcript. Propose ONLY what you can ground verbatim.
+
+WHAT TO PROPOSE (at most 5, fewer is better — restraint beats noise):
+- A "concept" (durable how-it-works), "decision" (a choice + why it stands), "gotcha" (a non-obvious trap), or "rule" (an always/never convention).
+- DURABLE only: a fact future sessions need. NEVER a one-off task, a release/version event, a smoke-test result, a transient failure, or anything about the wrxn tooling itself — the gate drops these.
+
+EVIDENCE (critical — your page is rejected without it):
+- Each proposal carries evidence: a list of { "quote": "…" }.
+- Each quote MUST be a SUBSTANTIVE span copied VERBATIM from the transcript: at least 12 characters AND at least 3 words. Single words or tiny fragments ("the", "it works") are rejected.
+- Copy the quote exactly as it appears; do not paraphrase, summarize, or invent. If you cannot find a real ≥3-word span that grounds a learning, DROP that learning.
+
+If the session has no durable learning, output {"abstain": true}.
+
+OUTPUT (STRICT JSON only — no markdown, no code fences, no commentary):
+{"proposals":[{"kind":"decision","tier":"decisions","slug":"kebab-case-slug","title":"Short title","body":"# Short title\\n\\nOne or two dense paragraphs.","confidence":0.0,"rationale":"why this is durable","evidence":[{"quote":"a verbatim span of at least three words from the transcript"}]}]}
+TIERS: kind "concept"→tier "concepts", "decision"→"decisions", "gotcha"→"gotchas", "rule"→"_rules". The body MUST start with "# " (its title as an H1). confidence is your 0–1 certainty; only ≥0.75 is kept.`;
+
+const PROMPTS = { handoff: HANDOFF_PROMPT, dream: DREAM_PROMPT };
 
 /**
  * Load the per-task engine config from `<root>/.wrxn/memory.config.json`, merged over DEFAULTS so a
@@ -462,12 +485,18 @@ function writeBatonAtomic(root, body) {
  * the baton atomically, and ALWAYS clears the pending + handoff markers (success or not). A trivial blob
  * skips synthesis entirely (no model spend). The injectable invoker keeps this unit-tested with no real
  * engine. Never throws — a fault still clears the markers so session-start is released.
+ *
+ * Returns the REDACTED blob it built so the caller (the --from-spawn route) can run dream on the SAME
+ * in-memory transcript without re-reading the stash (auto-memory-04). It is the scrubbed blob (matching
+ * what the engine saw) so a secret never re-egresses through the dream path; '' when the session was
+ * trivial / had no transcript.
  * @param {{ root:string, invoke?:Function }} opts
- * @returns {Promise<{ wrote:boolean, reason?:string }>}
+ * @returns {Promise<{ wrote:boolean, blob:string, reason?:string }>}
  */
 async function runHandoff({ root, invoke = defaultInvoke }) {
   let wrote = false;
   let reason;
+  let safeBlob = ''; // the redacted blob, returned so dream can reuse it in memory (auto-memory-04).
   try {
     const stash = readPending(root);
     const blob = stash.transcript_path ? readTranscriptBlob(stash.transcript_path) : '';
@@ -476,7 +505,7 @@ async function runHandoff({ root, invoke = defaultInvoke }) {
     } else {
       const config = loadConfig(root);
       const apiKey = loadEnv(root).GEMINI_API_KEY;
-      const safeBlob = redactSecrets(blob); // scrub BEFORE the blob egresses to the external model (claude -p / off-box gemini POST).
+      safeBlob = redactSecrets(blob); // scrub BEFORE the blob egresses to the external model (claude -p / off-box gemini POST).
       const text = await synthesize({ task: 'handoff', prompt: PROMPTS.handoff, blob: safeBlob, config, apiKey, invoke });
       if (text && text.trim()) {
         const body = redactSecrets(text); // scrub secrets BEFORE the durable baton is written.
@@ -493,7 +522,129 @@ async function runHandoff({ root, invoke = defaultInvoke }) {
     rmQuiet(continuityPath(root, PENDING_HANDOFF));
     rmQuiet(continuityPath(root, PENDING));
   }
-  return reason ? { wrote, reason } : { wrote };
+  return reason ? { wrote, blob: safeBlob, reason } : { wrote, blob: safeBlob };
+}
+
+// ── the dream path (auto-memory-04): blob → proposals → gate (--source) → commit ──
+// What the detached SessionEnd child does AFTER the handoff baton is written (so dream never extends the
+// session-start hold — the handoff marker is already cleared). Given the SAME transcript blob the handoff
+// built (passed IN MEMORY, never re-read from the stash), it asks the engine for ≤5 evidence-backed dream
+// proposals, then drives the EXISTING dream.cjs gate by reference:
+//   1. write the blob to a temp source file + the proposals to a temp batch file;
+//   2. `dream.cjs check --source <blob>` → learn the gate's accepted set (the auto-approval set);
+//   3. `dream.cjs stage <accepted-batch>` → record the accepted proposals (commit is BY REFERENCE);
+//   4. `dream.cjs commit --source <blob> <accepted-slugs>` → the commit RE-GATES + re-verifies every quote
+//      at the write boundary and writes net-new pages additively (dedup-skip).
+// Auto-approval = exactly the gate's accepted set; NO human approval step. A trivial blob, an engine
+// abstain, or no proposals → write nothing. The gate (confidence floor, secret-scan, anti-superstition
+// filters, dedup, ≤5, and the --source quote-verify) is honored end-to-end. NEVER throws.
+
+const PENDING_DREAM_PREFIX = '.dream'; // temp file prefix under .wrxn/continuity for the blob + batches.
+
+/** The sibling dream adapter in the same install .wrxn/ dir (the indirection contract — we never write wiki .md directly). */
+function dreamAdapter() {
+  return path.join(__dirname, 'dream.cjs');
+}
+
+/**
+ * Parse the engine's dream output into a proposals array. The model is asked for STRICT JSON, but a real
+ * model may wrap it in prose or ```json fences — so we extract the first balanced {...} / [...] span and
+ * parse it. An `{ abstain:true }` or anything unparseable / shapeless yields [] (write nothing). PURE.
+ * @param {string} text the engine output
+ * @returns {Array} the proposals (possibly empty)
+ */
+function parseProposals(text) {
+  const s = String(text || '');
+  let parsed = null;
+  try {
+    parsed = JSON.parse(s);
+  } catch {
+    // tolerate prose/fences around the JSON: grab the first { … } or [ … ] span and try that.
+    const start = s.search(/[[{]/);
+    if (start === -1) return [];
+    const open = s[start];
+    const close = open === '{' ? '}' : ']';
+    const end = s.lastIndexOf(close);
+    if (end <= start) return [];
+    try {
+      parsed = JSON.parse(s.slice(start, end + 1));
+    } catch {
+      return [];
+    }
+  }
+  if (parsed && typeof parsed === 'object' && parsed.abstain === true) return [];
+  if (Array.isArray(parsed)) return parsed;
+  if (parsed && typeof parsed === 'object' && Array.isArray(parsed.proposals)) return parsed.proposals;
+  return [];
+}
+
+/** Run a dream.cjs subcommand in-process-but-separate (spawnSync node), rooted at the install. Parses its
+ * JSON stdout; a non-zero exit / unparseable output → null (the caller treats it as "no result"). */
+function runDreamCli(root, args) {
+  const r = spawnSync('node', [dreamAdapter(), ...args, '--root', root], { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 });
+  if (r.status !== 0) return null;
+  try {
+    return JSON.parse(r.stdout || '');
+  } catch {
+    return null;
+  }
+}
+
+/** Write a temp file under .wrxn/continuity and return its path. Unique per call (pid+time+tag). */
+function writeTemp(root, tag, content) {
+  const dir = continuityPath(root);
+  fs.mkdirSync(dir, { recursive: true });
+  const p = path.join(dir, `${PENDING_DREAM_PREFIX}.${tag}.${process.pid}.${Date.now()}.tmp`);
+  fs.writeFileSync(p, content);
+  return p;
+}
+
+/**
+ * The synth's dream path. Asks the engine for dream proposals from the in-memory blob, runs them through
+ * the dream.cjs gate (check → stage accepted → commit, all `--source`-verified against the blob), and
+ * returns the committed slugs. Writes nothing on a trivial blob / abstain / empty-or-rejected set. Cleans
+ * up its temp files. Never throws (a fault degrades to "wrote nothing").
+ * @param {{ root:string, blob:string, invoke?:Function }} opts
+ * @returns {Promise<{ written:string[], reason?:string }>}
+ */
+async function runDream({ root, blob, invoke = defaultInvoke }) {
+  const temps = [];
+  try {
+    if (!blob || blob.trim().length < TRIVIAL_BLOB_MIN) return { written: [], reason: 'trivial' };
+    const config = loadConfig(root);
+    const apiKey = loadEnv(root).GEMINI_API_KEY;
+    const safeBlob = redactSecrets(blob); // scrub BEFORE the blob egresses to the external model.
+    const text = await synthesize({ task: 'dream', prompt: PROMPTS.dream, blob: safeBlob, config, apiKey, invoke });
+    const proposals = parseProposals(text);
+    if (proposals.length === 0) return { written: [], reason: 'abstain' };
+
+    // the --source blob the gate verifies every quote against (the SAFE blob, matching what the engine saw).
+    const sourceFile = writeTemp(root, 'src', safeBlob);
+    temps.push(sourceFile);
+    const batchFile = writeTemp(root, 'batch', JSON.stringify({ proposals }));
+    temps.push(batchFile);
+
+    // 1. check --source → the gate's accepted set (the auto-approval set).
+    const checked = runDreamCli(root, ['check', batchFile, '--source', sourceFile]);
+    const accepted = (checked && Array.isArray(checked.accepted)) ? checked.accepted : [];
+    if (accepted.length === 0) return { written: [], reason: 'none-accepted' };
+
+    // 2. stage the accepted proposals (commit is BY REFERENCE — it reads staged.jsonl).
+    const stageFile = writeTemp(root, 'stage', JSON.stringify({ proposals: accepted }));
+    temps.push(stageFile);
+    runDreamCli(root, ['stage', stageFile]);
+
+    // 3. commit --source the accepted slugs → the commit RE-GATES + re-verifies quotes at the write boundary.
+    const approvedFile = writeTemp(root, 'approved', JSON.stringify(accepted.map((p) => p.slug)));
+    temps.push(approvedFile);
+    const committed = runDreamCli(root, ['commit', approvedFile, '--source', sourceFile]);
+    const written = (committed && Array.isArray(committed.written)) ? committed.written.map((w) => w.slug) : [];
+    return { written };
+  } catch (e) {
+    return { written: [], reason: `error: ${(e && e.message) || e}` };
+  } finally {
+    for (const p of temps) rmQuiet(p);
+  }
 }
 
 // ── manual CLI (the slice demo, no hooks) ────────────────────────────────────────
@@ -540,12 +691,19 @@ function parseArgs(args) {
 async function run(args, { invoke = defaultInvoke, out = process.stdout, err = process.stderr } = {}) {
   const { task, root: rootArg, file, fromSpawn } = parseArgs(args || []);
 
-  // The detached SessionEnd child: read the spawn-hook's stash, write the baton, clear the markers.
-  // Always exits 0 (fail-safe: a missing engine / trivial session is graceful, never an error code, so
-  // the background child never surfaces a failure that could matter).
+  // The detached SessionEnd child: read the spawn-hook's stash, write the baton, clear the markers, THEN
+  // run dream on the SAME in-memory blob. Dream runs AFTER runHandoff has cleared the handoff marker, so
+  // the SessionStart hold (which waits only on that marker) is already released — dream can never extend
+  // it (auto-memory-04, AC5). Always exits 0 (fail-safe: a missing engine / trivial session / dream fault
+  // is graceful, never an error code, so the background child never surfaces a failure that could matter).
   if (fromSpawn) {
     const root = rootArg || findInstallRoot() || process.cwd();
-    await runHandoff({ root, invoke });
+    const { blob } = await runHandoff({ root, invoke });
+    // Reuse the redacted blob the handoff built (no re-read of the stash, which the handoff already
+    // cleared). A trivial blob → runDream self-skips; the guard just avoids the needless call.
+    if (blob && blob.trim().length >= TRIVIAL_BLOB_MIN) {
+      await runDream({ root, blob, invoke });
+    }
     return 0;
   }
 
@@ -583,6 +741,7 @@ if (require.main === module) {
 module.exports = {
   DEFAULTS,
   HANDOFF_PROMPT,
+  DREAM_PROMPT,
   PROMPTS,
   loadConfig,
   loadEnv,
@@ -592,9 +751,11 @@ module.exports = {
   buildClaudeSpec,
   buildGeminiSpec,
   parseGeminiResponse,
+  parseProposals,
   defaultInvoke,
   synthesize,
   runHandoff,
+  runDream,
   redactSecrets,
   run,
 };

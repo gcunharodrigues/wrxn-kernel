@@ -160,7 +160,10 @@ test('run --from-spawn drives the handoff path: reads the stash and writes the b
   assert.equal(code, 0, 'the from-spawn path exits 0');
   assert.match(fs.readFileSync(batonPath(root), 'utf8'), /from-spawn baton/, 'the baton was written from the stash');
   assert.ok(!fs.existsSync(handoffMarker(root)), 'the handoff marker is cleared (session-start released)');
-  assert.equal(calls.length, 1, 'the engine ran once for the handoff');
+  // the handoff runs FIRST through the engine (auto-memory-04 adds a dream call after it; the fake's
+  // non-JSON text makes dream abstain, so it writes nothing here — the handoff contract is unchanged).
+  assert.ok(calls.length >= 1, 'the engine ran for the handoff');
+  assert.ok(String(calls[0].input).includes('HANDOFF'), 'the FIRST engine call is the handoff');
 });
 
 test('run --from-spawn on a trivial stash exits 0, writes no baton, clears markers (no model spend)', async () => {

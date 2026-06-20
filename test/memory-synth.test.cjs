@@ -237,7 +237,7 @@ test('run() prints the synthesized handoff for a transcript file, feeding the en
   assert.ok(calls[0].input.includes('ship the engine layer'), 'the engine is fed the transcript blob');
 });
 
-test('run() exits 2 on a missing transcript file and on an unsupported task (dream lands in slice 04)', async () => {
+test('run() exits 2 on a missing transcript file and on an unknown task (dream is now wired, slice 04)', async () => {
   let errd = '';
   const sink = { write: (s) => { errd += s; } };
   const noCall = { invoke: async () => { throw new Error('engine must not be reached on a usage error'); }, out: sink, err: sink };
@@ -245,9 +245,10 @@ test('run() exits 2 on a missing transcript file and on an unsupported task (dre
   assert.equal(await synth.run(['--task', 'handoff'], noCall), 2, 'no transcript file → usage error');
   assert.match(errd, /Usage/);
 
+  // `dream` is a known task as of slice 04; an UNKNOWN task name still exits 2 (the unsupported-task guard).
   errd = '';
-  assert.equal(await synth.run(['--task', 'dream', '/tmp/whatever.jsonl'], noCall), 2, 'dream is not wired in this slice → unsupported task');
-  assert.match(errd, /unsupported task "dream"/);
+  assert.equal(await synth.run(['--task', 'harvest', '/tmp/whatever.jsonl'], noCall), 2, 'an unknown task → unsupported task');
+  assert.match(errd, /unsupported task "harvest"/);
 });
 
 test('run() exits 1 and prints nothing when no engine produces output (fail-safe demo)', async () => {
