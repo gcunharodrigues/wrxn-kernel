@@ -376,6 +376,119 @@ async function synthesize({ task, prompt, blob, config, apiKey, invoke = default
   return null;
 }
 
+// ── the handoff path (auto-memory-03): stash → blob → synth → baton → clear marker ──
+// What the detached SessionEnd child does. Reads the `.pending` stash for the transcript_path, builds
+// the bounded blob, runs the `handoff` task through the injectable invoker, writes the baton ATOMICALLY
+// (temp + rename — the continuity-doctrine single writer), then clears its markers. Markers are cleared
+// on EVERY exit (success / null synthesis / trivial / fault) so SessionStart never hangs past the cap.
+// A trivial/empty transcript writes nothing and spends no model call (the caller still clears markers).
+
+const CONTINUITY_REL = ['.wrxn', 'continuity'];
+const BATON = 'latest.md';
+const PENDING = '.pending';
+const PENDING_HANDOFF = '.pending-handoff';
+// Below this many chars of blob the session is trivial/empty — write nothing, no model spend (PRD story 18).
+const TRIVIAL_BLOB_MIN = 40;
+
+function continuityPath(root, ...rel) {
+  return path.join(root, ...CONTINUITY_REL, ...rel);
+}
+
+// ── secret redaction (PRD story 19) ─────────────────────────────────────────────
+// A model can echo a credential it saw in the transcript into its handoff. Scrub the body before it
+// becomes the durable baton. Pattern-based (high-signal vendor token shapes, JWTs incl. Bearer
+// payloads, and `KEY/TOKEN/SECRET/PASSWORD=value` assignments); each match → `[REDACTED]`. Conservative
+// by design: it never rewrites ordinary prose, only well-known credential shapes.
+const REDACTIONS = [
+  /\bAKIA[0-9A-Z]{16}\b/g, // AWS access key id
+  /\bgh[pousr]_[A-Za-z0-9]{20,}\b/g, // GitHub PAT / OAuth / refresh / server tokens
+  /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g, // Slack tokens
+  /\bsk-[A-Za-z0-9]{20,}\b/g, // OpenAI-style secret keys
+  /\bAIza[0-9A-Za-z._-]{10,}\b/g, // Google / Gemini API keys
+  /\bey[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{3,}\b/g, // JWTs (incl. Bearer payloads): the discriminating `eyJ…` header gates it
+  /\b[A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD)\b\s*[:=]\s*\S+/gi, // KEY/TOKEN/SECRET = value
+];
+
+/**
+ * Redact common secret shapes from `text`, replacing each match with `[REDACTED]`. PURE. Ordinary prose
+ * is preserved verbatim — only credential-looking substrings are scrubbed.
+ * @param {string} text
+ * @returns {string}
+ */
+function redactSecrets(text) {
+  let out = String(text || '');
+  for (const re of REDACTIONS) out = out.replace(re, '[REDACTED]');
+  return out;
+}
+
+/** Best-effort unlink — a missing file is fine; never throws (marker cleanup must always run). */
+function rmQuiet(p) {
+  try {
+    fs.unlinkSync(p);
+  } catch {
+    /* already gone */
+  }
+}
+
+/** Read + parse the `.pending` stash the spawn hook wrote; {} if absent/corrupt (never throws). */
+function readPending(root) {
+  try {
+    return JSON.parse(fs.readFileSync(continuityPath(root, PENDING), 'utf8')) || {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Atomically write the baton: a temp file in the same dir, then rename over latest.md (rename is atomic
+ * within a filesystem, so a reader never sees a half-written baton). The temp name is unique per call.
+ */
+function writeBatonAtomic(root, body) {
+  const dir = continuityPath(root);
+  fs.mkdirSync(dir, { recursive: true });
+  const tmpName = path.join(dir, `.${BATON}.${process.pid}.${Date.now()}.tmp`);
+  fs.writeFileSync(tmpName, body);
+  fs.renameSync(tmpName, path.join(dir, BATON));
+}
+
+/**
+ * The synth's handoff path. Builds the blob from the stashed transcript, synthesizes the handoff, writes
+ * the baton atomically, and ALWAYS clears the pending + handoff markers (success or not). A trivial blob
+ * skips synthesis entirely (no model spend). The injectable invoker keeps this unit-tested with no real
+ * engine. Never throws — a fault still clears the markers so session-start is released.
+ * @param {{ root:string, invoke?:Function }} opts
+ * @returns {Promise<{ wrote:boolean, reason?:string }>}
+ */
+async function runHandoff({ root, invoke = defaultInvoke }) {
+  let wrote = false;
+  let reason;
+  try {
+    const stash = readPending(root);
+    const blob = stash.transcript_path ? readTranscriptBlob(stash.transcript_path) : '';
+    if (blob.trim().length < TRIVIAL_BLOB_MIN) {
+      reason = 'trivial'; // empty/near-empty session — write nothing, spend no model call.
+    } else {
+      const config = loadConfig(root);
+      const apiKey = loadEnv(root).GEMINI_API_KEY;
+      const text = await synthesize({ task: 'handoff', prompt: PROMPTS.handoff, blob, config, apiKey, invoke });
+      if (text && text.trim()) {
+        const body = redactSecrets(text); // scrub secrets BEFORE the durable baton is written.
+        writeBatonAtomic(root, body.endsWith('\n') ? body : body + '\n');
+        wrote = true;
+      } else {
+        reason = 'no-engine'; // claude CLI down + no key → null; fail-safe, no baton.
+      }
+    }
+  } catch (e) {
+    reason = `error: ${(e && e.message) || e}`;
+  } finally {
+    // Clear the handoff gate FIRST (releases SessionStart), then the pending marker. Always runs.
+    rmQuiet(continuityPath(root, PENDING_HANDOFF));
+    rmQuiet(continuityPath(root, PENDING));
+  }
+  return reason ? { wrote, reason } : { wrote };
+}
+
 // ── manual CLI (the slice demo, no hooks) ────────────────────────────────────────
 // `node .wrxn/memory-synth.cjs --task handoff <transcript-file> [--root <dir>]` → prints the
 // synthesized text. Real engines run via defaultInvoke; tests inject a fake invoke + capture streams.
@@ -392,12 +505,16 @@ function findInstallRoot(start) {
   return null;
 }
 
-/** Parse the CLI args: `--task <name>`, `--root <dir>`, and the first positional (the transcript file). */
+/**
+ * Parse the CLI args: `--from-spawn` (the detached SessionEnd-child mode), `--task <name>`,
+ * `--root <dir>`, and the first positional (the transcript file for the manual demo).
+ */
 function parseArgs(args) {
-  const parsed = { task: 'handoff', root: undefined, file: undefined };
+  const parsed = { task: 'handoff', root: undefined, file: undefined, fromSpawn: false };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
-    if (a === '--task') parsed.task = args[++i];
+    if (a === '--from-spawn') parsed.fromSpawn = true;
+    else if (a === '--task') parsed.task = args[++i];
     else if (a === '--root') parsed.root = args[++i];
     else if (!a.startsWith('--') && parsed.file === undefined) parsed.file = a;
   }
@@ -414,7 +531,17 @@ function parseArgs(args) {
  * @returns {Promise<number>} exit code
  */
 async function run(args, { invoke = defaultInvoke, out = process.stdout, err = process.stderr } = {}) {
-  const { task, root: rootArg, file } = parseArgs(args || []);
+  const { task, root: rootArg, file, fromSpawn } = parseArgs(args || []);
+
+  // The detached SessionEnd child: read the spawn-hook's stash, write the baton, clear the markers.
+  // Always exits 0 (fail-safe: a missing engine / trivial session is graceful, never an error code, so
+  // the background child never surfaces a failure that could matter).
+  if (fromSpawn) {
+    const root = rootArg || findInstallRoot() || process.cwd();
+    await runHandoff({ root, invoke });
+    return 0;
+  }
+
   const prompt = PROMPTS[task];
   if (!prompt) {
     err.write(`memory-synth: unsupported task "${task}" — known tasks: ${Object.keys(PROMPTS).join(', ')}\n`);
@@ -460,5 +587,7 @@ module.exports = {
   parseGeminiResponse,
   defaultInvoke,
   synthesize,
+  runHandoff,
+  redactSecrets,
   run,
 };
