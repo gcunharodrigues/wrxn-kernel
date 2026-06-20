@@ -3,9 +3,10 @@
 
 // WRXN session-start hook — the orientation surface (wrxn-kernel-10).
 // SessionStart. Injects identity + resume as additionalContext so every new session opens
-// oriented. The resume surfaces the DELIBERATE handoff baton at .wrxn/continuity/latest.md (single
-// writer = the handoff skill); absent a baton there is no prior handoff to resume. (The automatic
-// episodic session-page fallback was retired with the session-capture subsystem in harvest-01.)
+// oriented. The resume surfaces the handoff baton at .wrxn/continuity/latest.md (single writer =
+// the memory synth `memory-synth.cjs`, which writes the baton automatically on SessionEnd); absent
+// a baton there is no prior handoff to resume. (The automatic episodic session-page fallback was
+// retired with the session-capture subsystem in harvest-01.)
 //
 // Self-contained: ships into installs, MUST NOT import the kernel lib (node stdlib only).
 // Fail-open: any fault emits {} (no orientation) — the hook NEVER blocks a session opening.

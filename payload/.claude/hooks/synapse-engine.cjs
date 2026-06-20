@@ -287,9 +287,8 @@ function handoffDirective(consumed, pct, hasDebt) {
     '[HANDOFF REQUIRED]',
     `  Context is at ~${now}% of the model window (>= the ${thresh}% handoff threshold). NON-BLOCKING — do NOT stop work:`,
     '  1. Finish the current request.',
-    '  2. Run the handoff skill to write the baton (a compact handoff document).',
-    '  3. Tell the operator to /clear and open a fresh session, where the baton injects on resume.',
-    '  Suggestion (optional, before step 2): run the dream skill to consolidate this session\'s durable learnings into wiki memory — a suggestion only; dream never auto-runs, it acts only when you invoke it.',
+    '  2. Tell the operator to /clear and open a fresh session. No manual step: the continuity baton writes automatically when this session ends (the memory synth) and injects on resume.',
+    '  Suggestion (optional): the session also auto-consolidates its durable learnings into wiki memory on close (auto-dream); to consolidate explicitly or mid-session, invoke the dream skill — a suggestion only, never required.',
   ];
   if (hasDebt) {
     lines.push('  Then (optional, only because the last health-check found curation debt): run the harvest skill to review the flagged near-dups / decay-candidates / malformed pages — a suggestion only; harvest never auto-deletes, every change is proposed for your confirmation.');

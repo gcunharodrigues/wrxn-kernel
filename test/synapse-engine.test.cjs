@@ -247,6 +247,33 @@ test('the forced-handoff directive carries a dream consolidation nudge — a sug
   assert.match(d, /suggestion|optional/i);   // … and only suggests — dream is never auto-invoked
 });
 
+// auto-memory-05: the handoff skill is DELETED (the synth now writes the baton automatically on
+// SessionEnd). The directive must point at the auto-baton reality, NOT instruct a non-existent skill.
+test('the handoff directive targets the auto-baton (writes on session end), not a manual skill', () => {
+  const d = engine.handoffDirective(0.5, 0.4);
+  // step 1 (finish the current request) and the /clear+fresh-session wrap-up are preserved.
+  assert.match(d, /Finish the current request/i);
+  assert.match(d, /\/clear/);
+  assert.match(d, /fresh session/i);
+  // the baton is described as automatic — it writes itself on session end and injects on resume.
+  assert.match(d, /baton writes automatically|automatically.*session end|session end.*automatically/i);
+  assert.match(d, /injects on resume/i);
+});
+
+test('the handoff directive does NOT instruct running the (deleted) handoff skill', () => {
+  const d = engine.handoffDirective(0.5, 0.4);
+  assert.doesNotMatch(d, /handoff skill/i);            // the skill no longer exists (slice 05)
+  assert.doesNotMatch(d, /[Rr]un the handoff/);        // no "run the handoff …" step survives
+});
+
+// The optional dream line must be accurate post-auto-memory: the session ALSO auto-consolidates on
+// close (auto-dream); invoking the manual `dream` skill is for explicit/mid-session consolidation.
+test('the dream nudge reflects auto-dream — manual dream is for explicit/mid-session consolidation', () => {
+  const d = engine.handoffDirective(0.5, 0.4);
+  assert.match(d, /auto-consolidate|auto-dream|consolidates on close|also.*on close/i);
+  assert.match(d, /dream skill/i);  // the manual dream skill is still named as the explicit path
+});
+
 test('no handoff below the threshold (20% of a 200k window)', () => {
   const root = freshInstall('wrxn-syn-ho-below-');
   const tx = writeTranscript(root, { input_tokens: 40000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 9000 });
@@ -525,14 +552,14 @@ const UNAVAIL_REC = { ts: '2026-06-17T10:00:00.000Z', type: 'near_dup', status: 
 test('handoffDirective appends the harvest line AFTER the dream line when debt is present', () => {
   const d = engine.handoffDirective(0.5, 0.4, true);
   assert.match(d, /\[HANDOFF REQUIRED\]/);
-  assert.match(d, /run the dream skill to consolidate/);
+  assert.match(d, /dream skill/);
   assert.match(d, /run the harvest skill to/);
   assert.ok(d.indexOf('dream skill') < d.indexOf('harvest skill'), 'dream line precedes the harvest line');
 });
 
 test('handoffDirective emits NO harvest line when there is no debt (dream line intact)', () => {
   const d = engine.handoffDirective(0.5, 0.4, false);
-  assert.match(d, /run the dream skill to consolidate/);
+  assert.match(d, /dream skill/);
   assert.doesNotMatch(d, /harvest skill/);
 });
 
@@ -581,7 +608,7 @@ test('end-to-end: a handoff with curation debt shows the dream line THEN a harve
     { CLAUDE_PROJECT_DIR: root, HOME: home, WRXN_RULES_BUDGET: '100000' }
   );
   assert.match(ctx, /\[HANDOFF REQUIRED\]/);
-  assert.match(ctx, /run the dream skill to consolidate/);
+  assert.match(ctx, /dream skill/);
   assert.match(ctx, /run the harvest skill to/);
   assert.ok(ctx.indexOf('dream skill') < ctx.indexOf('harvest skill'), 'dream line precedes the harvest line');
 });
@@ -596,7 +623,7 @@ test('end-to-end: a handoff on a clean tree shows the dream line and NO harvest 
     { CLAUDE_PROJECT_DIR: root, HOME: home, WRXN_RULES_BUDGET: '100000' }
   );
   assert.match(ctx, /\[HANDOFF REQUIRED\]/);
-  assert.match(ctx, /run the dream skill to consolidate/);
+  assert.match(ctx, /dream skill/);
   assert.doesNotMatch(ctx, /harvest skill/);
 });
 
@@ -612,6 +639,6 @@ test('end-to-end: a malformed harvest report → handoff intact, dream line, NO 
     { CLAUDE_PROJECT_DIR: root, HOME: home, WRXN_RULES_BUDGET: '100000' }
   );
   assert.match(ctx, /\[HANDOFF REQUIRED\]/);                // directive intact
-  assert.match(ctx, /run the dream skill to consolidate/);  // dream line intact
+  assert.match(ctx, /dream skill/);                         // dream line intact
   assert.doesNotMatch(ctx, /harvest skill/);                // malformed report → no debt → no harvest line
 });
