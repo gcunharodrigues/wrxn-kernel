@@ -406,6 +406,12 @@ const REDACTIONS = [
   /\bsk-[A-Za-z0-9]{20,}\b/g, // OpenAI-style secret keys
   /\bAIza[0-9A-Za-z._-]{10,}\b/g, // Google / Gemini API keys
   /\bey[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{3,}\b/g, // JWTs (incl. Bearer payloads): the discriminating `eyJ…` header gates it
+  /\bnpm_[A-Za-z0-9]{20,}\b/g, // npm publish / automation tokens (≥20 covers the 36-char granular form + variable-length CI tokens)
+  /\bgithub_pat_[A-Za-z0-9_]{22,}\b/g, // GitHub fine-grained PATs
+  /\bsk_(?:live|test)_[A-Za-z0-9]{20,}\b/g, // Stripe live/test secret keys
+  /\bsk-proj-[A-Za-z0-9_-]{20,}\b/g, // OpenAI project-scoped keys (underscore form not caught by sk-…)
+  /-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z ]+ )?PRIVATE KEY-----/g, // PEM private-key blocks
+  /\bBearer\s+[A-Za-z0-9._~+/=-]{20,}/g, // opaque Bearer tokens (non-JWT)
   /\b[A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD)\b\s*[:=]\s*\S+/gi, // KEY/TOKEN/SECRET = value
 ];
 
@@ -470,7 +476,8 @@ async function runHandoff({ root, invoke = defaultInvoke }) {
     } else {
       const config = loadConfig(root);
       const apiKey = loadEnv(root).GEMINI_API_KEY;
-      const text = await synthesize({ task: 'handoff', prompt: PROMPTS.handoff, blob, config, apiKey, invoke });
+      const safeBlob = redactSecrets(blob); // scrub BEFORE the blob egresses to the external model (claude -p / off-box gemini POST).
+      const text = await synthesize({ task: 'handoff', prompt: PROMPTS.handoff, blob: safeBlob, config, apiKey, invoke });
       if (text && text.trim()) {
         const body = redactSecrets(text); // scrub secrets BEFORE the durable baton is written.
         writeBatonAtomic(root, body.endsWith('\n') ? body : body + '\n');

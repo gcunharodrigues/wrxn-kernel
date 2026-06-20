@@ -199,6 +199,41 @@ test('redactSecrets scrubs common credential shapes from a body', () => {
   assert.match(clean, /wiring SessionStart that must survive/, 'ordinary content is preserved verbatim');
 });
 
+// ── AC7 (qa-walk F-01 + security F2, MED): bare-in-prose vendor token shapes are redacted ──
+// High-signal token shapes that appear BARE in prose (not as KEY=value) slipped past REDACTIONS —
+// notably the `npm_…` publish/automation token (qa-walk MEDIUM, acceptance/.../06-npm-token-…). These
+// shapes have appeared in-chat in this project, so the synth must scrub them from the handoff body.
+test('redactSecrets scrubs bare-in-prose vendor token shapes (npm/github-pat/stripe/pem/bearer)', () => {
+  const dirty = [
+    'publish with npm' + '_abcdefghij1234567890abcdefghij123456 now', // npm_ + exactly 36 chars (real shape)
+    'use github_pat' + '_11ABCDEFG0abcdefghijkl_AbCdEf1234567890AbCdEf1234567890 for ci',
+    'stripe live key sk_live' + '_0123456789abcdefghijABCDEFGHIJ here',
+    'openai project key sk-proj' + '-0123456789abcdef_ABCDEFGHIJ-klmno here',
+    '-----BEGIN PRIV' + 'ATE KEY-----\nMIIBVwIBADANBgkqhkiG9w0BAQEFAASCAUEw\n-----END PRIVATE KEY-----',
+    'Authorization: Bearer abc123DEF456ghi789JKL012mno345',
+    'a normal sentence about the SessionStart hold that must survive',
+  ].join('\n');
+
+  const clean = synth.redactSecrets(dirty);
+
+  assert.doesNotMatch(clean, /npm_[A-Za-z0-9]{20}/, 'an npm token is redacted');
+  assert.doesNotMatch(clean, /github_pat_[A-Za-z0-9_]{20}/, 'a github fine-grained PAT is redacted');
+  assert.doesNotMatch(clean, /sk_live_[A-Za-z0-9]{20}/, 'a stripe live key is redacted');
+  assert.doesNotMatch(clean, /sk-proj-[A-Za-z0-9_-]{20}/, 'an openai project-scoped key is redacted');
+  assert.doesNotMatch(clean, /BEGIN PRIVATE KEY/, 'a PEM private-key block is redacted');
+  assert.doesNotMatch(clean, /Bearer abc123DEF456/, 'an opaque bearer token is redacted');
+  assert.match(clean, /the SessionStart hold that must survive/, 'ordinary content is preserved verbatim');
+});
+
+// Resolves qa-walk finding acceptance/auto-memory/issues/06-npm-token-missing-from-redactions.md —
+// the documented repro is a bare 40-char npm token in prose (and the same token in a Bearer context).
+test('redactSecrets resolves the issue-06 npm-token repro (bare + Bearer-wrapped)', () => {
+  const bare = synth.redactSecrets('npm' + '_abcdefghij1234567890abcdefghij1234567890 token here');
+  assert.doesNotMatch(bare, /npm_[A-Za-z0-9]{20}/, 'the bare npm token from the repro is redacted');
+  const wrapped = synth.redactSecrets('Authorization: Bearer npm' + '_abcdefghij1234567890abcdefghij1234567890');
+  assert.doesNotMatch(wrapped, /npm_[A-Za-z0-9]{20}/, 'the Bearer-wrapped npm token from the repro is redacted');
+});
+
 test('runHandoff redacts secrets from the synthesized handoff before writing the baton', async () => {
   const root = tmp('wrxn-handoff-redact-');
   stageSession(root, REAL_SESSION);
@@ -212,6 +247,33 @@ test('runHandoff redacts secrets from the synthesized handoff before writing the
   assert.doesNotMatch(baton, /ghp_[A-Za-z0-9]{20}/, 'the leaked token never reaches the durable baton');
   assert.match(baton, /\[REDACTED\]/, 'the baton marks the redaction');
   assert.match(baton, /TL;DR/, 'the rest of the handoff is intact');
+});
+
+// ── AC7 (security, HIGH): the blob is redacted BEFORE it egresses to the external model ──
+// runHandoff feeds the transcript blob to `synthesize`, which sends it to `claude -p` (and, on the
+// gemini fallback, POSTs it off-box to a third-party API). A credential in the transcript must be
+// scrubbed BEFORE it leaves the box — output-only redaction is too late, the secret has already
+// egressed. The load-bearing assertion is what the invoker RECEIVES, not just what the baton holds.
+
+test('runHandoff redacts the transcript blob BEFORE it reaches the engine (no secret egress)', async () => {
+  const root = tmp('wrxn-handoff-egress-');
+  // the transcript itself carries planted credentials (a user pasted them into the session).
+  const leakySession = [
+    JSON.stringify({ type: 'user', message: { role: 'user', content: 'publish with npm' + '_abcdefghij1234567890abcdefghij1234567890 and key sk' + '-0123456789abcdefghijABCDEFGHIJ now' } }),
+    JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'wiring the auto-handoff slice and the SessionStart hold' }] } }),
+  ].join('\n');
+  stageSession(root, leakySession);
+  // capture the blob the engine receives (the input that egresses off-box).
+  const { invoke, calls } = fakeInvoke({ claude: { ok: true, text: '**TL;DR** done' } });
+
+  await synth.runHandoff({ root, invoke });
+
+  assert.equal(calls.length, 1, 'the engine was invoked once');
+  const sent = calls[0].input; // what reaches `claude -p` (and would POST to gemini on fallback)
+  // a shape already in REDACTIONS — this isolates the EGRESS-TIMING fix (redact the blob before send).
+  assert.doesNotMatch(sent, /sk-[A-Za-z0-9]{20}/, 'the openai-style key is scrubbed before egress to the model');
+  assert.match(sent, /\[REDACTED\]/, 'the blob the engine received was redacted');
+  assert.match(sent, /wiring the auto-handoff slice/, 'ordinary transcript content still reaches the engine');
 });
 
 // ── AC5: atomic write — no half-written baton is ever observable ────────────────
