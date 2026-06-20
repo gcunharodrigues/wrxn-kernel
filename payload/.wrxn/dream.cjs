@@ -241,33 +241,62 @@ function secretScan(text) {
   return null;
 }
 
-// ── source quote-verification (auto-memory-01) ────────────────────────────────
+// ── source quote-verification (auto-memory-01 + F1 substantive floor) ──────────
 // The single mechanical control that lets a NON-human proposer (auto-dream) write durable memory
-// without poisoning recall: when a --source transcript blob is supplied, every evidence quote must
-// VERIFIABLY appear in it, else the proposal is a hallucination → quote_not_in_source. Matching is
-// normalized — lowercased + whitespace-collapsed — so transcript formatting (line wraps, indentation,
+// without poisoning recall: when a --source transcript blob is supplied, every evidence quote must be a
+// SUBSTANTIVE verbatim span that VERIFIABLY appears in it, else the proposal is a hallucination. Matching
+// is normalized — lowercased + whitespace-collapsed — so transcript formatting (line wraps, indentation,
 // case) never causes a false reject, while the substantive quote text must still be present contiguously
 // (we do NOT strip punctuation: the AC scopes normalization to whitespace + case only). When no source
 // is supplied (the manual dream skill — a trusted main-agent proposer) this is a no-op, so behavior is
 // byte-identical to today. A non-string quote never reaches here: the evidence-presence check rejects it.
+//
+// F1 (security MED): a bare substring match is satisfied by a trivially-present quote — "the" is a
+// substring of essentially every transcript — so the proposer needed only ANY real word to clear the
+// gate, under-delivering the PRD's load-bearing "a hallucination can't poison recall" claim. So a quote
+// must FIRST be substantive before its presence counts: the NORMALIZED quote must be ≥ QUOTE_MIN_CHARS
+// chars AND ≥ QUOTE_MIN_TOKENS whitespace-delimited word tokens, else quote_not_substantive. The token
+// floor rejects single/two-word fragments ("the", "it works"); the char floor backstops it against tiny
+// 3-token spans ("a b c"). The bar is low enough never to false-reject a terse real decision quote
+// ("use pino logs"), and a proposer grounding a real decision can always cite a fuller span.
 function normalizeForMatch(s) {
   return String(s == null ? '' : s).toLowerCase().replace(/\s+/g, ' ').trim();
 }
 
-function quotesInSource(p, source) {
+// The substantive-quote floor (F1). Operates on the NORMALIZED quote so it is independent of transcript
+// formatting/case. Tunable here; pinned in BOTH directions (reject "the"/"authentication"; admit
+// "use pino logs") by test/dream.test.cjs.
+const QUOTE_MIN_CHARS = 12;
+const QUOTE_MIN_TOKENS = 3;
+
+function isSubstantiveQuote(quote) {
+  const norm = normalizeForMatch(quote);
+  if (norm.length < QUOTE_MIN_CHARS) return false;
+  return norm.split(' ').filter(Boolean).length >= QUOTE_MIN_TOKENS;
+}
+
+// Quote-verify (auto-memory-01 + F1): returns a reject reason or null. PRECEDENCE — substantiveness is a
+// property of the quote ALONE, so it is a global precondition checked BEFORE any source-presence match:
+// if ANY quote is non-substantive → quote_not_substantive; else if ANY quote is absent from the source →
+// quote_not_in_source. (So quote_not_substantive is reported before quote_not_in_source.)
+function verifyQuotes(p, source) {
+  if (!p.evidence.every((e) => isSubstantiveQuote(e.quote))) return 'quote_not_substantive';
   const hay = normalizeForMatch(source);
-  return p.evidence.every((e) => hay.includes(normalizeForMatch(e.quote)));
+  if (!p.evidence.every((e) => hay.includes(normalizeForMatch(e.quote)))) return 'quote_not_in_source';
+  return null;
 }
 
 // ── the pure per-proposal gate ────────────────────────────────────────────────
 // Deterministic given (proposal, io, source). `io` injects the dedup IO so the gate stays a pure,
 // unit-testable function (mirrors Phase-2 decideRecall): io.pathExists(tier,slug) /
 // io.titleExists(title,tier,slug). `source` (auto-memory-01) is the optional transcript blob: when a
-// non-null string, every evidence quote must verifiably appear in it (quote_not_in_source); when null
-// (the manual dream path) the quote-verify is skipped — behavior is byte-identical to today.
+// non-null string, every evidence quote must be substantive (quote_not_substantive) and verifiably appear
+// in it (quote_not_in_source); when null (the manual dream path) the quote-verify is skipped — behavior is
+// byte-identical to today.
 // PRECEDENCE (deterministic, documented): routing validity (tier, kind↔tier) → confidence floor →
-// evidence presence → SOURCE quote-verify → rationale → body → negative filters → secret-scan →
-// identity → dedup. So quote_not_in_source is reported AFTER the cheap structural checks the quote
+// evidence presence → SOURCE quote-verify [substantive floor (quote_not_substantive) BEFORE
+// source-presence (quote_not_in_source)] → rationale → body → negative filters → secret-scan →
+// identity → dedup. So the quote-verify reasons are reported AFTER the cheap structural checks the quote
 // itself depends on (it needs evidence to exist) and the confidence floor, but BEFORE the negative
 // filters, secret-scan, identity and the expensive dedup IO. Quote-verify composes with — never
 // bypasses — every existing check: a proposal that passes quote-verify still faces all later gates.
@@ -280,10 +309,14 @@ function validateProposal(p, io, source) {
       !p.evidence.every((e) => e && typeof e.quote === 'string' && e.quote.trim().length > 0)) {
     return { ok: false, reason: 'missing_evidence' };
   }
-  // SOURCE quote-verify (auto-memory-01): runs ONLY when a --source blob is supplied. The evidence is
-  // known present + non-blank here, so each quote must normalize-substring-match the source or the
-  // proposal is a hallucination. Null source (manual dream) ⇒ skipped ⇒ byte-identical to today.
-  if (source != null && !quotesInSource(p, source)) return { ok: false, reason: 'quote_not_in_source' };
+  // SOURCE quote-verify (auto-memory-01 + F1): runs ONLY when a --source blob is supplied. The evidence is
+  // known present + non-blank here, so each quote must be a substantive span (quote_not_substantive) AND
+  // normalize-substring-match the source (quote_not_in_source) or the proposal is a hallucination. Null
+  // source (manual dream) ⇒ skipped ⇒ byte-identical to today.
+  if (source != null) {
+    const qr = verifyQuotes(p, source);
+    if (qr) return { ok: false, reason: qr };
+  }
   if (typeof p.rationale !== 'string' || p.rationale.trim().length === 0) return { ok: false, reason: 'missing_rationale' };
   if (typeof p.body !== 'string' || !p.body.startsWith('# ')) return { ok: false, reason: 'body_missing_h1' };
   if (p.body.length > BODY_MAX) return { ok: false, reason: 'body_too_large' };
@@ -380,12 +413,21 @@ function readJson(file) {
 }
 
 // Read the optional --source transcript blob (auto-memory-01). Absent ⇒ null (the legacy path, no
-// quote-verify). Present-but-unreadable ⇒ HARD fail (exit 2): a missing source must NEVER silently
-// disable the gate — that would let a broken/unreadable file turn off the one defense against a
-// hallucinated memory. The blob is raw text (the transcript), so it is read as-is, not parsed.
+// quote-verify). PRESENT ⇒ it MUST carry a real, readable file value: a value-less / empty / --leading
+// token (F2) or an unreadable path ⇒ HARD fail (exit 2). A missing source must NEVER silently disable the
+// gate — that would let a malformed argv (or a broken file) turn off the one defense against a
+// hallucinated memory. We read argv DIRECTLY here (not flag()): flag('source') collapses "flag absent"
+// and "flag present-but-valueless" both to undefined, but only the former may fall through to legacy.
+// The blob is raw text (the transcript), read as-is, not parsed.
 function readSource() {
-  const file = flag('source');
-  if (file === undefined) return null;
+  const i = process.argv.indexOf('--source');
+  if (i === -1) return null; // the flag is truly absent → legacy path (the trusted manual-dream proposer)
+  const file = process.argv[i + 1];
+  // --source WAS asked for, so it must not silently revert to no-verify: a trailing token (undefined), an
+  // empty value, or another flag (e.g. `--root`) is a fail-CLOSED malformed argv, never "gate off" (F2).
+  if (file === undefined || file === '' || file.startsWith('--')) {
+    fail('--source was given without a readable file value — refusing to silently disable quote-verify');
+  }
   try {
     return fs.readFileSync(file, 'utf8');
   } catch (err) {

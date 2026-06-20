@@ -818,3 +818,79 @@ test('SECURITY: check --source with an UNREADABLE source file fails (exit 2) —
   assert.equal(err.status, 2);
   assert.match(String(err.stderr || ''), /--source/);
 });
+
+// ── F1 (security MED): the substantive-quote floor (auto-memory-01 follow-up) ───
+// A bare substring match is satisfied by a trivially-present quote ("the" is in every transcript), so the
+// quote-verify under-delivered the PRD's load-bearing "a hallucination can't poison recall" claim — a
+// proposer needed only ANY real word. Each evidence quote must now be a SUBSTANTIVE verbatim span (the
+// NORMALIZED quote ≥ 12 chars AND ≥ 3 word-tokens) before its source match counts, else
+// quote_not_substantive. The trivial quotes below are deliberately PRESENT in the source, so only the new
+// floor (not the presence check) can reject them.
+
+test('check --source (F1): a trivially-present quote ("the") is rejected quote_not_substantive', () => {
+  const t = freshInstall('dream-src-trivial-');
+  // "the" IS a substring of the source — only the substantive floor (not presence) can reject it
+  const p = validProposal({ evidence: [{ quote: 'the' }] });
+  const v = checkOneSource(t, p, 'we talked about the cache and the queue at length today.');
+  assert.equal(v.ok, false);
+  assert.equal(v.reason, 'quote_not_substantive');
+});
+
+test('check --source (F1): the char floor — a 3-token but <12-char quote ("we go now") → quote_not_substantive', () => {
+  const t = freshInstall('dream-src-charfloor-');
+  // 3 word-tokens but only 9 normalized chars: present in source, rejected solely by the char floor
+  const p = validProposal({ evidence: [{ quote: 'we go now' }] });
+  assert.equal(checkOneSource(t, p, 'we go now and circle back later.').reason, 'quote_not_substantive');
+});
+
+test('check --source (F1): the token floor — a long single-word quote ("authentication") → quote_not_substantive', () => {
+  const t = freshInstall('dream-src-tokenfloor-');
+  // 14 chars but a single word-token: present in source, rejected solely by the token floor
+  const p = validProposal({ evidence: [{ quote: 'authentication' }] });
+  assert.equal(checkOneSource(t, p, 'we discussed authentication at length today.').reason, 'quote_not_substantive');
+});
+
+test('check --source (F1): a terse but legitimate multi-word decision quote ("use pino logs") is NOT false-rejected', () => {
+  const t = freshInstall('dream-src-terse-ok-');
+  // 13 chars + 3 tokens clears the floor — a real short decision quote must still be accepted
+  const p = validProposal({ evidence: [{ quote: 'use pino logs' }] });
+  assert.deepEqual(checkOneSource(t, p, 'in this session we will use pino logs for everything.'), { ok: true });
+});
+
+test('check --source (F1) precedence: a trivial quote that is ALSO absent → quote_not_substantive (substantive floor wins)', () => {
+  const t = freshInstall('dream-src-trivial-absent-');
+  // "the" is both trivial AND absent from this source; the documented order reports substantive first
+  const p = validProposal({ evidence: [{ quote: 'the' }] });
+  assert.equal(checkOneSource(t, p, 'a session log lacking that token').reason, 'quote_not_substantive');
+});
+
+// ── F2 (security LOW): a value-less --source must fail CLOSED (auto-memory-01 follow-up) ──
+// A trailing/value-less `--source` token used to fall through to the no-verify legacy path — a silent
+// gate-off. When the caller asks for the gate it must NEVER silently disable: a present-but-valueless
+// --source fails exit 2, like an unreadable source.
+
+test('SECURITY (F2): a value-less trailing --source fails closed (exit 2) — never silently disables the gate', () => {
+  const t = freshInstall('dream-src-valueless-');
+  const pf = writeJson(t, 'p.json', validProposal());
+  let err;
+  try {
+    // --source is the LAST argv token (no value follows). Run cwd INSIDE the install so root resolves.
+    execFileSync('node', [path.join(t, DREAM), 'check', pf, '--root', t, '--source'], { encoding: 'utf8', cwd: t });
+  } catch (e) { err = e; }
+  assert.ok(err, 'check exited non-zero on a value-less --source (did not silently fall to the legacy path)');
+  assert.equal(err.status, 2);
+  assert.match(String(err.stderr || ''), /--source/);
+});
+
+// ── NB-3: pin the documented gate ordering — confidence floor BEFORE quote-verify ──
+// The compose-confidence test above uses a PRESENT quote, so it can't tell "confidence before
+// quote-verify" from "after". This pins the full precedence: a low-confidence proposal whose quote is
+// ABSENT (yet substantive) must report confidence_below_threshold — only possible if confidence is gated
+// first. Reorder quote-verify ahead of the confidence floor and this test flips to quote_not_in_source.
+
+test('check --source precedence (NB-3): the confidence floor is checked BEFORE quote-verify', () => {
+  const t = freshInstall('dream-src-prec-conf-');
+  // low confidence AND a substantive-but-absent quote: confidence is gated first → confidence_below_threshold
+  const p = validProposal({ confidence: 0.5, evidence: [{ quote: 'a substantive quote absent from the transcript' }] });
+  assert.equal(checkOneSource(t, p, 'a transcript that does not contain that phrase at all').reason, 'confidence_below_threshold');
+});
