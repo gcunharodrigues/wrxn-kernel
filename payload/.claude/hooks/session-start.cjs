@@ -66,11 +66,14 @@ function readBaton(root) {
 // ── the SessionEnd-synth hold (auto-memory-03) ──────────────────────────────────
 // When a session ends, memory-synth-spawn.cjs raises a `.pending-handoff` marker and launches the synth
 // detached; the synth writes the baton then clears the marker. So a back-to-back /clear could start
-// BEFORE the fresh baton exists. We hold: poll the marker until it clears (synth done), bounded by a
-// crash safety-cap so a SIGKILLed synth (marker never cleared) can never hang start forever. The
-// poll-decision is pure and the loop takes an injected clock, so it is unit-tested with no wall sleep.
+// BEFORE the fresh baton exists. We hold: poll the marker until it clears (synth done) so the new session
+// ALWAYS resumes on the freshly-written handoff — not the previous one. The cap is a crash backstop only
+// (a SIGKILLed synth that never clears the marker must not hang start forever), NOT a budget for a healthy
+// synth. The poll-decision is pure and the loop takes an injected clock, so it is unit-tested with no wall sleep.
 const HANDOFF_MARKER_REL = ['.wrxn', 'continuity', '.pending-handoff'];
-const HOLD_CAP_MS = 60000; // crash safety-cap: never wait past this for an in-flight synth.
+// 3 min: a heavy HITL-session synth takes >1min to write its baton; 60s abandoned it mid-write and the
+// next session resumed on the PREVIOUS baton (operator-set 2026-06-21). Crash backstop only — never a budget.
+const HOLD_CAP_MS = 180000;
 const HOLD_POLL_MS = 250; // poll cadence (the real sleep step; tests inject their own).
 
 // A synchronous sleep for the real poll loop (the hook must finish before it emits; tests inject their
@@ -173,4 +176,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { holdDecision, holdForHandoff };
+module.exports = { holdDecision, holdForHandoff, HOLD_CAP_MS };
