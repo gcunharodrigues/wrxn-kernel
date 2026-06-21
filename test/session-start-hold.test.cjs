@@ -47,6 +47,17 @@ test('holdDecision: a marker older than the safety-cap → proceed anyway (crash
   assert.equal(start.holdDecision({ markerExists: true, markerAgeMs: 60000, capMs: 60000 }), 'proceed');
 });
 
+test('the production safety-cap (HOLD_CAP_MS) waits past 60s — a heavy HITL synth must not be abandoned mid-write', () => {
+  // A real SessionEnd synth for a large HITL session takes >1min to write the baton; the cap is the
+  // backstop for a CRASHED synth, not a time budget for a healthy one. So at 90s the in-flight marker is
+  // still honoured (wait), and only at the 3-minute cap do we give up (proceed) so a SIGKILLed synth can
+  // never hang the next session start forever. Operator-set 2026-06-21 (was 60s → orientation resumed on
+  // the PREVIOUS baton because the synth had not finished).
+  assert.equal(start.HOLD_CAP_MS, 180000, 'the cap is 3 minutes');
+  assert.equal(start.holdDecision({ markerExists: true, markerAgeMs: 90000, capMs: start.HOLD_CAP_MS }), 'wait');
+  assert.equal(start.holdDecision({ markerExists: true, markerAgeMs: start.HOLD_CAP_MS, capMs: start.HOLD_CAP_MS }), 'proceed');
+});
+
 // ── the loop, driven by an INJECTED clock (no wall-clock sleep) ──────────────────
 
 // A fake clock: now() advances by `step` ms on each injected sleep() call.
