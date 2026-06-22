@@ -95,6 +95,53 @@ function qualifies(hit) {
   return floorOk || hasConsensus(hit);
 }
 
+// ── S1 exclusion: drop curation-retired pages (stale / superseded) before the gate (#20) ─────────────
+//
+// Harvest stamps retirement into a page's FRONTMATTER — `stale: <missing-source>` (orphaned) or
+// `superseded_by: <path>` (replaced). A recon FindHit carries no frontmatter, so the exclusion reads it
+// off a { hit.file → frontmatter } VIEW supplied by the caller (the IO shell reads the page files; tests
+// pass a literal map) — buildExclusion stays a PURE, deterministic black box. A page is RETIRED when its
+// frontmatter sets a truthy `stale:` OR it is not its own live head (it carries a `superseded_by:` that
+// resolves forward). resolveHead walks the supersession chain to the live head and fails SAFE on a cycle
+// or a dangling successor: the affected page is excluded and recall NEVER throws.
+
+const MAX_SUPERSESSION_HOPS = 64; // a belt-and-braces bound; the visited-set already stops a cycle
+
+// Walk `superseded_by` from `start` to the live head (a page with no successor). Returns the head path,
+// or null when the chain is malformed — a cycle (a path seen twice) or a dangling successor (a pointer
+// to a page absent from the view). PURE over the frontmatter view; a null head ⇒ fail-safe exclude.
+function resolveHead(start, view) {
+  let cur = start;
+  const seen = new Set();
+  for (let i = 0; i < MAX_SUPERSESSION_HOPS; i++) {
+    if (seen.has(cur)) return null; // cycle → fail safe
+    seen.add(cur);
+    const fm = view && view[cur];
+    if (!fm) return null; // dangling: a successor points at a page not in the view → fail safe
+    const next = fm.superseded_by;
+    if (!next || typeof next !== 'string') return cur; // no (usable) successor → cur is the live head
+    cur = next;
+  }
+  return null; // over the hop bound (pathological chain) → fail safe
+}
+
+// Build the exclude predicate (true ⇒ drop the hit) from the frontmatter view. A page is excluded when it
+// is truthy-`stale:`, OR it is superseded (its resolved live head is not itself — including the fail-safe
+// null head from a cycle / dangling chain). A page absent from the view, or with empty frontmatter, is
+// kept. TOTAL: a non-object view yields a never-exclude predicate (fail-open → recall unchanged).
+function buildExclusion(view) {
+  const v = view && typeof view === 'object' ? view : {};
+  return (hit) => {
+    const file = hit && hit.file;
+    if (typeof file !== 'string' || !file) return false; // no path to judge → keep
+    const fm = v[file];
+    if (!fm || typeof fm !== 'object') return false; // unflagged / absent → keep
+    if (fm.stale) return true; // truthy stale (a missing-source orphan) → retired
+    if (fm.superseded_by) return resolveHead(file, v) !== file; // not its own head → retired (incl. fail-safe)
+    return false;
+  };
+}
+
 function slugify(s) {
   return String(s || '')
     .toLowerCase()
@@ -179,18 +226,22 @@ function rerankByReward(prose, rewardLookup) {
 
 // PURE: the prose hits that clear the gate, reward-re-ranked, capped at TOP_N — exactly the hits
 // decideRecall renders (and the pages reinforce stamps). The optional reward lookup is injected; absent
-// → door order (shadow). Factored out so the IO shell can stamp the surfaced pages by path.
-function qualifyingHits(hits, rewardLookup) {
+// → door order (shadow). The optional `exclude` predicate (true ⇒ drop) is applied FIRST — before the
+// prose-filter, gate, reward re-rank, and top-N cut — so a retired page (stale / superseded) never
+// occupies a slot a live page should hold; absent ⇒ no exclusion (byte-identical to today). Factored
+// out so the IO shell can stamp the surfaced pages by path.
+function qualifyingHits(hits, rewardLookup, exclude) {
   const list = Array.isArray(hits) ? hits : [];
-  const prose = list.filter((h) => isProse(h) && qualifies(h));
+  const kept = typeof exclude === 'function' ? list.filter((h) => !exclude(h)) : list;
+  const prose = kept.filter((h) => isProse(h) && qualifies(h));
   return rerankByReward(prose, rewardLookup).slice(0, TOP_N);
 }
 
-// PURE: prose-filter → gate → reward re-rank → top-N → format. Returns the block string, or null
-// (Abstain). The reward lookup is optional and injected; with none (the shadow default) the output is
-// byte-identical to the pre-reward behaviour.
-function decideRecall(hits, rewardLookup) {
-  const qualified = qualifyingHits(hits, rewardLookup);
+// PURE: exclusion → prose-filter → gate → reward re-rank → top-N → format. Returns the block string,
+// or null (Abstain). The reward lookup and the exclusion predicate are optional and injected; with
+// neither (the shipped default) the output is byte-identical to the pre-exclusion behaviour.
+function decideRecall(hits, rewardLookup, exclude) {
+  const qualified = qualifyingHits(hits, rewardLookup, exclude);
   if (!qualified.length) return null;
   return renderBlock(qualified);
 }
@@ -413,6 +464,75 @@ function readRewardLookup(root) {
   return lookup;
 }
 
+// ── S1 exclusion: read each candidate page's retirement frontmatter from disk (#20) ──────────────────
+//
+// buildExclusion is PURE over a { hit.file → frontmatter } view; this shell builds that view by reading
+// each candidate page's frontmatter off disk under <root>. A recon FindHit carries no frontmatter, so
+// this is the only source of the `stale:` / `superseded_by:` flags harvest stamps. BEST-EFFORT: a page
+// read fault (missing/unreadable file, no fence) contributes empty frontmatter → the page is treated as
+// unflagged (kept) and nothing throws — so a since-deleted page or a parse hiccup never breaks recall.
+
+// Extract the frontmatter block (between the leading `---` fence and the next `---`). Mirrors drift-detect:
+// a page without a closed fence yields '' (no flags → kept).
+function frontmatterBlock(content) {
+  const m = /^---\r?\n([\s\S]*?)\r?\n---/.exec(content);
+  return m ? m[1] : '';
+}
+
+// Parse the two retirement keys from a page's frontmatter into { stale?, superseded_by? }. Values are
+// simple scalars (harvest writes `stale: <path>` / `superseded_by: <path>`); surrounding quotes are
+// stripped. Only these two keys are read — everything else in the frontmatter is ignored.
+function parseRetirement(content) {
+  const fm = frontmatterBlock(content);
+  if (!fm) return {};
+  const out = {};
+  for (const line of fm.split(/\r?\n/)) {
+    const m = /^(stale|superseded_by):\s*(.*)$/.exec(line);
+    if (!m) continue;
+    const val = m[2].trim().replace(/^['"]|['"]$/g, '');
+    if (val) out[m[1]] = val;
+  }
+  return out;
+}
+
+// Read the frontmatter of each prose candidate page into a view keyed by the EXACT path the hit carries
+// (hit.file), so buildExclusion's predicate — which reads off hit.file — joins to it directly. The path
+// is confined under the wiki root (a hit.file outside .wrxn/wiki/ is never opened — sec posture, mirrors
+// reinforce's join-key discipline); a read fault contributes {} (unflagged). Returns a {path: fm} map.
+function readExclusionView(root, hits) {
+  const view = {};
+  if (!root || !Array.isArray(hits)) return view;
+  for (const h of hits) {
+    const file = h && h.file;
+    if (typeof file !== 'string' || !file || view[file]) continue;
+    if (wikiRelPath(file) == null) continue; // not under the wiki root → never opened, never flagged
+    let content;
+    try {
+      content = fs.readFileSync(path.join(root, file), 'utf8');
+    } catch {
+      view[file] = {}; // unreadable (e.g. a since-deleted page) → unflagged, kept
+      continue;
+    }
+    try {
+      view[file] = parseRetirement(content);
+    } catch {
+      view[file] = {}; // any parse fault → unflagged, kept (fail-open)
+    }
+  }
+  return view;
+}
+
+// Build the exclude predicate for this candidate set from the page frontmatter on disk. Wholly fail-open:
+// any fault yields a never-exclude predicate, so a broken read can only ever LEAVE RECALL UNCHANGED — it
+// can never wrongly drop a live page or throw.
+function diskExclusion(root, hits) {
+  try {
+    return buildExclusion(readExclusionView(root, hits));
+  } catch {
+    return () => false;
+  }
+}
+
 // IO shell: discover the door, POST the prose query, gate the hits. Returns the block string or null.
 // `transport` is injected in tests; production uses httpTransport. Sends NO `type` (recon_find takes a
 // single NodeType, not an array) — prose scope is enforced by decideRecall's post-filter.
@@ -445,12 +565,16 @@ async function recallFromDoor(root, prompt, { transport, timeoutMs, now, session
   // the reward sidecar and re-rank the qualifying candidates by reward factor before the top-N cut.
   const mode = rewardMode || SHIPPED_REWARD_MODE;
   const rewardLookup = mode === 'live' ? readRewardLookup(root) : null;
-  const block = decideRecall(hits, rewardLookup);
+  // S1 exclusion: drop curation-retired (stale / superseded) candidates BEFORE the gate/rerank/top-N, by
+  // reading each candidate page's frontmatter from disk. Fail-open: a fault yields a never-exclude
+  // predicate (recall unchanged), and an unflagged corpus makes this the identity (no-op, AC-6).
+  const exclude = diskExclusion(root, hits);
+  const block = decideRecall(hits, rewardLookup, exclude);
   // Side effects on a surfacing (both best-effort, never block): stamp access-recency for the pages we
   // surfaced, and record this session's surfaced set in the per-session surfaced-log. Use the SAME lookup
-  // so the recorded set matches the re-ranked top-N that was rendered.
+  // and exclusion so the recorded set matches the re-ranked, excluded top-N that was rendered.
   if (block) {
-    const surfaced = qualifyingHits(hits, rewardLookup);
+    const surfaced = qualifyingHits(hits, rewardLookup, exclude);
     reinforce(root, surfaced, now);
     surfacedLog(root, sessionId, surfaced);
   }
@@ -495,6 +619,8 @@ module.exports = {
   rerankByReward,
   recallFromDoor,
   readRewardLookup,
+  readExclusionView,
+  parseRetirement,
   reinforce,
   surfacedLog,
   wikiRelPath,
@@ -505,6 +631,8 @@ module.exports = {
   isProse,
   hasConsensus,
   qualifies,
+  buildExclusion,
+  resolveHead,
   renderBlock,
   findInstallRoot,
   SEMANTIC_FLOOR,
