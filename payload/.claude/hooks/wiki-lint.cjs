@@ -92,6 +92,23 @@ function deadLinkFindings(corpus) {
   return findings;
 }
 
+// Duplicate page titles: two+ pages sharing the same `name:` identity slug — an identity collision
+// (write-page even refuses to overwrite by slug), the tell that the pages should have been merged.
+// One finding per colliding title, naming every page that claims it.
+function duplicateTitleFindings(corpus) {
+  const byName = new Map();
+  for (const page of corpus) {
+    if (!page.name) continue; // a name-less page is already caught by the malformed check
+    if (!byName.has(page.name)) byName.set(page.name, []);
+    byName.get(page.name).push(page.ref);
+  }
+  const findings = [];
+  for (const [name, refs] of byName) {
+    if (refs.length > 1) findings.push(`duplicate title "${name}" — ${refs.join(', ')}`);
+  }
+  return findings;
+}
+
 function sweep(root) {
   const flagged = [];
   const corpus = [];
@@ -119,7 +136,7 @@ function sweep(root) {
     }
   }
   // Corpus-level checks run after every page is read (they need the full set of page names).
-  for (const f of deadLinkFindings(corpus)) {
+  for (const f of [...deadLinkFindings(corpus), ...duplicateTitleFindings(corpus)]) {
     flagged.push(f);
     if (flagged.length >= MAX_FLAGGED) return flagged;
   }

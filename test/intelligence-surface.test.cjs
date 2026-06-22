@@ -147,6 +147,37 @@ test('wiki-lint is silent on a [[wikilink]] whose target page exists', () => {
   assert.deepEqual(env, {}, 'a resolvable wikilink → no flag');
 });
 
+// ── AC: wiki-lint flags duplicate page titles (S2 #21) ────────────────────────
+
+test('wiki-lint flags two pages that share the same title', () => {
+  const target = freshInstall('wrxn-lint-dup-');
+  // Two pages with the same name: identity slug — left unmerged. writePage uses the slug as the
+  // filename, so to collide the name across files we write the second page by hand.
+  writePage(target, 'concepts', 'first-copy', 'well formed');
+  const dir = path.join(target, '.wrxn', 'wiki', 'gotchas');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, 'second-copy.md'),
+    ['---', 'name: first-copy', 'description: dup notes', 'tier: gotchas', '---', '', 'body', ''].join('\n')
+  );
+  const env = runHook(LINT, { session_id: 'sid-dup', reason: 'clear' }, target);
+  const c = ctx(env);
+  assert.ok(c, 'a duplicate title injects a report');
+  assert.match(c, /duplicate/i, 'labels the finding as a duplicate');
+  assert.match(c, /first-copy/, 'names the shared title');
+});
+
+test('wiki-lint is report-only — it never edits a page while flagging issues', () => {
+  const target = freshInstall('wrxn-lint-reportonly-');
+  writePage(target, 'concepts', 'has-dead-link', 'points at [[nowhere]]');
+  const dir = path.join(target, '.wrxn', 'wiki', 'concepts');
+  const file = path.join(dir, 'has-dead-link.md');
+  const before = fs.readFileSync(file, 'utf8');
+  const env = runHook(LINT, { session_id: 'sid-ro', reason: 'clear' }, target);
+  assert.ok(ctx(env), 'the dead link is flagged');
+  assert.equal(fs.readFileSync(file, 'utf8'), before, 'the page on disk is byte-identical (report-only)');
+});
+
 // ── fail-open: no install root resolvable → {} for every hook ──────────────────
 
 test('every intelligence hook fails open with no install root', () => {
