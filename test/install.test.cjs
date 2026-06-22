@@ -117,6 +117,33 @@ test('the synth log is NOT a payload manifest entry (install state, never shippe
   assert.ok(!PAYLOAD_PATHS.includes('.wrxn/continuity/.synth.log'), 'the synth log must never be a shipped payload file');
 });
 
+// ── #13 / S2: the reward learning state is install STATE — gitignored, never shipped ──
+// session-start stamps a per-session start-HEAD baseline under .wrxn/baseline/ and the session-end
+// reward shell keeps the coalesced reward sidecar at .wrxn/reward.json. Both are runtime STATE: init
+// gitignores them (mirroring reinforce.json/surfaced.json) and neither is a shipped payload entry.
+
+test('init gitignores the reward baseline dir and the reward sidecar so they are never committed', () => {
+  const target = tmp('wrxn-reward-gi-');
+  init({ pkgRoot: PKG_ROOT, target, profile: 'project' });
+  const gi = fs.readFileSync(path.join(target, '.gitignore'), 'utf8');
+  assert.match(gi, /^\.wrxn\/baseline\/$/m, 'the start-HEAD baseline dir is gitignored after init');
+  assert.match(gi, /^\.wrxn\/reward\.json$/m, 'the reward sidecar is gitignored after init');
+
+  // idempotent: a second init does not duplicate the lines
+  init({ pkgRoot: PKG_ROOT, target, profile: 'project' });
+  const body = fs.readFileSync(path.join(target, '.gitignore'), 'utf8').split('\n');
+  assert.equal(body.filter((l) => l.trim() === '.wrxn/baseline/').length, 1, 'baseline ignore appears once');
+  assert.equal(body.filter((l) => l.trim() === '.wrxn/reward.json').length, 1, 'reward-sidecar ignore appears once');
+});
+
+test('the reward baseline + sidecar are NOT payload manifest entries (install state, never shipped)', () => {
+  assert.ok(!PAYLOAD_PATHS.includes('.wrxn/reward.json'), 'the reward sidecar must never be a shipped payload file');
+  assert.ok(
+    !PAYLOAD_PATHS.some((p) => p.startsWith('.wrxn/baseline/')),
+    'the per-session baseline markers must never be shipped payload files'
+  );
+});
+
 // ── idempotency ───────────────────────────────────────────────────────────────
 
 test('re-running init is a no-op (idempotent)', () => {

@@ -84,6 +84,21 @@
       "profile": "project"
     },
     {
+      "path": ".claude/hooks/sidecar.cjs",
+      "class": "managed",
+      "profile": "project"
+    },
+    {
+      "path": ".claude/hooks/reward.cjs",
+      "class": "managed",
+      "profile": "project"
+    },
+    {
+      "path": ".claude/hooks/session-end-reward.cjs",
+      "class": "managed",
+      "profile": "project"
+    },
+    {
       "path": ".claude/hooks/reference-detect.cjs",
       "class": "managed",
       "profile": "project"

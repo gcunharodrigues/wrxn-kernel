@@ -21,6 +21,7 @@ const { execFileSync, spawnSync } = require('child_process');
 const PKG_ROOT = path.join(__dirname, '..');
 const RECALL = path.join(PKG_ROOT, 'payload', '.claude', 'hooks', 'recall-surface.cjs');
 const recall = require('../payload/.claude/hooks/recall-surface.cjs');
+const reward = require('../payload/.claude/hooks/reward.cjs');
 
 function tmp(prefix) {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -521,6 +522,14 @@ test('reinforce: never throws even on a bad root (best-effort, pure side effect)
   );
 });
 
+test('reinforce: an invalid clock never throws (the full side effect stays fail-open)', () => {
+  // Defends the refactor: the day-stamp must be computed inside the swallowed envelope, so a bad `now`
+  // (an Invalid Date → toISOString RangeError) can never escape and break the recall surfacing.
+  const root = installRoot('wrxn-reinforce-badnow-');
+  assert.doesNotThrow(() => recall.reinforce(root, [hit({ file: '.wrxn/wiki/concepts/x.md' })], new Date('not-a-date')));
+  assert.equal(fs.existsSync(path.join(root, REINFORCE_REL)), false, 'a fault before the write leaves no sidecar');
+});
+
 test('reinforce: only PROSE pages are stamped — a code hit alongside prose is never keyed in', async () => {
   const root = installRoot('wrxn-reinforce-prose-only-');
   writeEndpoint(root, { pid: process.pid, port: 65027 });
@@ -551,14 +560,368 @@ test('reinforce: when recall ABSTAINS (nothing qualifies), no sidecar is written
   assert.equal(fs.existsSync(path.join(root, REINFORCE_REL)), false, 'no surfacing → no recency stamp (reinforcement = recall surfacing only, AC4)');
 });
 
-// ── self-contained: node stdlib only (no kernel-lib / recon import) ──────────────────
+// ── surfaced-log: the per-session record of what recall surfaced (S1 / #12) ──────────
+// When recall actually surfaces prose pages, record that SESSION's surfaced (qualifying) page-paths
+// into .wrxn/surfaced.json — a compact map { "<session_id>": ["<wiki-rel-path>", …] } via the shared
+// coalesced-sidecar helper. Same join key as reinforce (wiki-root-relative). Coalesced (re-surfacing
+// the SAME set for a session is a no-op), fail-open (any fault leaves recall unchanged), no secret.
 
-test('the hook imports nothing outside the node standard library', () => {
+const SURFACED_REL = path.join('.wrxn', 'surfaced.json');
+function readSurfaced(root) {
+  return JSON.parse(fs.readFileSync(path.join(root, SURFACED_REL), 'utf8'));
+}
+
+test('surfacedLog: records the session\'s surfaced (qualifying) page-paths keyed by session id', () => {
+  const root = installRoot('wrxn-surfaced-rec-');
+  const hits = [
+    hit({ file: '.wrxn/wiki/concepts/a.md', sources: ['bm25', 'semantic'], semanticScore: 0.7 }),
+    hit({ file: '.wrxn/wiki/gotchas/b.md', sources: ['semantic'], semanticScore: 0.6 }),
+  ];
+  recall.surfacedLog(root, 'sess-123', recall.qualifyingHits(hits));
+  assert.deepEqual(
+    readSurfaced(root),
+    { 'sess-123': ['concepts/a.md', 'gotchas/b.md'] },
+    'the surfaced set is keyed by session id, valued by wiki-root-relative path (join-key parity with reinforce)'
+  );
+});
+
+test('surfacedLog: re-surfacing the identical set for the same session is a coalesced no-op (byte-identical)', () => {
+  const root = installRoot('wrxn-surfaced-coalesce-');
+  const hits = recall.qualifyingHits([hit({ file: '.wrxn/wiki/concepts/a.md', sources: ['bm25', 'semantic'], semanticScore: 0.7 })]);
+  recall.surfacedLog(root, 'sess-1', hits);
+  const first = fs.readFileSync(path.join(root, SURFACED_REL));
+  recall.surfacedLog(root, 'sess-1', hits); // same session, same surfaced set
+  const second = fs.readFileSync(path.join(root, SURFACED_REL));
+  assert.ok(first.equals(second), 'an unchanged surfaced set leaves the sidecar byte-identical (no churn)');
+});
+
+test('surfacedLog: a different session adds its own key (per-session, not a global lock)', () => {
+  const root = installRoot('wrxn-surfaced-multi-');
+  recall.surfacedLog(root, 'sess-1', recall.qualifyingHits([hit({ file: '.wrxn/wiki/concepts/a.md', sources: ['bm25', 'semantic'], semanticScore: 0.7 })]));
+  recall.surfacedLog(root, 'sess-2', recall.qualifyingHits([hit({ file: '.wrxn/wiki/gotchas/b.md', sources: ['semantic'], semanticScore: 0.6 })]));
+  assert.deepEqual(
+    readSurfaced(root),
+    { 'sess-1': ['concepts/a.md'], 'sess-2': ['gotchas/b.md'] },
+    'each session keeps its own surfaced record'
+  );
+});
+
+test('surfacedLog: the same session surfacing a NEW set updates that session to the new set', () => {
+  const root = installRoot('wrxn-surfaced-update-');
+  recall.surfacedLog(root, 'sess-1', recall.qualifyingHits([hit({ file: '.wrxn/wiki/concepts/a.md', sources: ['bm25', 'semantic'], semanticScore: 0.7 })]));
+  recall.surfacedLog(root, 'sess-1', recall.qualifyingHits([hit({ file: '.wrxn/wiki/concepts/c.md', sources: ['bm25', 'semantic'], semanticScore: 0.7 })]));
+  assert.deepEqual(readSurfaced(root), { 'sess-1': ['concepts/c.md'] }, 'the session\'s surfaced set advances to the latest surfacing');
+});
+
+test('surfacedLog: no session id → no write (the session key is the record key)', () => {
+  const root = installRoot('wrxn-surfaced-nosid-');
+  recall.surfacedLog(root, '', recall.qualifyingHits([hit({ file: '.wrxn/wiki/concepts/a.md', sources: ['bm25', 'semantic'], semanticScore: 0.7 })]));
+  recall.surfacedLog(root, undefined, recall.qualifyingHits([hit({ file: '.wrxn/wiki/concepts/a.md', sources: ['bm25', 'semantic'], semanticScore: 0.7 })]));
+  assert.equal(fs.existsSync(path.join(root, SURFACED_REL)), false, 'without a session id there is no record to write');
+});
+
+test('surfacedLog: an empty surfaced set → no write (nothing to record)', () => {
+  const root = installRoot('wrxn-surfaced-empty-');
+  recall.surfacedLog(root, 'sess-1', []);
+  assert.equal(fs.existsSync(path.join(root, SURFACED_REL)), false, 'no surfaced paths → no surfaced-log file');
+});
+
+test('surfacedLog: only PROSE wiki paths are recorded — a code hit alongside prose is never keyed in', () => {
+  const root = installRoot('wrxn-surfaced-proseonly-');
+  // qualifyingHits already drops code; pass a raw mix to surfacedPaths via surfacedLog to also prove the
+  // projection itself drops a non-wiki file even if one slipped through.
+  recall.surfacedLog(root, 'sess-1', [
+    hit({ name: 'spawnWidget', type: 'Function', file: 'lib/widgetry.cjs' }),
+    hit({ file: '.wrxn/wiki/concepts/a.md', sources: ['bm25', 'semantic'], semanticScore: 0.7 }),
+  ]);
+  assert.deepEqual(readSurfaced(root), { 'sess-1': ['concepts/a.md'] }, 'a non-wiki path is dropped from the surfaced record');
+});
+
+test('surfacedLog: a malformed existing sidecar → no throw, left untouched (fail-open via the shared helper)', () => {
+  const root = installRoot('wrxn-surfaced-corrupt-');
+  fs.mkdirSync(path.join(root, '.wrxn'), { recursive: true });
+  fs.writeFileSync(path.join(root, SURFACED_REL), 'not json{ broken');
+  assert.doesNotThrow(() =>
+    recall.surfacedLog(root, 'sess-1', recall.qualifyingHits([hit({ file: '.wrxn/wiki/concepts/a.md', sources: ['bm25', 'semantic'], semanticScore: 0.7 })]))
+  );
+  assert.equal(fs.readFileSync(path.join(root, SURFACED_REL), 'utf8'), 'not json{ broken', 'the corrupt surfaced-log is left untouched');
+});
+
+test('surfacedLog: never throws even on a bad root (best-effort, pure side effect)', () => {
+  const dir = tmp('wrxn-surfaced-badroot-');
+  const badRoot = path.join(dir, 'a-file-not-a-dir');
+  fs.writeFileSync(badRoot, 'x'); // root is a FILE → every fs op under it throws ENOTDIR
+  assert.doesNotThrow(() =>
+    recall.surfacedLog(badRoot, 'sess-1', recall.qualifyingHits([hit({ file: '.wrxn/wiki/concepts/a.md', sources: ['bm25', 'semantic'], semanticScore: 0.7 })]))
+  );
+});
+
+test('surfacedLog: a secret-shaped page path is never written (no-secret via the shared helper)', () => {
+  // A wiki-rel key should never carry a secret, but the no-secret guarantee must hold structurally:
+  // if a session id or path ever embedded a token shape, the helper refuses the whole write.
+  const root = installRoot('wrxn-surfaced-secret-');
+  recall.surfacedLog(root, 'npm_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', recall.qualifyingHits([hit({ file: '.wrxn/wiki/concepts/a.md', sources: ['bm25', 'semantic'], semanticScore: 0.7 })]));
+  assert.equal(fs.existsSync(path.join(root, SURFACED_REL)), false, 'a record carrying a secret-shaped value is refused, not written');
+});
+
+test('recallFromDoor: when recall surfaces, the session\'s surfaced pages are logged under its session id', async () => {
+  const root = installRoot('wrxn-surfaced-e2e-');
+  writeEndpoint(root, { pid: process.pid, port: 65030 });
+  const block = await recall.recallFromDoor(root, 'a prompt long enough to query the door', {
+    transport: proseDoor(['.wrxn/wiki/concepts/a.md', '.wrxn/wiki/gotchas/b.md']),
+    now: new Date('2026-06-22T10:00:00.000Z'),
+    sessionId: 'sess-e2e',
+  });
+  assert.ok(block, 'recall surfaces');
+  assert.deepEqual(
+    readSurfaced(root),
+    { 'sess-e2e': ['concepts/a.md', 'gotchas/b.md'] },
+    'end-to-end: after recall fires, the surfaced-log holds that session\'s surfaced pages (the exact qualifying set)'
+  );
+});
+
+test('recallFromDoor: when recall ABSTAINS, no surfaced-log is written (ignores non-surfaced)', async () => {
+  const root = installRoot('wrxn-surfaced-abstain-');
+  writeEndpoint(root, { pid: process.pid, port: 65031 });
+  const transport = async () => ({
+    statusCode: 200,
+    body: JSON.stringify({ result: '', hits: [hit({ file: '.wrxn/wiki/concepts/x.md', sources: ['bm25'], semanticScore: 0.1 })] }),
+  });
+  const block = await recall.recallFromDoor(root, 'a prompt that surfaces nothing qualifying at all', { transport, now: new Date('2026-06-22T10:00:00.000Z'), sessionId: 'sess-abstain' });
+  assert.equal(block, null, 'nothing clears the gate → abstain');
+  assert.equal(fs.existsSync(path.join(root, SURFACED_REL)), false, 'no surfacing → no surfaced-log (logged = surfaced only)');
+});
+
+test('recallFromDoor: surfacing with no session id still surfaces, writes no surfaced-log (fail-open on a missing id)', async () => {
+  const root = installRoot('wrxn-surfaced-noid-');
+  writeEndpoint(root, { pid: process.pid, port: 65032 });
+  const block = await recall.recallFromDoor(root, 'a prompt long enough to query the door', {
+    transport: proseDoor(['.wrxn/wiki/concepts/a.md']),
+    now: new Date('2026-06-22T10:00:00.000Z'),
+    // no sessionId
+  });
+  assert.ok(block, 'recall still surfaces without a session id');
+  assert.equal(fs.existsSync(path.join(root, SURFACED_REL)), false, 'no session id → no surfaced record, but surfacing is unaffected');
+});
+
+// ── SHADOW (#13 / S2): the reward slice writes counts but NEVER moves a recall rank ──
+// S2 ships in shadow: a reward sidecar (.wrxn/reward.json) is written at session-end, but recall's
+// ranking/output is byte-identical to before — the re-rank is S3 (behind a recorded mode constant).
+// Two independent proofs: recall-surface consults NO reward state, and decideRecall's output does not
+// change when a populated reward sidecar exists on disk.
+
+// S3 supersedes the S2 "recall references no reward at all" structural lock: S3 adds the re-rank, so
+// recall now READS reward factors (in live mode) to re-order candidates. The enduring invariant is that
+// recall stays a READ-ONLY consumer — it never WRITES reward counts (updateReward is session-end's sole
+// job); the no-op-in-shadow guarantee is now behavioural (locked byte-identical below), not structural.
+test('S3 invariant: recall consumes reward read-only — it never calls updateReward (writing counts stays session-end\'s job)', () => {
   const src = fs.readFileSync(RECALL, 'utf8');
+  assert.doesNotMatch(src, /updateReward/, 'recall must never WRITE reward counts — it only reads factors to re-rank');
+});
+
+test('SHADOW: decideRecall output is byte-identical whether or not a populated reward sidecar exists', () => {
+  const hits = [
+    hit({ name: 'Alpha Page', file: '.wrxn/wiki/concepts/alpha.md', sources: ['semantic'], semanticScore: 0.42 }),
+    hit({ name: 'Beta Page', file: '.wrxn/wiki/gotchas/beta.md', sources: ['bm25', 'semantic'], semanticScore: 0.12 }),
+  ];
+  const baseline = recall.decideRecall(hits);
+  assert.ok(baseline, 'sanity: these hits surface a block');
+
+  // A reward sidecar that, IF S2 re-ranked, would clearly reorder (beta hugely preferred over alpha).
+  const root = installRoot('wrxn-recall-shadow-');
+  fs.mkdirSync(path.join(root, '.wrxn'), { recursive: true });
+  fs.writeFileSync(
+    path.join(root, '.wrxn', 'reward.json'),
+    JSON.stringify({ 'concepts/alpha.md': { s: 0, f: 99 }, 'gotchas/beta.md': { s: 99, f: 0 } }, null, 2) + '\n'
+  );
+
+  // decideRecall is pure and takes no reward input → its output cannot change. The block and the bullet
+  // ORDER are identical: alpha still precedes beta (input order), proving no reward re-rank occurred.
+  assert.equal(recall.decideRecall(hits), baseline, 'recall output is unchanged by the reward state (shadow)');
+  assert.ok(baseline.indexOf('alpha') < baseline.indexOf('beta'), 'order follows the hits, not the reward counts');
+});
+
+// ── S3 re-rank: decideRecall accepts a reward lookup and re-ranks by score × factor before top-N ──
+// The pure seam. A reward lookup is { <wiki-rel-path>: factor } (factors come from rewardFactor; the
+// caller pre-computes them). Given a non-empty lookup, candidates are re-ranked by base relevance score
+// × reward factor BEFORE the TOP_N cut. An absent / empty lookup is the IDENTITY (door order preserved)
+// — that is the shadow no-op, locked separately. decideRecall stays PURE: the lookup is injected.
+
+test('decideRecall (live lookup): a higher-reward page outranks a lower-reward one (re-rank by factor)', () => {
+  // Two equally-relevant, equally-qualifying prose hits; DOOR order puts the low-reward page first.
+  // With the reward lookup, the proven page must surface first — the re-rank moved it.
+  const hits = [
+    hit({ name: 'Loser Page', file: '.wrxn/wiki/concepts/loser.md', sources: ['bm25', 'semantic'], semanticScore: 0.7, score: 0.5 }),
+    hit({ name: 'Winner Page', file: '.wrxn/wiki/concepts/winner.md', sources: ['bm25', 'semantic'], semanticScore: 0.7, score: 0.5 }),
+  ];
+  const lookup = { 'concepts/loser.md': 0.2, 'concepts/winner.md': 1.8 }; // winner is the proven page
+  const block = recall.decideRecall(hits, lookup);
+  assert.ok(block, 'both qualify → a block surfaces');
+  assert.ok(block.indexOf('winner') < block.indexOf('loser'), 'the higher-reward page is ranked first');
+  // and the door order alone (no lookup) keeps the loser first — proving the lookup is what moved it
+  const doorOrder = recall.decideRecall(hits);
+  assert.ok(doorOrder.indexOf('loser') < doorOrder.indexOf('winner'), 'without a lookup the door order is preserved');
+});
+
+// A door returning the two reward fixtures (Loser then Winner) in DOOR order, both equally relevant.
+function rewardDoor() {
+  return async () => ({
+    statusCode: 200,
+    body: JSON.stringify({
+      result: '',
+      hits: [
+        hit({ name: 'Loser', file: '.wrxn/wiki/concepts/loser.md', sources: ['bm25', 'semantic'], semanticScore: 0.7, score: 0.5 }),
+        hit({ name: 'Winner', file: '.wrxn/wiki/concepts/winner.md', sources: ['bm25', 'semantic'], semanticScore: 0.7, score: 0.5 }),
+      ],
+    }),
+  });
+}
+
+// A lopsided reward sidecar on disk: winner proven (s≫f), loser disproven (f≫s).
+function writeReward(root, counts) {
+  fs.mkdirSync(path.join(root, '.wrxn'), { recursive: true });
+  fs.writeFileSync(path.join(root, '.wrxn', 'reward.json'), JSON.stringify(counts, null, 2) + '\n');
+}
+
+test('recallFromDoor (live mode, test-forced): reads .wrxn/reward.json and re-ranks surfaced pages by reward', async () => {
+  const root = installRoot('wrxn-recall-live-');
+  writeEndpoint(root, { pid: process.pid, port: 65040 });
+  writeReward(root, { 'concepts/loser.md': { s: 0, f: 40 }, 'concepts/winner.md': { s: 40, f: 0 } });
+  const block = await recall.recallFromDoor(root, 'a prompt long enough to query the door', {
+    transport: rewardDoor(),
+    rewardMode: 'live',
+  });
+  assert.ok(block, 'recall surfaces');
+  assert.ok(block.indexOf('winner') < block.indexOf('loser'), 'live mode re-ranked the proven page above the disproven one');
+});
+
+// ── THE HEADLINE GUARANTEE: in the shipped default (shadow), recall is byte-identical to pre-reward ──
+// behaviour even with a fully-populated reward.json on disk. This is the AC that de-risks the ship: ①
+// can merge to trunk as a provable recall no-op; the live flip is a later, gated change.
+
+test('SHADOW (shipped default): a fully-populated reward.json does NOT move a recall rank — byte-identical', async () => {
+  const root = installRoot('wrxn-recall-shadow-e2e-');
+  writeEndpoint(root, { pid: process.pid, port: 65041 });
+  // a lopsided reward that, IF applied, would clearly reorder (winner ≫ loser)
+  writeReward(root, { 'concepts/loser.md': { s: 0, f: 99 }, 'concepts/winner.md': { s: 99, f: 0 } });
+
+  // the pre-reward (door-order) baseline for these exact hits — exactly what recall emitted before S3
+  const doorHits = [
+    hit({ name: 'Loser', file: '.wrxn/wiki/concepts/loser.md', sources: ['bm25', 'semantic'], semanticScore: 0.7, score: 0.5 }),
+    hit({ name: 'Winner', file: '.wrxn/wiki/concepts/winner.md', sources: ['bm25', 'semantic'], semanticScore: 0.7, score: 0.5 }),
+  ];
+  const baseline = recall.decideRecall(doorHits); // single-arg = the pre-S3 behaviour
+
+  // full recall path in the SHIPPED mode (shadow, default): reward.json on disk must be ignored entirely
+  const shadowBlock = await recall.recallFromDoor(root, 'a prompt long enough to query the door', { transport: rewardDoor() });
+  assert.equal(shadowBlock, baseline, 'shadow recall is byte-identical to pre-reward recall despite a populated reward.json');
+  assert.ok(shadowBlock.indexOf('loser') < shadowBlock.indexOf('winner'), 'door order preserved — reward had zero influence');
+
+  // non-vacuous: the SAME inputs under live WOULD reorder, proving shadow deliberately declined to apply it
+  const liveBlock = await recall.recallFromDoor(root, 'a prompt long enough to query the door', { transport: rewardDoor(), rewardMode: 'live' });
+  assert.ok(liveBlock.indexOf('winner') < liveBlock.indexOf('loser'), 'the reward IS live-relevant — shadow chose not to apply it');
+});
+
+test('SHIPPED_REWARD_MODE defaults to shadow (the live flip is never a silent default)', () => {
+  assert.equal(recall.SHIPPED_REWARD_MODE, 'shadow', 'the shipped reward mode is shadow until the offline lift gate flips it');
+});
+
+// ── rev-F2 (S3 review): lock the shadow no-op at the IO boundary, not just the output ──────────────
+// The byte-identical tests above prove shadow OUTPUT is unchanged. This locks the STRONGER, structural
+// guarantee: in shadow the recall path performs ZERO reads of .wrxn/reward.json. A future "read-then-
+// neutralize" refactor could keep the output byte-identical while quietly re-introducing the read (and
+// with it the perf/attack surface the shadow ship exists to avoid); a read-count spy catches that.
+test('rev-F2 — SHADOW performs ZERO reads of .wrxn/reward.json (the no-op is IO-locked, not just output-locked)', async () => {
+  const root = installRoot('wrxn-recall-shadow-noio-');
+  writeEndpoint(root, { pid: process.pid, port: 65056 });
+  writeReward(root, { 'concepts/loser.md': { s: 0, f: 99 }, 'concepts/winner.md': { s: 99, f: 0 } });
+
+  const REWARD_SUFFIX = path.join('.wrxn', 'reward.json');
+  const realRead = fs.readFileSync;
+  let rewardReads = 0;
+  // recall-surface calls `fs.readFileSync` as a property at call time, so replacing the property on the
+  // shared fs module object is observed by the hook. Count only reads of the reward sidecar.
+  fs.readFileSync = function (p, ...rest) {
+    if (typeof p === 'string' && p.endsWith(REWARD_SUFFIX)) rewardReads++;
+    return realRead.call(this, p, ...rest);
+  };
+  try {
+    const shadowBlock = await recall.recallFromDoor(root, 'a prompt long enough to query the door', { transport: rewardDoor() });
+    assert.ok(shadowBlock, 'shadow still surfaces a block — the recall path WAS exercised');
+    assert.equal(rewardReads, 0, 'SHADOW must NEVER read .wrxn/reward.json (a read-then-neutralize refactor would regress this)');
+
+    // Non-vacuous: the SAME spy DOES count a read under live mode — so the zero above is a real guarantee.
+    rewardReads = 0;
+    await recall.recallFromDoor(root, 'a prompt long enough to query the door', { transport: rewardDoor(), rewardMode: 'live' });
+    assert.ok(rewardReads >= 1, 'LIVE mode reads reward.json — proving the spy counts real reads (the shadow zero is meaningful)');
+  } finally {
+    fs.readFileSync = realRead;
+  }
+});
+
+// ── S5 / kernel #16: the shipped mode is DERIVED from the recorded gate verdict, not hard-coded ──
+// Mirrors recon's `SHIPPED_DECAY_MODE === selectDecayMode(<live gate verdict>)` lock. The constant is
+// `selectRewardMode(RECORDED_REWARD_VERDICT)` — so it can never silently drift to 'live'; flipping the
+// recorded verdict (after the lift gate passes on real data + operator ratifies) is the ONLY path.
+test('SHIPPED_REWARD_MODE is selectRewardMode(RECORDED_REWARD_VERDICT) — derived from the verdict, not a literal', () => {
+  assert.equal(
+    recall.SHIPPED_REWARD_MODE,
+    reward.selectRewardMode(reward.RECORDED_REWARD_VERDICT),
+    'the shipped mode is locked to the recorded verdict (no silent drift to live)'
+  );
+  assert.equal(recall.SHIPPED_REWARD_MODE, 'shadow', 'and the recorded verdict still yields shadow');
+
+  // AC3 "not hard-coded": the source derives the constant via selectRewardMode, never a bare string literal.
+  const src = fs.readFileSync(RECALL, 'utf8');
+  assert.match(src, /SHIPPED_REWARD_MODE\s*=\s*selectRewardMode\(/, 'the constant is derived from the verdict');
+  assert.doesNotMatch(
+    src,
+    /SHIPPED_REWARD_MODE\s*=\s*['"](shadow|live)['"]/,
+    'the constant is NOT a hard-coded string literal'
+  );
+});
+
+// ── fail-open: a missing / corrupt reward store → neutral lookup → recall proceeds unchanged ──
+
+test('readRewardLookup: a missing reward.json → null (neutral); a well-formed store → a path→factor map', () => {
+  const root = installRoot('wrxn-recall-reward-read-');
+  assert.equal(recall.readRewardLookup(root), null, 'no reward.json → null lookup (the common pre-gate case)');
+  writeReward(root, { 'concepts/winner.md': { s: 40, f: 0 }, 'concepts/loser.md': { s: 0, f: 40 } });
+  const lookup = recall.readRewardLookup(root);
+  assert.ok(lookup['concepts/winner.md'] > 1, 'a proven page maps to a factor above neutral');
+  assert.ok(lookup['concepts/loser.md'] < 1, 'a disproven page maps to a factor below neutral');
+});
+
+test('live mode: a corrupt reward.json fails open to a neutral re-rank — recall still surfaces in door order', async () => {
+  const root = installRoot('wrxn-recall-reward-corrupt-');
+  writeEndpoint(root, { pid: process.pid, port: 65042 });
+  fs.mkdirSync(path.join(root, '.wrxn'), { recursive: true });
+  fs.writeFileSync(path.join(root, '.wrxn', 'reward.json'), 'not json{ broken');
+  assert.equal(recall.readRewardLookup(root), null, 'a corrupt store reads as a neutral (null) lookup');
+  const block = await recall.recallFromDoor(root, 'a prompt long enough to query the door', { transport: rewardDoor(), rewardMode: 'live' });
+  assert.ok(block, 'recall still surfaces despite a corrupt reward store (fail-open)');
+  assert.ok(block.indexOf('loser') < block.indexOf('winner'), 'a corrupt store → neutral → door order preserved');
+});
+
+// ── self-contained: node stdlib + co-located payload siblings only (no kernel-lib / recon import) ──
+// The hook may require a SIBLING module that ships alongside it in the payload hooks dir (e.g. the
+// shared sidecar helper) — itself self-contained — but nothing outside: no kernel-lib, no recon, no
+// third-party package. A relative require is allowed only when it resolves to a real file inside the
+// hooks dir (and that sibling is independently held to the same node-stdlib bar by its own test).
+
+test('the hook imports nothing outside the node standard library or its co-located payload siblings', () => {
+  const src = fs.readFileSync(RECALL, 'utf8');
+  const hooksDir = path.dirname(RECALL);
   const mods = [...src.matchAll(/require\(\s*['"]([^'"]+)['"]\s*\)/g)].map((m) => m[1]);
   assert.ok(mods.length > 0, 'sanity: the hook has require() calls');
   const builtins = new Set(require('module').builtinModules);
   for (const m of mods) {
+    if (m.startsWith('.')) {
+      const resolved = path.resolve(hooksDir, m);
+      assert.ok(resolved.startsWith(hooksDir + path.sep), `${m} must resolve inside the hooks dir — no reaching outside the payload`);
+      assert.ok(fs.existsSync(resolved), `${m} must be a real co-located sibling module`);
+      continue;
+    }
     const name = m.replace(/^node:/, '');
     assert.ok(builtins.has(name), `${m} must be a node builtin — no kernel-lib or recon import allowed`);
   }

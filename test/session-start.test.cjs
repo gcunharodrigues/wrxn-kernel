@@ -21,6 +21,7 @@ const { init } = require('../lib/install.cjs');
 
 const HOOKS = path.join(PKG_ROOT, 'payload', '.claude', 'hooks');
 const START = path.join(HOOKS, 'session-start.cjs');
+const sessionStart = require('../payload/.claude/hooks/session-start.cjs');
 
 const NOW = '2026-06-13T10:00:00.000Z';
 
@@ -95,6 +96,65 @@ test('session-start surfaces the deliberate handoff baton (the sole resume sourc
   assert.match(ctx, /ship issue 11/, 'baton content injected');
   assert.match(ctx, /handoff|baton/i, 'baton is labeled as the deliberate continuity slot');
   assert.doesNotMatch(ctx, /2026-06-10-sid-old/, 'the retired session page is never surfaced');
+});
+
+// ── S2 / #13 AC1: session-start stamps an exact start-HEAD baseline per session ──
+// The reward signal needs "commits made THIS session" to be exact, so session-start records the
+// session's start commit (git HEAD) into a tiny per-session marker. The session-end reward shell reads
+// it back to derive the git-grounded outcome. Fail-open: a missing git binary / non-repo never blocks
+// orientation. The git resolver is injected so the marker-writing core is unit-tested deterministically.
+
+const baselineDir = (target) => path.join(target, '.wrxn', 'baseline');
+const baselineFile = (target, sid) => path.join(baselineDir(target), sid);
+
+test('stampStartHead records the resolved HEAD sha into a per-session baseline marker (injected resolver)', () => {
+  const target = freshInstall('wrxn-baseline-unit-');
+  const stamped = sessionStart.stampStartHead(target, 'sid-base-1', { resolveHead: () => 'deadbeef1234' });
+  assert.equal(stamped, true, 'a resolved HEAD is stamped');
+  const marker = baselineFile(target, 'sid-base-1');
+  assert.ok(fs.existsSync(marker), 'the per-session baseline marker exists');
+  const rec = JSON.parse(fs.readFileSync(marker, 'utf8'));
+  assert.equal(rec.head, 'deadbeef1234', 'the marker carries the exact start HEAD sha');
+});
+
+test('stampStartHead is fail-open: an unresolvable HEAD writes no marker and never throws', () => {
+  const target = freshInstall('wrxn-baseline-failopen-');
+  let stamped;
+  assert.doesNotThrow(() => {
+    stamped = sessionStart.stampStartHead(target, 'sid-base-2', { resolveHead: () => { throw new Error('not a git repo'); } });
+  });
+  assert.equal(stamped, false, 'no HEAD → no stamp');
+  assert.equal(fs.existsSync(baselineFile(target, 'sid-base-2')), false, 'no marker is written when HEAD is unresolvable');
+});
+
+test('stampStartHead is keyed per session: distinct sessions get distinct markers', () => {
+  const target = freshInstall('wrxn-baseline-perssession-');
+  // already-canonical ids (the marker path is now sanitized via safeId — sec-F1)
+  sessionStart.stampStartHead(target, 'sid-a', { resolveHead: () => 'aaa111' });
+  sessionStart.stampStartHead(target, 'sid-b', { resolveHead: () => 'bbb222' });
+  assert.equal(JSON.parse(fs.readFileSync(baselineFile(target, 'sid-a'), 'utf8')).head, 'aaa111');
+  assert.equal(JSON.parse(fs.readFileSync(baselineFile(target, 'sid-b'), 'utf8')).head, 'bbb222');
+});
+
+test('stampStartHead sanitizes the session id as a path component — a traversal id cannot escape .wrxn/baseline (sec-F1)', () => {
+  const target = freshInstall('wrxn-baseline-secf1-');
+  // a path-traversal-shaped session id must be canonicalized, never concatenated raw into the marker path.
+  const stamped = sessionStart.stampStartHead(target, '../../evil', { resolveHead: () => 'cafe1234' });
+  assert.equal(stamped, true, 'a resolved HEAD still stamps — the id is canonicalized, not rejected');
+  assert.equal(fs.existsSync(path.join(target, 'evil')), false, 'no marker escapes .wrxn/baseline to the install root');
+  assert.deepEqual(fs.readdirSync(baselineDir(target)), ['evil'], 'exactly one sanitized marker, written INSIDE .wrxn/baseline');
+});
+
+test('session-start stamps the REAL git HEAD when run over a git repo (integration)', () => {
+  const target = freshInstall('wrxn-baseline-integ-');
+  execFileSync('git', ['init', '-q'], { cwd: target });
+  execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'seed'], { cwd: target });
+  const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: target, encoding: 'utf8' }).trim();
+
+  runHook(START, { session_id: 'sid-real', source: 'startup' }, target);
+  const marker = baselineFile(target, 'sid-real');
+  assert.ok(fs.existsSync(marker), 'session-start wrote the baseline marker over a real repo');
+  assert.equal(JSON.parse(fs.readFileSync(marker, 'utf8')).head, head, 'the marker holds the actual git HEAD');
 });
 
 // ── harvest-01 AC3: the dead "latest dated session page" fallback is trimmed ────

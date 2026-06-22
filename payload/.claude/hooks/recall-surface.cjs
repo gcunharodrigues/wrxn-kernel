@@ -23,6 +23,8 @@
 const fs = require('fs');
 const http = require('http');
 const path = require('path');
+const { coalesceSidecar } = require('./sidecar.cjs'); // shared coalesced read/rewrite/fail-open/secret-scan
+const { rewardFactor, selectRewardMode, RECORDED_REWARD_VERDICT } = require('./reward.cjs'); // S3 re-rank + S5 verdict-derived mode
 
 const MIN_PROMPT_LEN = 8;          // skip trivial prompts ("ok", "yes")
 const MAX_QUERY_CHARS = 512;       // trim the prompt before querying the door
@@ -37,7 +39,18 @@ const PROSE_TYPES = new Set(['Page', 'Section']); // prose scope — drop code s
 const ENDPOINT_REL = path.join('.recon-wrxn', 'serve-endpoint.json');
 const FIND_PATH = '/api/tools/recon_find';
 const REINFORCE_REL = path.join('.wrxn', 'reinforce.json'); // coalesced access-recency sidecar (STATE)
+const SURFACED_REL = path.join('.wrxn', 'surfaced.json'); // per-session surfaced-log sidecar (STATE)
 const WIKI_PREFIX = '.wrxn/wiki/'; // the wiki root — stripped to form the D1 join key
+const REWARD_REL = path.join('.wrxn', 'reward.json'); // per-page Beta-Bernoulli store (STATE) — read-only here
+
+// The single shipped mode gating the reward re-rank (mirrors recon's SHIPPED_DECAY_MODE). It is DERIVED
+// from the recorded lift-gate verdict via selectRewardMode — never hard-coded — so the live state is never
+// a silent default. Today RECORDED_REWARD_VERDICT is NOT passing (no real session corpus accrued yet), so
+// this resolves to 'shadow': reward counts accrue at session-end but the factor NEVER moves a recall rank
+// — recall output is byte-identical to pre-reward behaviour. It flips to 'live' ONLY when the recorded
+// verdict passes (the offline lift gate proves lift on real data AND the operator ratifies the git-only
+// signal — docs/eval/0001-reward-lift-gate.md). Tests force 'live' via the recallFromDoor option.
+const SHIPPED_REWARD_MODE = selectRewardMode(RECORDED_REWARD_VERDICT);
 
 function emit(envelope) {
   process.stdout.write(JSON.stringify(envelope));
@@ -124,16 +137,60 @@ function renderBlock(hits) {
   return block;
 }
 
-// PURE: the prose hits that clear the gate, capped at TOP_N — exactly the hits decideRecall renders
-// (and the pages reinforce stamps). Factored out so the IO shell can stamp the surfaced pages by path.
-function qualifyingHits(hits) {
-  const list = Array.isArray(hits) ? hits : [];
-  return list.filter((h) => isProse(h) && qualifies(h)).slice(0, TOP_N);
+// ── S3 reward re-rank (PURE) ─────────────────────────────────────────────────────────
+//
+// The learning-moat's value axis applied to recall: a per-page reward factor (∈(0,2), neutral 1) from
+// the Beta-Bernoulli store re-ranks the qualifying prose candidates by `base relevance × factor` BEFORE
+// the top-N cut, so a page that has preceded good sessions rises and one that preceded nothing fades.
+// The factor is INJECTED as a lookup { <wiki-rel-path>: factor } (the impure shell reads .wrxn/reward.json
+// and pre-computes factors via reward.cjs's rewardFactor) — decideRecall stays pure and reward-math-free.
+//
+// SHADOW BY DEFAULT: the re-rank only fires when a NON-EMPTY lookup is passed. An absent / empty lookup
+// is the IDENTITY — the door order is preserved byte-for-byte, exactly today's behaviour. The shell
+// passes a lookup only in 'live' mode (SHIPPED_REWARD_MODE), so the shipped default is a provable no-op.
+
+// The relevance magnitude the reward factor modulates: the door's fused score, with the dense cosine as
+// a fallback when a hit carries no fused score (totality), else 0.
+function baseScore(hit) {
+  const sc = Number(hit && hit.score);
+  if (Number.isFinite(sc)) return sc;
+  const sem = Number(hit && hit.semanticScore);
+  return Number.isFinite(sem) ? sem : 0;
 }
 
-// PURE: prose-filter → gate → top-N → format. Returns the block string, or null (Abstain).
-function decideRecall(hits) {
-  const qualified = qualifyingHits(hits);
+// A hit's reward factor from the lookup, keyed by its wiki-rel path. A page absent from the lookup, a
+// non-wiki hit, or a non-positive / garbage factor → neutral 1 (fail-open: reward never zeroes a rank).
+function factorFor(lookup, hit) {
+  const key = wikiRelPath(hit && hit.file);
+  const f = key ? Number(lookup[key]) : NaN;
+  return Number.isFinite(f) && f > 0 ? f : 1;
+}
+
+// Re-rank prose candidates by base relevance × reward factor, descending. STABLE: equal effective
+// scores keep door order (so an all-neutral lookup is the exact identity). An absent / empty / non-object
+// lookup short-circuits to the identity — the shadow no-op, by construction byte-identical to today.
+function rerankByReward(prose, rewardLookup) {
+  if (!rewardLookup || typeof rewardLookup !== 'object' || !Object.keys(rewardLookup).length) return prose;
+  return prose
+    .map((h, i) => ({ h, i, eff: baseScore(h) * factorFor(rewardLookup, h) }))
+    .sort((a, b) => b.eff - a.eff || a.i - b.i)
+    .map((x) => x.h);
+}
+
+// PURE: the prose hits that clear the gate, reward-re-ranked, capped at TOP_N — exactly the hits
+// decideRecall renders (and the pages reinforce stamps). The optional reward lookup is injected; absent
+// → door order (shadow). Factored out so the IO shell can stamp the surfaced pages by path.
+function qualifyingHits(hits, rewardLookup) {
+  const list = Array.isArray(hits) ? hits : [];
+  const prose = list.filter((h) => isProse(h) && qualifies(h));
+  return rerankByReward(prose, rewardLookup).slice(0, TOP_N);
+}
+
+// PURE: prose-filter → gate → reward re-rank → top-N → format. Returns the block string, or null
+// (Abstain). The reward lookup is optional and injected; with none (the shadow default) the output is
+// byte-identical to the pre-reward behaviour.
+function decideRecall(hits, rewardLookup) {
+  const qualified = qualifyingHits(hits, rewardLookup);
   if (!qualified.length) return null;
   return renderBlock(qualified);
 }
@@ -169,27 +226,13 @@ function dayStamp(now) {
 // Stamp each surfaced prose hit's wiki-rel path → today into <root>/.wrxn/reinforce.json. Writes only
 // when the map actually changes (coalesced). Wholly best-effort: never throws, never blocks recall.
 function reinforce(root, hits, now) {
-  try {
-    const list = Array.isArray(hits) ? hits : [];
-    if (!root || !list.length) return;
-    const file = path.join(root, REINFORCE_REL);
-    let map = {};
-    let raw = null;
-    try {
-      raw = fs.readFileSync(file, 'utf8');
-    } catch {
-      raw = null; // absent → fresh map (normal, not a fault)
-    }
-    if (raw !== null) {
-      let parsed;
-      try {
-        parsed = JSON.parse(raw);
-      } catch {
-        return; // malformed existing sidecar → skip silently, leave it untouched (never clobber)
-      }
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return; // not a map → skip
-      map = parsed;
-    }
+  const list = Array.isArray(hits) ? hits : [];
+  if (!root || !list.length) return;
+  // The whole read/parse/coalesce/rewrite/fail-open/secret-scan mechanism lives in coalesceSidecar; here
+  // we supply only the domain mutation — stamp each surfaced prose hit's wiki-rel join key to today,
+  // reporting whether the map actually changed (so an all-already-today recall is a coalesced no-op). The
+  // day-stamp is computed INSIDE the mutate so an invalid clock is caught by the helper's fail-open envelope.
+  coalesceSidecar(path.join(root, REINFORCE_REL), (map) => {
     const day = dayStamp(now);
     let changed = false;
     for (const h of list) {
@@ -200,12 +243,49 @@ function reinforce(root, hits, now) {
         changed = true;
       }
     }
-    if (!changed) return; // coalesced no-op → file stays byte-identical (<= 1 write/page/day)
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, JSON.stringify(map, null, 2) + '\n');
-  } catch {
-    /* best-effort: a reinforce fault must NEVER alter or break the recall surfacing */
+    return changed;
+  });
+}
+
+// ── surfaced-log: the per-session record of what recall surfaced (S1 / kernel #12) ────
+//
+// When Recall surfaces prose pages, record THIS session's surfaced (qualifying) page-paths into
+// <root>/.wrxn/surfaced.json — a compact map { "<session_id>": ["<wiki-rel-path>", …] } via the shared
+// coalesced-sidecar helper. The value uses the SAME wiki-root-relative join key reinforce stamps (a
+// slug/path mismatch silently breaks downstream consumers). Coalesced: re-surfacing the identical set
+// for a session rewrites nothing. Best-effort + non-blocking — the helper swallows every fault, so a
+// surfaced-log write can never alter or break the recall surfacing.
+
+// Map the surfaced hits to their wiki-rel join keys, de-duplicated, order preserved. (qualifyingHits
+// has already prose-filtered + gated + capped; here we only project to the path key and drop non-wiki
+// hits / dupes.)
+function surfacedPaths(hits) {
+  const list = Array.isArray(hits) ? hits : [];
+  const seen = new Set();
+  const out = [];
+  for (const h of list) {
+    const key = wikiRelPath(h && h.file);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(key);
   }
+  return out;
+}
+
+// Record `paths(hits)` under `sessionId` in the surfaced-log. No session id or no surfaced paths → no
+// write. Coalesced: an unchanged set for the session leaves the file byte-identical.
+function surfacedLog(root, sessionId, hits) {
+  if (!root || !sessionId) return;
+  const paths = surfacedPaths(hits);
+  if (!paths.length) return;
+  coalesceSidecar(path.join(root, SURFACED_REL), (map) => {
+    const prev = map[sessionId];
+    if (Array.isArray(prev) && prev.length === paths.length && prev.every((v, i) => v === paths[i])) {
+      return false; // identical surfaced set for this session → coalesced no-op
+    }
+    map[sessionId] = paths;
+    return true;
+  });
 }
 
 // ── the door (IO shell, injectable transport) ───────────────────────────────────────
@@ -308,10 +388,35 @@ function httpTransport({ port, path: reqPath, body, timeoutMs }) {
   });
 }
 
+// Read the reward sidecar (.wrxn/reward.json = { "<wiki-rel-path>": { s, f } }) and pre-compute each
+// page's reward factor → { "<wiki-rel-path>": factor } for the live re-rank. FAIL-OPEN: a missing /
+// corrupt / non-object store → null (a neutral lookup → recall unaffected). The keys are treated ONLY
+// as join keys (map lookups against wikiRelPath), NEVER as filesystem paths (sec posture). rewardFactor
+// is total, so a malformed per-page slot reads as zero evidence → neutral 1.
+function readRewardLookup(root) {
+  if (!root) return null;
+  let raw;
+  try {
+    raw = fs.readFileSync(path.join(root, REWARD_REL), 'utf8');
+  } catch {
+    return null; // absent → neutral (the common case before the gate flips, and on any read fault)
+  }
+  let counts;
+  try {
+    counts = JSON.parse(raw);
+  } catch {
+    return null; // corrupt JSON → neutral, recall proceeds unchanged
+  }
+  if (!counts || typeof counts !== 'object' || Array.isArray(counts)) return null;
+  const lookup = {};
+  for (const key of Object.keys(counts)) lookup[key] = rewardFactor(counts[key]);
+  return lookup;
+}
+
 // IO shell: discover the door, POST the prose query, gate the hits. Returns the block string or null.
 // `transport` is injected in tests; production uses httpTransport. Sends NO `type` (recon_find takes a
 // single NodeType, not an array) — prose scope is enforced by decideRecall's post-filter.
-async function recallFromDoor(root, prompt, { transport, timeoutMs, now } = {}) {
+async function recallFromDoor(root, prompt, { transport, timeoutMs, now, sessionId, rewardMode } = {}) {
   const door = discoverEndpoint(root);
   if (!door) return null; // not warm → Abstain (silent)
   const query = String(prompt || '').trim().slice(0, MAX_QUERY_CHARS);
@@ -335,9 +440,20 @@ async function recallFromDoor(root, prompt, { transport, timeoutMs, now } = {}) 
     return null; // malformed body → silent
   }
   const hits = Array.isArray(parsed.hits) ? parsed.hits : [];
-  const block = decideRecall(hits);
-  // Side effect: stamp access-recency for the pages we actually surfaced (best-effort, never blocks).
-  if (block) reinforce(root, qualifyingHits(hits), now);
+  // SHADOW (shipped default): pass NO lookup → decideRecall is the identity (door order), byte-identical
+  // to pre-reward recall regardless of what sits in reward.json. LIVE (gate-flipped / test-forced): read
+  // the reward sidecar and re-rank the qualifying candidates by reward factor before the top-N cut.
+  const mode = rewardMode || SHIPPED_REWARD_MODE;
+  const rewardLookup = mode === 'live' ? readRewardLookup(root) : null;
+  const block = decideRecall(hits, rewardLookup);
+  // Side effects on a surfacing (both best-effort, never block): stamp access-recency for the pages we
+  // surfaced, and record this session's surfaced set in the per-session surfaced-log. Use the SAME lookup
+  // so the recorded set matches the re-ranked top-N that was rendered.
+  if (block) {
+    const surfaced = qualifyingHits(hits, rewardLookup);
+    reinforce(root, surfaced, now);
+    surfacedLog(root, sessionId, surfaced);
+  }
   return block;
 }
 
@@ -360,7 +476,7 @@ async function main() {
 
   let block = null;
   try {
-    block = await recallFromDoor(root, prompt.trim());
+    block = await recallFromDoor(root, prompt.trim(), { sessionId: event.session_id });
   } catch {
     return emit({});
   }
@@ -376,8 +492,11 @@ if (require.main === module) {
 module.exports = {
   decideRecall,
   qualifyingHits,
+  rerankByReward,
   recallFromDoor,
+  readRewardLookup,
   reinforce,
+  surfacedLog,
   wikiRelPath,
   dayStamp,
   discoverEndpoint,
@@ -390,4 +509,5 @@ module.exports = {
   findInstallRoot,
   SEMANTIC_FLOOR,
   PROSE_TYPES,
+  SHIPPED_REWARD_MODE,
 };

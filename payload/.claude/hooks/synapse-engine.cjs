@@ -276,11 +276,47 @@ function hasCurationDebt(root) {
   }
 }
 
+// The starved-useful watchdog's EMISSION bar (kernel #15 / S4): the number of starved-useful pages at or
+// above which the handoff carries the canary line. Distinct from the watchdog's MATH thresholds (R_HIGH /
+// S_LOW live with the pure reward.starvedUseful) — this is the "how many before we bug the operator" bar.
+// A PLACEHOLDER pending the lift gate (recorded with the gate verdict, like the decay half-life); it just
+// keeps the canary quiet until a few pages have genuinely starved. Kept local so the engine never
+// HARD-requires the reward sibling at module load (a missing sibling must not break constitution injection).
+const STARVED_NUDGE_THRESHOLD = 3;
+
+// The starved-useful WATCHDOG probe (kernel #15 / S4) — the sibling of hasCurationDebt for the learning
+// moat. A CHEAP, fail-open, READ-ONLY read of the two STATE sidecars (.wrxn/reward.json per-page
+// Beta-Bernoulli counts + .wrxn/surfaced.json per-session surfaced-log) → the pure reward.starvedUseful
+// count (pages learned high-reward but rarely surfaced). The reward sibling is required LAZILY inside the
+// try/catch so a (theoretically) absent sibling can never break the engine's constitution injection. Any
+// fault (missing/corrupt sidecar, missing sibling) → 0 (no nudge, no throw). Only invoked when a handoff
+// is actually firing, so the two extra reads are doubly bounded. CANARY: reads only — it never mutates a
+// sidecar and never touches recall ranking or reward counts.
+function starvedUsefulSignal(root) {
+  try {
+    const { starvedUseful } = require('./reward.cjs');
+    const readMap = (rel) => {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(path.join(root, '.wrxn', rel), 'utf8'));
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+      } catch {
+        return {}; // absent / malformed → empty (fail-open)
+      }
+    };
+    return starvedUseful(readMap('reward.json'), readMap('surfaced.json')).count;
+  } catch {
+    return 0; // any fault (incl. a missing reward sibling) → no signal, never a throw
+  }
+}
+
 // The NON-BLOCKING forced-handoff directive (never refuses work — orders the agent to wrap up cleanly).
 // `hasDebt` (harvest-05) appends a harvest curation nudge AFTER the dream line — emitted ONLY when the
 // latest health-check found curation debt, so a clean knowledge set never sees it. Ordered after dream:
-// dream consolidates the session first, then harvest curates the enlarged knowledge set.
-function handoffDirective(consumed, pct, hasDebt) {
+// dream consolidates the session first, then harvest curates the enlarged knowledge set. `starvedCount`
+// (S4) appends ONE canary line LAST — emitted ONLY when the starved-useful count >= STARVED_NUDGE_THRESHOLD
+// (below / omitted / garbage → silent, totality). The canary states the count and that it is (b)-pressure
+// (data toward graduating a recon reward term); it is informational only and changes no recall/reward state.
+function handoffDirective(consumed, pct, hasDebt, starvedCount) {
   const now = Math.round(consumed * 100);
   const thresh = Math.round(pct * 100);
   const lines = [
@@ -292,6 +328,10 @@ function handoffDirective(consumed, pct, hasDebt) {
   ];
   if (hasDebt) {
     lines.push('  Then (optional, only because the last health-check found curation debt): run the harvest skill to review the flagged near-dups / decay-candidates / malformed pages — a suggestion only; harvest never auto-deletes, every change is proposed for your confirmation.');
+  }
+  const starved = Number(starvedCount);
+  if (Number.isFinite(starved) && starved >= STARVED_NUDGE_THRESHOLD) {
+    lines.push(`  Watchdog (canary, informational): ${starved} starved-useful page(s) — learned high-reward but rarely surfaced, sitting below recon's floor where the kernel-side re-rank can't lift them. This is (b)-pressure: data toward graduating a recon reward term (option b). Informational only — nothing auto-changes; no recall or reward state is touched.`);
   }
   return lines.join('\n');
 }
@@ -360,7 +400,7 @@ function compose(root, event) {
       const window = modelWindow(ev.cwd || root, process.env.HOME || os.homedir(), manifestText, ev.session_id, resident);
       const consumed = resident / window;
       const pct = resolveHandoffPct(manifestText);
-      if (consumed >= pct) out.push(handoffDirective(consumed, pct, hasCurationDebt(root)));
+      if (consumed >= pct) out.push(handoffDirective(consumed, pct, hasCurationDebt(root), starvedUsefulSignal(root)));
     }
   }
 
@@ -411,5 +451,7 @@ module.exports = {
   modelWindow,
   resolveHandoffPct,
   hasCurationDebt,
+  starvedUsefulSignal,
   handoffDirective,
+  STARVED_NUDGE_THRESHOLD,
 };

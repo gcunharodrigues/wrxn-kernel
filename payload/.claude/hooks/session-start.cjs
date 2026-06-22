@@ -17,10 +17,80 @@
 
 const fs = require('fs');
 const path = require('path');
+const { execFileSync } = require('child_process');
 
 function emit(envelope) {
   process.stdout.write(JSON.stringify(envelope));
   process.exit(0);
+}
+
+// ── S2 / #13: the start-HEAD baseline (the reward signal's anchor) ────────────────
+// session-start records the session's start commit (git HEAD) into a tiny per-session marker so the
+// session-end reward shell can compute "commits made THIS session" EXACTLY (HEAD-then vs HEAD-now). The
+// git resolver is injected so the marker-writing core is unit-tested with no real repo; production
+// resolves the real HEAD rooted at the install. Wholly fail-open: any fault → no marker, never a throw,
+// orientation always proceeds. The marker dir is STATE (runtime, gitignored), keyed by session id.
+
+const BASELINE_DIR_REL = ['.wrxn', 'baseline'];
+
+// safeId — canonicalize a session id used as a FILESYSTEM PATH component (sec-F1): lowercase, collapse every
+// non-alnum run to '-', trim, cap length. A raw session id concatenated into a path is a traversal surface;
+// this keeps the marker INSIDE .wrxn/baseline. REPLICATED byte-identically from code-intel-push.cjs and the
+// session-end reward shell — each install-only hook is self-contained (node stdlib only, no shared import,
+// exactly as secretScan is duplicated across the adapters). The reward shell sanitizes the SAME way, so the
+// baseline marker round-trips (writer here ↔ reader there) and the read can never miss what this wrote.
+function safeId(sid) {
+  return String(sid || 'session')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48) || 'session';
+}
+
+// Resolve the install repo's current git HEAD sha. Returns the sha string, or null when there is no git
+// / no repo (fail-open). Rooted at the install so a nested cwd can't resolve a different repo's HEAD.
+function resolveGitHead(root) {
+  try {
+    const out = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: root,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    const sha = String(out || '').trim();
+    return sha || null;
+  } catch {
+    return null; // no git binary / not a repo / detached with no commit → no baseline (fail-open)
+  }
+}
+
+/**
+ * Stamp the session's start HEAD into <root>/.wrxn/baseline/<sessionId> as { head, at }. Returns true
+ * when a marker was written, false on any fail-open path (no root/session, unresolvable HEAD, unwritable).
+ * The HEAD resolver is injected (tests pass a stub); production uses resolveGitHead. NEVER throws.
+ * @param {string} root  install root
+ * @param {string} sessionId  the session id (marker key)
+ * @param {{resolveHead?:Function, now?:Function}} [opts]
+ * @returns {boolean}
+ */
+function stampStartHead(root, sessionId, opts = {}) {
+  try {
+    if (!root || !sessionId) return false;
+    const resolveHead = opts.resolveHead || (() => resolveGitHead(root));
+    let head;
+    try {
+      head = resolveHead();
+    } catch {
+      return false; // resolver threw → fail-open, no marker
+    }
+    if (!head || typeof head !== 'string') return false; // unresolvable HEAD → no baseline
+    const now = opts.now || Date.now;
+    const dir = path.join(root, ...BASELINE_DIR_REL);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, safeId(sessionId)), JSON.stringify({ head, at: now() }));
+    return true;
+  } catch {
+    return false; // best-effort: a baseline-stamp fault must never block session orientation
+  }
 }
 
 // Walk up from CLAUDE_PROJECT_DIR (or cwd) to the install root carrying wrxn.install.json.
@@ -138,10 +208,25 @@ function main() {
   } catch {
     /* no stdin → still try to orient */
   }
-  void consumed; // SessionStart carries no field we need beyond the install context
+  // SessionStart carries the session id — used to key the start-HEAD baseline marker (#13). Parse
+  // defensively; a malformed payload simply yields no session id (the baseline is then skipped).
+  let event = {};
+  try {
+    event = consumed.trim() ? JSON.parse(consumed) : {};
+  } catch {
+    event = {};
+  }
 
   const root = findInstallRoot();
   if (!root) emit({});
+
+  // Stamp the session's start HEAD so the session-end reward shell can attribute commits made THIS
+  // session (#13 / S2). Fail-open: any fault is swallowed and orientation proceeds unchanged.
+  try {
+    if (event && event.session_id) stampStartHead(root, event.session_id);
+  } catch {
+    /* never block orientation on the baseline stamp */
+  }
 
   // Hold for an in-flight SessionEnd synth (auto-memory-03) so a back-to-back /clear resumes on the
   // FRESH baton, bounded by the crash safety-cap. Fail-open: any fault here must not block orientation.
@@ -176,4 +261,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { holdDecision, holdForHandoff, HOLD_CAP_MS };
+module.exports = { holdDecision, holdForHandoff, HOLD_CAP_MS, stampStartHead, resolveGitHead, BASELINE_DIR_REL };
