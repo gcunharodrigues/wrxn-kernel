@@ -703,6 +703,41 @@ test('recallFromDoor: surfacing with no session id still surfaces, writes no sur
   assert.equal(fs.existsSync(path.join(root, SURFACED_REL)), false, 'no session id → no surfaced record, but surfacing is unaffected');
 });
 
+// ── SHADOW (#13 / S2): the reward slice writes counts but NEVER moves a recall rank ──
+// S2 ships in shadow: a reward sidecar (.wrxn/reward.json) is written at session-end, but recall's
+// ranking/output is byte-identical to before — the re-rank is S3 (behind a recorded mode constant).
+// Two independent proofs: recall-surface consults NO reward state, and decideRecall's output does not
+// change when a populated reward sidecar exists on disk.
+
+test('SHADOW: recall-surface.cjs does not reference the reward sidecar or reward module (no re-rank in S2)', () => {
+  const src = fs.readFileSync(RECALL, 'utf8');
+  assert.doesNotMatch(src, /reward\.json/, 'recall must not read the reward sidecar in shadow');
+  assert.doesNotMatch(src, /require\(\s*['"]\.\/reward\.cjs['"]\s*\)/, 'recall must not import the reward module in shadow');
+  assert.doesNotMatch(src, /updateReward/, 'recall must not call the reward update in shadow');
+});
+
+test('SHADOW: decideRecall output is byte-identical whether or not a populated reward sidecar exists', () => {
+  const hits = [
+    hit({ name: 'Alpha Page', file: '.wrxn/wiki/concepts/alpha.md', sources: ['semantic'], semanticScore: 0.42 }),
+    hit({ name: 'Beta Page', file: '.wrxn/wiki/gotchas/beta.md', sources: ['bm25', 'semantic'], semanticScore: 0.12 }),
+  ];
+  const baseline = recall.decideRecall(hits);
+  assert.ok(baseline, 'sanity: these hits surface a block');
+
+  // A reward sidecar that, IF S2 re-ranked, would clearly reorder (beta hugely preferred over alpha).
+  const root = installRoot('wrxn-recall-shadow-');
+  fs.mkdirSync(path.join(root, '.wrxn'), { recursive: true });
+  fs.writeFileSync(
+    path.join(root, '.wrxn', 'reward.json'),
+    JSON.stringify({ 'concepts/alpha.md': { s: 0, f: 99 }, 'gotchas/beta.md': { s: 99, f: 0 } }, null, 2) + '\n'
+  );
+
+  // decideRecall is pure and takes no reward input → its output cannot change. The block and the bullet
+  // ORDER are identical: alpha still precedes beta (input order), proving no reward re-rank occurred.
+  assert.equal(recall.decideRecall(hits), baseline, 'recall output is unchanged by the reward state (shadow)');
+  assert.ok(baseline.indexOf('alpha') < baseline.indexOf('beta'), 'order follows the hits, not the reward counts');
+});
+
 // ── self-contained: node stdlib + co-located payload siblings only (no kernel-lib / recon import) ──
 // The hook may require a SIBLING module that ships alongside it in the payload hooks dir (e.g. the
 // shared sidecar helper) — itself self-contained — but nothing outside: no kernel-lib, no recon, no
