@@ -178,6 +178,51 @@ test('wiki-lint is report-only — it never edits a page while flagging issues',
   assert.equal(fs.readFileSync(file, 'utf8'), before, 'the page on disk is byte-identical (report-only)');
 });
 
+// ── AC: wikilink extraction is not ReDoS-able (S2 finding #29) ─────────────────
+// The old extractor `/\[\[([^\]]+)\]\]/g` backtracks O(n²) on runs of `[` — a 50KB `[`-heavy body
+// took ~2.1s standalone, hanging the session-Stop hook. The bounded class `[^\]\[]+` keeps it linear.
+// Driven through the real seam (the spawned hook over a page on disk) with a generous wall-clock bound
+// the pre-fix quadratic would blow but the fixed pattern clears with room to spare.
+
+test('wiki-lint scans a bracket-heavy page promptly — no quadratic backtracking (#29)', () => {
+  const target = freshInstall('wrxn-lint-redos-');
+  // Tens of KB of `[` — every `[[` start position made the greedy class re-consume the whole run.
+  writePage(target, 'concepts', 'pathological', '['.repeat(50000));
+  const start = Date.now();
+  const env = runHook(LINT, { session_id: 'sid-redos', reason: 'clear' }, target);
+  const elapsedMs = Date.now() - start;
+  // Generous bound (CI-safe) yet far below the ~2.1s the old pattern needed; includes process spawn.
+  assert.ok(
+    elapsedMs < 1000,
+    `lint over a [-heavy body must return promptly (was ${elapsedMs}ms) — the old regex took ~2.1s`
+  );
+  // A `[`-only run contains no closeable `]]`, so it yields no wikilinks → nothing to flag → silent.
+  assert.deepEqual(env, {}, 'a bracket run has no resolvable wikilink target → no flag');
+});
+
+test('wiki-lint still extracts slug / |alias / #anchor and survives malformed bracket runs (#29)', () => {
+  const target = freshInstall('wrxn-lint-bounded-');
+  // One dead link per stripped form, plus a malformed `[[[[` run that must not crash or false-flag.
+  writePage(
+    target,
+    'concepts',
+    'forms',
+    'bare [[ghost-bare]], aliased [[ghost-alias|shown]], anchored [[ghost-anchor#sec]], junk [[[['
+  );
+  // A live link whose target exists must stay silent (proves the bare-slug match still resolves).
+  writePage(target, 'gotchas', 'real-target', 'destination');
+  writePage(target, 'concepts', 'live', 'see [[real-target]]');
+
+  const env = runHook(LINT, { session_id: 'sid-bounded', reason: 'clear' }, target);
+  const c = ctx(env);
+  assert.ok(c, 'the three dead links inject a report');
+  assert.match(c, /ghost-bare/, 'plain [[slug]] still extracted');
+  assert.match(c, /ghost-alias/, '[[slug|alias]] still stripped to the bare slug');
+  assert.match(c, /ghost-anchor/, '[[slug#anchor]] still stripped to the bare slug');
+  assert.ok(!/shown/.test(c) && !/sec/.test(c), 'the alias/anchor are dropped, not treated as the target');
+  assert.ok(!/real-target/.test(c), 'a wikilink whose target page exists is not flagged');
+});
+
 // ── fail-open: no install root resolvable → {} for every hook ──────────────────
 
 test('every intelligence hook fails open with no install root', () => {

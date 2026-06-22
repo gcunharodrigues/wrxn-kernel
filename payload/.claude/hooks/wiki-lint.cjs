@@ -67,9 +67,12 @@ function pageBody(text) {
 
 // Wikilinks are written `[[slug]]` (Obsidian style), where slug equals a target page's `name:`. An
 // optional `|alias` or `#anchor` is stripped to the bare target slug. Returns the distinct slugs.
+// The inner class excludes BOTH `]` and `[`: a real `[[slug]]` target never contains `[`, and the
+// unbounded `[^\]]+` form backtracked O(n²) on runs of `[`, hanging this Stop hook on a `[`-heavy
+// page (ReDoS, S2 #29). Bounding the class is the root-cause fix — linear AND more correct.
 function wikilinkTargets(body) {
   const out = new Set();
-  const re = /\[\[([^\]]+)\]\]/g;
+  const re = /\[\[([^\]\[]+)\]\]/g;
   let m;
   while ((m = re.exec(String(body || '')))) {
     const slug = m[1].split('|')[0].split('#')[0].trim();
