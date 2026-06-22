@@ -503,3 +503,40 @@ test('HANDOFF_PROMPT contains an explicit output-only directive (no preamble / n
   assert.match(p, /\bcommentary\b/i, 'the prompt forbids commentary');
   assert.match(p, /\bthinking\b/i, 'the prompt forbids a thinking block');
 });
+
+// ── synth-handoff-fix-01 (correction pass, QA F-01): a model preamble is STRIPPED before the baton ──
+// The output-only prompt directive is non-deterministic: a live run still sometimes opens with a
+// conversational preamble (e.g. "Per the session baton, the operator chose…") BEFORE the required
+// **TL;DR**. The durable baton (PRD story 5) must contain ONLY the handoff document, so the synth applies
+// a deterministic strip — anchored on the canonical `**TL;DR` marker — after synthesize and before the
+// baton is written. A handoff with no marker passes through UNCHANGED (fail-open safety net).
+
+test('runHandoff strips a conversational preamble so the baton starts at **TL;DR**', async () => {
+  const root = tmp('wrxn-handoff-preamble-');
+  stageSession(root, REAL_SESSION);
+  // the model leaks a preamble sentence before the required TL;DR (the live F-01 shape).
+  const withPreamble = 'Per the session baton, the operator chose to ship it.\n\n**TL;DR** — resumed at the slice\n\n**Goal** — wire it up';
+  const { invoke } = fakeInvoke({ claude: { ok: true, text: withPreamble } });
+
+  await synth.runHandoff({ root, invoke });
+
+  const baton = fs.readFileSync(batonPath(root), 'utf8');
+  assert.ok(baton.startsWith('**TL;DR'), 'the baton starts at the **TL;DR** marker (preamble dropped)');
+  assert.doesNotMatch(baton, /Per the session baton, the operator chose/, 'the conversational preamble never reaches the durable baton');
+  assert.match(baton, /resumed at the slice/, 'the real handoff body is preserved');
+  assert.match(baton, /wire it up/, 'the rest of the handoff is intact');
+});
+
+test('runHandoff leaves a handoff with NO **TL;DR** marker unchanged (fail-open — never mangle)', async () => {
+  const root = tmp('wrxn-handoff-nomarker-');
+  stageSession(root, REAL_SESSION);
+  // a (degenerate) handoff that does not contain the marker — the strip must NOT eat it.
+  const noMarker = '**Goal** — wire the SessionStart hold\n**Next step** — ship the fix';
+  const { invoke } = fakeInvoke({ claude: { ok: true, text: noMarker } });
+
+  await synth.runHandoff({ root, invoke });
+
+  const baton = fs.readFileSync(batonPath(root), 'utf8');
+  assert.match(baton, /wire the SessionStart hold/, 'the body is preserved when there is no marker to anchor on');
+  assert.match(baton, /ship the fix/, 'nothing is dropped from a no-marker handoff (fail-open)');
+});

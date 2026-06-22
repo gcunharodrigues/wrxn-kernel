@@ -509,6 +509,28 @@ function appendSynthLog(root, { sessionId, task, engine, attempts, outcome }) {
   }
 }
 
+// ── preamble strip (synth-handoff-fix-01, QA F-01) ──────────────────────────────
+// The output-only HANDOFF_PROMPT directive is non-deterministic: a live run still sometimes opens with a
+// conversational preamble (e.g. "Per the session baton, the operator chose…") BEFORE the required
+// **TL;DR**. The durable baton (PRD story 5) must contain ONLY the handoff document, so we deterministically
+// drop anything before the canonical `**TL;DR` marker. FAIL-OPEN: a handoff with no marker is returned
+// unchanged — the prompt already requires a TL;DR, so this is a safety net, never a mangler.
+const TLDR_MARKER = '**TL;DR';
+
+/**
+ * Drop any model preamble before the canonical bolded TL;DR marker. Returns the text from the first
+ * `**TL;DR` occurrence onward (left-trimmed). If the marker is absent, returns the text unchanged
+ * (fail-open). PURE and total — never throws.
+ * @param {string} text
+ * @returns {string}
+ */
+function stripPreamble(text) {
+  const s = String(text == null ? '' : text);
+  const i = s.indexOf(TLDR_MARKER);
+  if (i === -1) return s; // no marker → never mangle (the prompt already requires a TL;DR).
+  return s.slice(i).replace(/^\s+/, '');
+}
+
 // ── secret redaction (PRD story 19) ─────────────────────────────────────────────
 // A model can echo a credential it saw in the transcript into its handoff. Scrub the body before it
 // becomes the durable baton. Pattern-based (high-signal vendor token shapes, JWTs incl. Bearer
@@ -606,7 +628,8 @@ async function runHandoff({ root, invoke = defaultInvoke, sleep }) {
       engine = r.engine;
       attempts = r.attempts;
       if (r.text && r.text.trim()) {
-        const body = redactSecrets(r.text); // scrub secrets BEFORE the durable baton is written.
+        const stripped = stripPreamble(r.text); // drop any model preamble before the **TL;DR** (QA F-01).
+        const body = redactSecrets(stripped); // scrub secrets BEFORE the durable baton is written.
         writeBatonAtomic(root, body.endsWith('\n') ? body : body + '\n');
         wrote = true;
       } else {
@@ -825,7 +848,10 @@ async function run(args, { invoke = defaultInvoke, out = process.stdout, err = p
     err.write('memory-synth: no engine produced output (claude CLI unavailable and no Gemini key?) — wrote nothing\n');
     return 1;
   }
-  out.write(text.endsWith('\n') ? text : text + '\n');
+  // Strip any model preamble before the **TL;DR** so the debug surface matches the durable baton (QA F-01).
+  // Fail-open for non-handoff tasks: their output has no TL;DR marker, so stripPreamble returns it unchanged.
+  const printed = task === 'handoff' ? stripPreamble(text) : text;
+  out.write(printed.endsWith('\n') ? printed : printed + '\n');
   return 0;
 }
 
@@ -857,5 +883,6 @@ module.exports = {
   runHandoff,
   runDream,
   redactSecrets,
+  stripPreamble,
   run,
 };
