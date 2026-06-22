@@ -95,6 +95,28 @@ test('init gitignores .env so the gemini-fallback key is never committed', () =>
   assert.equal(lines.length, 1, '.env appears exactly once');
 });
 
+// ── synth-handoff-fix-01 AC5: the synth outcome log is install state — gitignored, never shipped ──
+// memory-synth.cjs appends one outcome line per synth run to `.wrxn/continuity/.synth.log`. That is
+// install runtime state: init must gitignore it so it is never committed, and it must NOT be a payload
+// manifest entry (it is generated at runtime, not shipped).
+
+test('init gitignores the synth log so it is never committed', () => {
+  const target = tmp('wrxn-synthlog-gi-');
+  init({ pkgRoot: PKG_ROOT, target, profile: 'project' });
+
+  const gi = fs.readFileSync(path.join(target, '.gitignore'), 'utf8');
+  assert.match(gi, /^\.wrxn\/continuity\/\.synth\.log$/m, 'the synth log path is gitignored after init');
+
+  // idempotent: a second init does not duplicate the line
+  init({ pkgRoot: PKG_ROOT, target, profile: 'project' });
+  const lines = fs.readFileSync(path.join(target, '.gitignore'), 'utf8').split('\n').filter((l) => l.trim() === '.wrxn/continuity/.synth.log');
+  assert.equal(lines.length, 1, 'the synth-log ignore line appears exactly once');
+});
+
+test('the synth log is NOT a payload manifest entry (install state, never shipped)', () => {
+  assert.ok(!PAYLOAD_PATHS.includes('.wrxn/continuity/.synth.log'), 'the synth log must never be a shipped payload file');
+});
+
 // ── idempotency ───────────────────────────────────────────────────────────────
 
 test('re-running init is a no-op (idempotent)', () => {
