@@ -264,3 +264,39 @@ test('starvedUseful thresholds are exported NAMED constants in sane ranges', () 
   assert.equal(typeof reward.S_LOW, 'number');
   assert.ok(reward.S_LOW >= 0 && Number.isInteger(reward.S_LOW), 'S_LOW is a non-negative integer surfaced-count bar');
 });
+
+// ── selectRewardMode: the SHIP GATE (S5 / kernel #16) ─────────────────────────────────
+// Mirrors recon's selectDecayMode(verdict) → SHIPPED_DECAY_MODE. The recall re-rank goes 'live' ONLY on
+// a PASSING lift-gate verdict; a failing OR absent verdict stays 'shadow' (the safe default — never a
+// silent enable). The shipped constant in recall-surface is selectRewardMode(RECORDED_REWARD_VERDICT).
+
+test('selectRewardMode returns live ONLY on a passing verdict (pass === true)', () => {
+  assert.equal(reward.selectRewardMode({ pass: true }), 'live', 'a passing lift verdict flips to live');
+});
+
+test('selectRewardMode returns shadow on a failing verdict', () => {
+  assert.equal(reward.selectRewardMode({ pass: false }), 'shadow', 'a failed gate stays shadow');
+});
+
+test('selectRewardMode returns shadow on an ABSENT verdict (null/undefined) — the safe default', () => {
+  assert.equal(reward.selectRewardMode(null), 'shadow', 'no recorded verdict → shadow');
+  assert.equal(reward.selectRewardMode(undefined), 'shadow', 'no recorded verdict → shadow');
+});
+
+test('selectRewardMode is TOTAL: only a literal pass===true flips; all garbage → shadow', () => {
+  for (const bad of [{}, { pass: 'yes' }, { pass: 1 }, { pass: 'true' }, 42, 'live', [], { ok: true }]) {
+    assert.equal(reward.selectRewardMode(bad), 'shadow', `${JSON.stringify(bad)} is not a passing verdict → shadow`);
+  }
+});
+
+test('RECORDED_REWARD_VERDICT is the current production verdict: NOT passing (insufficient real data)', () => {
+  assert.equal(typeof reward.RECORDED_REWARD_VERDICT, 'object');
+  assert.ok(reward.RECORDED_REWARD_VERDICT, 'the recorded verdict is present');
+  assert.equal(reward.RECORDED_REWARD_VERDICT.pass, false, 'no real sessions accumulated yet → not a passing verdict');
+  // The whole point of the slice: deriving the mode from THIS verdict yields shadow.
+  assert.equal(
+    reward.selectRewardMode(reward.RECORDED_REWARD_VERDICT),
+    'shadow',
+    'the recorded verdict derives the SHADOW mode — the shipped default'
+  );
+});

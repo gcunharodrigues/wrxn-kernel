@@ -21,6 +21,7 @@ const { execFileSync, spawnSync } = require('child_process');
 const PKG_ROOT = path.join(__dirname, '..');
 const RECALL = path.join(PKG_ROOT, 'payload', '.claude', 'hooks', 'recall-surface.cjs');
 const recall = require('../payload/.claude/hooks/recall-surface.cjs');
+const reward = require('../payload/.claude/hooks/reward.cjs');
 
 function tmp(prefix) {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -823,6 +824,61 @@ test('SHADOW (shipped default): a fully-populated reward.json does NOT move a re
 
 test('SHIPPED_REWARD_MODE defaults to shadow (the live flip is never a silent default)', () => {
   assert.equal(recall.SHIPPED_REWARD_MODE, 'shadow', 'the shipped reward mode is shadow until the offline lift gate flips it');
+});
+
+// ── rev-F2 (S3 review): lock the shadow no-op at the IO boundary, not just the output ──────────────
+// The byte-identical tests above prove shadow OUTPUT is unchanged. This locks the STRONGER, structural
+// guarantee: in shadow the recall path performs ZERO reads of .wrxn/reward.json. A future "read-then-
+// neutralize" refactor could keep the output byte-identical while quietly re-introducing the read (and
+// with it the perf/attack surface the shadow ship exists to avoid); a read-count spy catches that.
+test('rev-F2 — SHADOW performs ZERO reads of .wrxn/reward.json (the no-op is IO-locked, not just output-locked)', async () => {
+  const root = installRoot('wrxn-recall-shadow-noio-');
+  writeEndpoint(root, { pid: process.pid, port: 65056 });
+  writeReward(root, { 'concepts/loser.md': { s: 0, f: 99 }, 'concepts/winner.md': { s: 99, f: 0 } });
+
+  const REWARD_SUFFIX = path.join('.wrxn', 'reward.json');
+  const realRead = fs.readFileSync;
+  let rewardReads = 0;
+  // recall-surface calls `fs.readFileSync` as a property at call time, so replacing the property on the
+  // shared fs module object is observed by the hook. Count only reads of the reward sidecar.
+  fs.readFileSync = function (p, ...rest) {
+    if (typeof p === 'string' && p.endsWith(REWARD_SUFFIX)) rewardReads++;
+    return realRead.call(this, p, ...rest);
+  };
+  try {
+    const shadowBlock = await recall.recallFromDoor(root, 'a prompt long enough to query the door', { transport: rewardDoor() });
+    assert.ok(shadowBlock, 'shadow still surfaces a block — the recall path WAS exercised');
+    assert.equal(rewardReads, 0, 'SHADOW must NEVER read .wrxn/reward.json (a read-then-neutralize refactor would regress this)');
+
+    // Non-vacuous: the SAME spy DOES count a read under live mode — so the zero above is a real guarantee.
+    rewardReads = 0;
+    await recall.recallFromDoor(root, 'a prompt long enough to query the door', { transport: rewardDoor(), rewardMode: 'live' });
+    assert.ok(rewardReads >= 1, 'LIVE mode reads reward.json — proving the spy counts real reads (the shadow zero is meaningful)');
+  } finally {
+    fs.readFileSync = realRead;
+  }
+});
+
+// ── S5 / kernel #16: the shipped mode is DERIVED from the recorded gate verdict, not hard-coded ──
+// Mirrors recon's `SHIPPED_DECAY_MODE === selectDecayMode(<live gate verdict>)` lock. The constant is
+// `selectRewardMode(RECORDED_REWARD_VERDICT)` — so it can never silently drift to 'live'; flipping the
+// recorded verdict (after the lift gate passes on real data + operator ratifies) is the ONLY path.
+test('SHIPPED_REWARD_MODE is selectRewardMode(RECORDED_REWARD_VERDICT) — derived from the verdict, not a literal', () => {
+  assert.equal(
+    recall.SHIPPED_REWARD_MODE,
+    reward.selectRewardMode(reward.RECORDED_REWARD_VERDICT),
+    'the shipped mode is locked to the recorded verdict (no silent drift to live)'
+  );
+  assert.equal(recall.SHIPPED_REWARD_MODE, 'shadow', 'and the recorded verdict still yields shadow');
+
+  // AC3 "not hard-coded": the source derives the constant via selectRewardMode, never a bare string literal.
+  const src = fs.readFileSync(RECALL, 'utf8');
+  assert.match(src, /SHIPPED_REWARD_MODE\s*=\s*selectRewardMode\(/, 'the constant is derived from the verdict');
+  assert.doesNotMatch(
+    src,
+    /SHIPPED_REWARD_MODE\s*=\s*['"](shadow|live)['"]/,
+    'the constant is NOT a hard-coded string literal'
+  );
 });
 
 // ── fail-open: a missing / corrupt reward store → neutral lookup → recall proceeds unchanged ──

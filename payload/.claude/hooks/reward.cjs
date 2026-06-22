@@ -212,4 +212,33 @@ function starvedUseful(reward, surfaced, opts) {
   return { count: pages.length, pages };
 }
 
-module.exports = { updateReward, rewardFactor, starvedUseful, COUNT_CAP, R_HIGH, S_LOW };
+// ── selectRewardMode: the SHIP GATE (S5 / kernel #16) ─────────────────────────────────
+// Mirrors the recon decay-scorer's selectDecayMode(verdict) → SHIPPED_DECAY_MODE. The reward re-rank in
+// recall-surface ships behind a single recorded mode constant; that constant is DERIVED from the lift
+// gate's verdict, never hard-coded. The re-rank goes 'live' ONLY on a PASSING verdict; a failing OR an
+// absent/garbage verdict stays 'shadow' (the safe default — a learned ranker is never silently enabled).
+// A passing verdict is the LITERAL `{ pass: true }`: only an explicit, recorded pass flips recall on, so
+// a malformed or missing verdict can never leak 'live'. PURE + TOTAL — no IO, no clock, never throws.
+function selectRewardMode(verdict) {
+  return verdict && typeof verdict === 'object' && verdict.pass === true ? 'live' : 'shadow';
+}
+
+// The RECORDED production verdict the shipped mode is derived from (the kernel analogue of the decay
+// gate's recorded PASS). It is NOT a passing verdict: ① ships in SHADOW because there is no real
+// accumulated session corpus yet (no logged sessions → the lift gate cannot be run on production data).
+// The mechanism gate + lift-replay harness (docs/eval/0001-reward-lift-gate.md) prove the MECHANISM on
+// synthetic fixtures; the PRODUCTION flip to 'live' additionally requires (a) a passing lift verdict on
+// REAL accumulated sessions AND (b) operator ratification of the git-only outcome signal (it is unsound
+// for `--no-verify` / suite-less installs). Frozen so the recorded verdict cannot be mutated in place.
+const RECORDED_REWARD_VERDICT = Object.freeze({ pass: false, reason: 'insufficient-data' });
+
+module.exports = {
+  updateReward,
+  rewardFactor,
+  starvedUseful,
+  selectRewardMode,
+  RECORDED_REWARD_VERDICT,
+  COUNT_CAP,
+  R_HIGH,
+  S_LOW,
+};

@@ -24,7 +24,7 @@ const fs = require('fs');
 const http = require('http');
 const path = require('path');
 const { coalesceSidecar } = require('./sidecar.cjs'); // shared coalesced read/rewrite/fail-open/secret-scan
-const { rewardFactor } = require('./reward.cjs'); // S3 re-rank: per-page Beta-Bernoulli counts → reward factor
+const { rewardFactor, selectRewardMode, RECORDED_REWARD_VERDICT } = require('./reward.cjs'); // S3 re-rank + S5 verdict-derived mode
 
 const MIN_PROMPT_LEN = 8;          // skip trivial prompts ("ok", "yes")
 const MAX_QUERY_CHARS = 512;       // trim the prompt before querying the door
@@ -43,11 +43,14 @@ const SURFACED_REL = path.join('.wrxn', 'surfaced.json'); // per-session surface
 const WIKI_PREFIX = '.wrxn/wiki/'; // the wiki root — stripped to form the D1 join key
 const REWARD_REL = path.join('.wrxn', 'reward.json'); // per-page Beta-Bernoulli store (STATE) — read-only here
 
-// The single shipped mode gating the reward re-rank (mirrors recon's SHIPPED_DECAY_MODE). DEFAULT
-// 'shadow': reward counts accrue at session-end but the factor NEVER moves a recall rank — recall output
-// is byte-identical to pre-reward behaviour. Flips to 'live' ONLY when the offline lift gate proves the
-// re-rank helps a gold set — never a silent enable. Tests force 'live' via the recallFromDoor option.
-const SHIPPED_REWARD_MODE = 'shadow';
+// The single shipped mode gating the reward re-rank (mirrors recon's SHIPPED_DECAY_MODE). It is DERIVED
+// from the recorded lift-gate verdict via selectRewardMode — never hard-coded — so the live state is never
+// a silent default. Today RECORDED_REWARD_VERDICT is NOT passing (no real session corpus accrued yet), so
+// this resolves to 'shadow': reward counts accrue at session-end but the factor NEVER moves a recall rank
+// — recall output is byte-identical to pre-reward behaviour. It flips to 'live' ONLY when the recorded
+// verdict passes (the offline lift gate proves lift on real data AND the operator ratifies the git-only
+// signal — docs/eval/0001-reward-lift-gate.md). Tests force 'live' via the recallFromDoor option.
+const SHIPPED_REWARD_MODE = selectRewardMode(RECORDED_REWARD_VERDICT);
 
 function emit(envelope) {
   process.stdout.write(JSON.stringify(envelope));
@@ -489,6 +492,7 @@ if (require.main === module) {
 module.exports = {
   decideRecall,
   qualifyingHits,
+  rerankByReward,
   recallFromDoor,
   readRewardLookup,
   reinforce,
