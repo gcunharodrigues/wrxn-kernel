@@ -25,6 +25,7 @@ const PKG_ROOT = path.join(__dirname, '..');
 const { init } = require('../lib/install.cjs');
 const { loadManifest } = require('../lib/manifest.cjs');
 const shell = require('../payload/.claude/hooks/session-end-reward.cjs');
+const sessionStart = require('../payload/.claude/hooks/session-start.cjs');
 const HOOK = path.join(PKG_ROOT, 'payload', '.claude', 'hooks', 'session-end-reward.cjs');
 const SETTINGS = path.join(PKG_ROOT, 'payload', '.claude', 'settings.json');
 
@@ -161,6 +162,23 @@ test('run is once-per-session: re-running for the same session does not credit t
   );
 });
 
+// ── rev-F2: the once-per-session guard tracks REAL persistence, not the computed delta ──
+// The guard must be armed ONLY when coalesceSidecar actually rewrote the sidecar. If it is armed from the
+// mutate's computed delta instead, a refuse/fail AFTER the mutate (secret-scan refusal, unwritable path)
+// marks the session rewarded while dropping the counts — the attribution is then silently lost forever.
+
+test('run does NOT arm the once-per-session guard when sidecar persistence FAILS after the mutate (rev-F2)', () => {
+  const target = freshInstall('wrxn-reward-revf2-');
+  seed(target, 'sid-revf2', ['concepts/a.md']);
+  // Force coalesceSidecar to fail the write AFTER the mutate computes a non-empty change: make reward.json a
+  // directory so writeFileSync throws (EISDIR) and coalesceSidecar returns false (it did NOT persist).
+  fs.mkdirSync(rewardFile(target), { recursive: true });
+  assert.doesNotThrow(() => shell.run({ payload: { session_id: 'sid-revf2' }, root: target, gitFacts: { newCommits: ['feat: x'] } }));
+  // the guard must reflect what was PERSISTED — a dropped write leaves the session re-creditable next time
+  const baseline = JSON.parse(fs.readFileSync(baselineFile(target, 'sid-revf2'), 'utf8'));
+  assert.ok(!baseline.rewarded, 'a failed persistence must NOT mark the session rewarded (else attribution is silently lost)');
+});
+
 // ── fail-open: missing baseline / corrupt sidecar never throw and never block close ──
 
 test('run with NO baseline marker is a no-op (commits-this-session undefined) — no throw', () => {
@@ -207,6 +225,30 @@ test('run treats a surfaced value strictly as a join key (sec-F3): a traversal-s
   assert.deepEqual(counts, { '../../etc/passwd': { s: 1, f: 0 }, 'concepts/a.md': { s: 1, f: 0 } });
 });
 
+// ── sec-F1: the session id is a FILESYSTEM PATH component for the baseline marker — sanitize it ──
+// session-start writes the baseline keyed by the session id and the reward shell reads + stamps it back.
+// A raw id like '../../evil' is a traversal surface; both sides must route the id through the SAME safeId,
+// so the marker round-trips and the read can never miss what the write wrote (no silent attribution loss).
+// The surfaced-log MAP KEY stays RAW (join parity with S1) — only the on-disk path component is sanitized.
+
+test('sec-F1: a traversal session id round-trips through safeId — session-start writes & the reward shell reads/stamps the SAME sanitized baseline, nothing escapes .wrxn/baseline', () => {
+  const target = freshInstall('wrxn-reward-secf1-rt-');
+  const evil = '../../evil';
+  sessionStart.stampStartHead(target, evil, { resolveHead: () => 'cafef00d' }); // session-start stamps the baseline
+  fs.mkdirSync(path.dirname(surfacedFile(target)), { recursive: true });
+  fs.writeFileSync(surfacedFile(target), JSON.stringify({ [evil]: ['concepts/a.md'] })); // surfaced keyed RAW (S1 join parity)
+
+  shell.run({ payload: { session_id: evil }, root: target, gitFacts: { newCommits: ['feat: x'] } });
+
+  // readBaseline found the SAME sanitized marker session-start wrote → the page is credited (no silent loss)
+  assert.deepEqual(JSON.parse(fs.readFileSync(rewardFile(target), 'utf8')), { 'concepts/a.md': { s: 1, f: 0 } });
+  // markRewarded stamped the SANITIZED marker (the once-per-session guard rides the sanitized path too)
+  const safeMarker = path.join(target, '.wrxn', 'baseline', 'evil');
+  assert.equal(JSON.parse(fs.readFileSync(safeMarker, 'utf8')).rewarded, true);
+  // and a traversal id never escapes the baseline dir to the install root
+  assert.equal(fs.existsSync(path.join(target, 'evil')), false);
+});
+
 // ── the entrypoint: invoked as the real SessionEnd harness would (stdin JSON → {} stdout) ──
 
 test('the hook binary emits {} and credits the session when run end-to-end via stdin', () => {
@@ -237,6 +279,28 @@ test('the hook binary fails open ({}) with no install root and writes nothing', 
     env: { ...process.env, CLAUDE_PROJECT_DIR: orphan },
   });
   assert.deepEqual(out.trim() ? JSON.parse(out) : {}, {});
+});
+
+// ── sec-F2: the baseline head (read from an on-disk marker that may be corrupt) into git ──
+// gitFactsSince interpolates the baseline head into `git log <head>..HEAD`. The head must be sha-SHAPED
+// before it can become a git revision — a corrupt / option- / ref-expression-shaped head is rejected to a
+// NEUTRAL signal, never handed to git (defense-in-depth: execFile already blocks the shell; this blocks
+// ref/option abuse + makes "corrupt baseline ⇒ neutral" explicit rather than relying on git erroring out).
+
+test('gitFactsSince rejects a non-sha-shaped baseline head — a ref-expression/option never becomes a git revision (sec-F2)', () => {
+  const target = freshInstall('wrxn-reward-secf2-');
+  const git = (...a) => execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...a], { cwd: target, encoding: 'utf8' });
+  git('init', '-q');
+  git('commit', '-q', '--allow-empty', '-m', 'one');
+  git('commit', '-q', '--allow-empty', '-m', 'two');
+  // 'HEAD~1' is a VALID git ref-expression but NOT a sha — if it reached git the range would resolve to ['two'];
+  // the guard must reject it to neutral so a corrupt baseline can never silently drive the signal off a live ref.
+  assert.deepEqual(shell.gitFactsSince(target, 'HEAD~1'), { newCommits: [] }, 'a non-sha head ⇒ neutral, never used as a git revision');
+  // an option-shaped corrupt head is likewise rejected (defense-in-depth)
+  assert.deepEqual(shell.gitFactsSince(target, '--all'), { newCommits: [] });
+  // a REAL sha still resolves through — the guard is shape-only, not a blanket block
+  const base = git('rev-parse', 'HEAD~1').trim();
+  assert.deepEqual(shell.gitFactsSince(target, base), { newCommits: ['two'] }, 'a real sha range still works');
 });
 
 // ── integration: the real git path over a temp repo (good → +1, then a revert → −1) ──

@@ -33,6 +33,21 @@ const BASELINE_DIR_REL = ['.wrxn', 'baseline'];
 const SURFACED_REL = ['.wrxn', 'surfaced.json'];
 const REWARD_REL = ['.wrxn', 'reward.json'];
 
+// safeId — canonicalize a session id used as a FILESYSTEM PATH component (sec-F1): lowercase, collapse every
+// non-alnum run to '-', trim, cap length. The baseline marker is keyed by session id; a raw id like
+// '../../evil' would traverse out of .wrxn/baseline. REPLICATED byte-identically from session-start.cjs /
+// code-intel-push.cjs — each install-only hook is self-contained (node stdlib only, no shared import, exactly
+// as secretScan is duplicated across the adapters). session-start sanitizes the SAME way, so the marker the
+// reward shell reads + stamps is exactly the one session-start wrote. NB: the surfaced-log MAP KEY stays RAW
+// (a JSON key is not a path; raw preserves join parity with the S1 surfaced-log writer) — only paths sanitize.
+function safeId(sid) {
+  return String(sid || 'session')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48) || 'session';
+}
+
 // Walk up from cwd / CLAUDE_PROJECT_DIR to the install root carrying wrxn.install.json (mirrors the
 // sibling session hooks). Returns null when no install is found (the hook then no-ops, fail-open).
 function findInstallRoot(startDir) {
@@ -73,7 +88,7 @@ function deriveSignal(facts) {
 // `rewarded` is the once-per-session guard: set true after this session's first credit. Fail-open.
 function readBaseline(root, sessionId) {
   try {
-    const raw = fs.readFileSync(path.join(root, ...BASELINE_DIR_REL, sessionId), 'utf8');
+    const raw = fs.readFileSync(path.join(root, ...BASELINE_DIR_REL, safeId(sessionId)), 'utf8');
     const rec = JSON.parse(raw);
     const head = rec && typeof rec.head === 'string' ? rec.head.trim() : '';
     if (!head) return null;
@@ -88,7 +103,7 @@ function readBaseline(root, sessionId) {
 // next run re-credits, which the coalesced no-op already softens for an unchanged surfaced set.
 function markRewarded(root, sessionId) {
   try {
-    const file = path.join(root, ...BASELINE_DIR_REL, sessionId);
+    const file = path.join(root, ...BASELINE_DIR_REL, safeId(sessionId));
     const rec = JSON.parse(fs.readFileSync(file, 'utf8'));
     rec.rewarded = true;
     fs.writeFileSync(file, JSON.stringify(rec));
@@ -128,7 +143,10 @@ function readSurfacedSet(root, sessionId) {
 // install; fail-open (no git / bad range → no facts → neutral). NEVER runs the suite (Art. III makes a
 // landed commit green by construction — the signal is git-only and cheap).
 function gitFactsSince(root, baselineHead) {
-  if (!baselineHead) return { newCommits: [] };
+  // sec-F2: the baseline head comes from an on-disk marker that could be corrupt — only a sha-SHAPED value
+  // may become a git revision. A missing or non-sha head (option-/ref-expression-shaped) ⇒ neutral, never an
+  // arg to `git log` (defense-in-depth: execFile already blocks the shell; this blocks ref/option abuse).
+  if (!baselineHead || !/^[0-9a-f]{7,40}$/.test(baselineHead)) return { newCommits: [] };
   try {
     const out = execFileSync('git', ['log', `${baselineHead}..HEAD`, '--format=%s'], {
       cwd: root,
@@ -174,17 +192,17 @@ function run({ payload, root, gitFacts } = {}) {
 
     // Persist via the shared coalesced helper: read current counts, apply the pure update once, rewrite.
     // The update is pure (produces a fresh map); the mutate adopts that map and reports whether it changed.
-    let wrote = false;
-    coalesceSidecar(path.join(root, ...REWARD_REL), (map) => {
+    // rev-F2: `wrote` is coalesceSidecar's ACTUAL return (did the rewrite land on disk), NOT the mutate's
+    // computed delta — so a refuse/fail AFTER the mutate (secret-scan refusal, EISDIR, unwritable path) does
+    // not arm the once-per-session guard below, and the dropped attribution stays re-creditable on retry.
+    const wrote = coalesceSidecar(path.join(root, ...REWARD_REL), (map) => {
       // The discount is OFF in S2 (gate-tuned later, per the PRD); pass no opts → no decay.
       const next = updateReward(map, surfaced, signal);
       const before = JSON.stringify(map);
       // adopt next into the map object the helper will serialize
       for (const k of Object.keys(map)) delete map[k];
       Object.assign(map, next);
-      const changed = JSON.stringify(map) !== before;
-      wrote = changed;
-      return changed; // write only when the counts actually changed
+      return JSON.stringify(map) !== before; // write only when the counts actually changed
     });
 
     // Mark the session credited so a second SessionEnd is a no-op (once-per-session). Only when a write

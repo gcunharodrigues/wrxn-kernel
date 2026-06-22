@@ -129,10 +129,20 @@ test('stampStartHead is fail-open: an unresolvable HEAD writes no marker and nev
 
 test('stampStartHead is keyed per session: distinct sessions get distinct markers', () => {
   const target = freshInstall('wrxn-baseline-perssession-');
-  sessionStart.stampStartHead(target, 'sid-A', { resolveHead: () => 'aaa111' });
-  sessionStart.stampStartHead(target, 'sid-B', { resolveHead: () => 'bbb222' });
-  assert.equal(JSON.parse(fs.readFileSync(baselineFile(target, 'sid-A'), 'utf8')).head, 'aaa111');
-  assert.equal(JSON.parse(fs.readFileSync(baselineFile(target, 'sid-B'), 'utf8')).head, 'bbb222');
+  // already-canonical ids (the marker path is now sanitized via safeId — sec-F1)
+  sessionStart.stampStartHead(target, 'sid-a', { resolveHead: () => 'aaa111' });
+  sessionStart.stampStartHead(target, 'sid-b', { resolveHead: () => 'bbb222' });
+  assert.equal(JSON.parse(fs.readFileSync(baselineFile(target, 'sid-a'), 'utf8')).head, 'aaa111');
+  assert.equal(JSON.parse(fs.readFileSync(baselineFile(target, 'sid-b'), 'utf8')).head, 'bbb222');
+});
+
+test('stampStartHead sanitizes the session id as a path component — a traversal id cannot escape .wrxn/baseline (sec-F1)', () => {
+  const target = freshInstall('wrxn-baseline-secf1-');
+  // a path-traversal-shaped session id must be canonicalized, never concatenated raw into the marker path.
+  const stamped = sessionStart.stampStartHead(target, '../../evil', { resolveHead: () => 'cafe1234' });
+  assert.equal(stamped, true, 'a resolved HEAD still stamps — the id is canonicalized, not rejected');
+  assert.equal(fs.existsSync(path.join(target, 'evil')), false, 'no marker escapes .wrxn/baseline to the install root');
+  assert.deepEqual(fs.readdirSync(baselineDir(target)), ['evil'], 'exactly one sanitized marker, written INSIDE .wrxn/baseline');
 });
 
 test('session-start stamps the REAL git HEAD when run over a git repo (integration)', () => {

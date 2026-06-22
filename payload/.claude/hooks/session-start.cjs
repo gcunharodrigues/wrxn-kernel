@@ -33,6 +33,20 @@ function emit(envelope) {
 
 const BASELINE_DIR_REL = ['.wrxn', 'baseline'];
 
+// safeId — canonicalize a session id used as a FILESYSTEM PATH component (sec-F1): lowercase, collapse every
+// non-alnum run to '-', trim, cap length. A raw session id concatenated into a path is a traversal surface;
+// this keeps the marker INSIDE .wrxn/baseline. REPLICATED byte-identically from code-intel-push.cjs and the
+// session-end reward shell — each install-only hook is self-contained (node stdlib only, no shared import,
+// exactly as secretScan is duplicated across the adapters). The reward shell sanitizes the SAME way, so the
+// baseline marker round-trips (writer here ↔ reader there) and the read can never miss what this wrote.
+function safeId(sid) {
+  return String(sid || 'session')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48) || 'session';
+}
+
 // Resolve the install repo's current git HEAD sha. Returns the sha string, or null when there is no git
 // / no repo (fail-open). Rooted at the install so a nested cwd can't resolve a different repo's HEAD.
 function resolveGitHead(root) {
@@ -72,7 +86,7 @@ function stampStartHead(root, sessionId, opts = {}) {
     const now = opts.now || Date.now;
     const dir = path.join(root, ...BASELINE_DIR_REL);
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, sessionId), JSON.stringify({ head, at: now() }));
+    fs.writeFileSync(path.join(dir, safeId(sessionId)), JSON.stringify({ head, at: now() }));
     return true;
   } catch {
     return false; // best-effort: a baseline-stamp fault must never block session orientation
