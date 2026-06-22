@@ -50,8 +50,51 @@ function lintPage(text) {
   return null;
 }
 
+// A page's identity is its `name:` frontmatter slug — it is the wikilink target ([[name]]), the
+// filename, and the dedup key. Returns the slug, or null when the page has no readable name.
+function pageName(text) {
+  const m = /^name\s*:\s*(.+)$/m.exec(String(text || ''));
+  return m ? m[1].trim() : null;
+}
+
+// The body is everything after the frontmatter block (where prose [[wikilinks]] live).
+function pageBody(text) {
+  const src = String(text || '');
+  if (!src.startsWith('---')) return src;
+  const end = src.indexOf('\n---', 3);
+  return end < 0 ? '' : src.slice(end + 4);
+}
+
+// Wikilinks are written `[[slug]]` (Obsidian style), where slug equals a target page's `name:`. An
+// optional `|alias` or `#anchor` is stripped to the bare target slug. Returns the distinct slugs.
+function wikilinkTargets(body) {
+  const out = new Set();
+  const re = /\[\[([^\]]+)\]\]/g;
+  let m;
+  while ((m = re.exec(String(body || '')))) {
+    const slug = m[1].split('|')[0].split('#')[0].trim();
+    if (slug) out.add(slug);
+  }
+  return [...out];
+}
+
+// Corpus-level checks (need every page, so they run over the swept corpus, not per-page).
+// `corpus` is an array of { ref, name, body }; `ref` is the human-readable `tier/file.md` label.
+// Returns dead-wikilink findings: a [[slug]] whose slug matches no existing page name.
+function deadLinkFindings(corpus) {
+  const names = new Set(corpus.map((p) => p.name).filter(Boolean));
+  const findings = [];
+  for (const page of corpus) {
+    for (const slug of wikilinkTargets(page.body)) {
+      if (!names.has(slug)) findings.push(`${page.ref} — dead wikilink [[${slug}]]`);
+    }
+  }
+  return findings;
+}
+
 function sweep(root) {
   const flagged = [];
+  const corpus = [];
   for (const tier of TIERS) {
     const dir = path.join(root, '.wrxn', 'wiki', tier);
     let names;
@@ -67,12 +110,18 @@ function sweep(root) {
       } catch {
         continue;
       }
+      corpus.push({ ref: `${tier}/${name}`, name: pageName(text), body: pageBody(text) });
       const reason = lintPage(text);
       if (reason) {
         flagged.push(`${tier}/${name} — ${reason}`);
         if (flagged.length >= MAX_FLAGGED) return flagged;
       }
     }
+  }
+  // Corpus-level checks run after every page is read (they need the full set of page names).
+  for (const f of deadLinkFindings(corpus)) {
+    flagged.push(f);
+    if (flagged.length >= MAX_FLAGGED) return flagged;
   }
   return flagged;
 }
@@ -92,7 +141,7 @@ function main() {
 
   const ctx = [
     '<wiki-lint>',
-    `${flagged.length} malformed wiki page(s) — fix the frontmatter (name / description / tier):`,
+    `${flagged.length} wiki integrity issue(s) — malformed frontmatter, dead [[wikilinks]], or duplicate page titles:`,
     ...flagged.map((f) => `- ${f}`),
     '</wiki-lint>',
   ].join('\n');

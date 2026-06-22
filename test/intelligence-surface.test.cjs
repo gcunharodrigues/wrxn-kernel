@@ -127,6 +127,26 @@ test('wiki-lint is silent when every page is well-formed', () => {
   assert.deepEqual(env, {}, 'all pages valid → no flag');
 });
 
+// ── AC: wiki-lint flags a dead [[wikilink]] (S2 #21) ──────────────────────────
+
+test('wiki-lint flags a [[wikilink]] whose target page does not exist', () => {
+  const target = freshInstall('wrxn-lint-deadlink-');
+  writePage(target, 'concepts', 'src-page', 'see [[ghost-page]] for more');
+  const env = runHook(LINT, { session_id: 'sid-dead', reason: 'clear' }, target);
+  const c = ctx(env);
+  assert.ok(c, 'a dead wikilink injects a report');
+  assert.match(c, /ghost-page/, 'names the dead link target');
+  assert.match(c, /src-page/, 'names the page that holds the dead link');
+});
+
+test('wiki-lint is silent on a [[wikilink]] whose target page exists', () => {
+  const target = freshInstall('wrxn-lint-livelink-');
+  writePage(target, 'concepts', 'src-page', 'see [[target-page]] for more');
+  writePage(target, 'gotchas', 'target-page', 'the destination');
+  const env = runHook(LINT, { session_id: 'sid-live', reason: 'clear' }, target);
+  assert.deepEqual(env, {}, 'a resolvable wikilink → no flag');
+});
+
 // ── fail-open: no install root resolvable → {} for every hook ──────────────────
 
 test('every intelligence hook fails open with no install root', () => {
