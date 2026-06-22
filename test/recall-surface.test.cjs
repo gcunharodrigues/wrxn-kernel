@@ -521,6 +521,14 @@ test('reinforce: never throws even on a bad root (best-effort, pure side effect)
   );
 });
 
+test('reinforce: an invalid clock never throws (the full side effect stays fail-open)', () => {
+  // Defends the refactor: the day-stamp must be computed inside the swallowed envelope, so a bad `now`
+  // (an Invalid Date → toISOString RangeError) can never escape and break the recall surfacing.
+  const root = installRoot('wrxn-reinforce-badnow-');
+  assert.doesNotThrow(() => recall.reinforce(root, [hit({ file: '.wrxn/wiki/concepts/x.md' })], new Date('not-a-date')));
+  assert.equal(fs.existsSync(path.join(root, REINFORCE_REL)), false, 'a fault before the write leaves no sidecar');
+});
+
 test('reinforce: only PROSE pages are stamped — a code hit alongside prose is never keyed in', async () => {
   const root = installRoot('wrxn-reinforce-prose-only-');
   writeEndpoint(root, { pid: process.pid, port: 65027 });
@@ -551,14 +559,169 @@ test('reinforce: when recall ABSTAINS (nothing qualifies), no sidecar is written
   assert.equal(fs.existsSync(path.join(root, REINFORCE_REL)), false, 'no surfacing → no recency stamp (reinforcement = recall surfacing only, AC4)');
 });
 
-// ── self-contained: node stdlib only (no kernel-lib / recon import) ──────────────────
+// ── surfaced-log: the per-session record of what recall surfaced (S1 / #12) ──────────
+// When recall actually surfaces prose pages, record that SESSION's surfaced (qualifying) page-paths
+// into .wrxn/surfaced.json — a compact map { "<session_id>": ["<wiki-rel-path>", …] } via the shared
+// coalesced-sidecar helper. Same join key as reinforce (wiki-root-relative). Coalesced (re-surfacing
+// the SAME set for a session is a no-op), fail-open (any fault leaves recall unchanged), no secret.
 
-test('the hook imports nothing outside the node standard library', () => {
+const SURFACED_REL = path.join('.wrxn', 'surfaced.json');
+function readSurfaced(root) {
+  return JSON.parse(fs.readFileSync(path.join(root, SURFACED_REL), 'utf8'));
+}
+
+test('surfacedLog: records the session\'s surfaced (qualifying) page-paths keyed by session id', () => {
+  const root = installRoot('wrxn-surfaced-rec-');
+  const hits = [
+    hit({ file: '.wrxn/wiki/concepts/a.md', sources: ['bm25', 'semantic'], semanticScore: 0.7 }),
+    hit({ file: '.wrxn/wiki/gotchas/b.md', sources: ['semantic'], semanticScore: 0.6 }),
+  ];
+  recall.surfacedLog(root, 'sess-123', recall.qualifyingHits(hits));
+  assert.deepEqual(
+    readSurfaced(root),
+    { 'sess-123': ['concepts/a.md', 'gotchas/b.md'] },
+    'the surfaced set is keyed by session id, valued by wiki-root-relative path (join-key parity with reinforce)'
+  );
+});
+
+test('surfacedLog: re-surfacing the identical set for the same session is a coalesced no-op (byte-identical)', () => {
+  const root = installRoot('wrxn-surfaced-coalesce-');
+  const hits = recall.qualifyingHits([hit({ file: '.wrxn/wiki/concepts/a.md', sources: ['bm25', 'semantic'], semanticScore: 0.7 })]);
+  recall.surfacedLog(root, 'sess-1', hits);
+  const first = fs.readFileSync(path.join(root, SURFACED_REL));
+  recall.surfacedLog(root, 'sess-1', hits); // same session, same surfaced set
+  const second = fs.readFileSync(path.join(root, SURFACED_REL));
+  assert.ok(first.equals(second), 'an unchanged surfaced set leaves the sidecar byte-identical (no churn)');
+});
+
+test('surfacedLog: a different session adds its own key (per-session, not a global lock)', () => {
+  const root = installRoot('wrxn-surfaced-multi-');
+  recall.surfacedLog(root, 'sess-1', recall.qualifyingHits([hit({ file: '.wrxn/wiki/concepts/a.md', sources: ['bm25', 'semantic'], semanticScore: 0.7 })]));
+  recall.surfacedLog(root, 'sess-2', recall.qualifyingHits([hit({ file: '.wrxn/wiki/gotchas/b.md', sources: ['semantic'], semanticScore: 0.6 })]));
+  assert.deepEqual(
+    readSurfaced(root),
+    { 'sess-1': ['concepts/a.md'], 'sess-2': ['gotchas/b.md'] },
+    'each session keeps its own surfaced record'
+  );
+});
+
+test('surfacedLog: the same session surfacing a NEW set updates that session to the new set', () => {
+  const root = installRoot('wrxn-surfaced-update-');
+  recall.surfacedLog(root, 'sess-1', recall.qualifyingHits([hit({ file: '.wrxn/wiki/concepts/a.md', sources: ['bm25', 'semantic'], semanticScore: 0.7 })]));
+  recall.surfacedLog(root, 'sess-1', recall.qualifyingHits([hit({ file: '.wrxn/wiki/concepts/c.md', sources: ['bm25', 'semantic'], semanticScore: 0.7 })]));
+  assert.deepEqual(readSurfaced(root), { 'sess-1': ['concepts/c.md'] }, 'the session\'s surfaced set advances to the latest surfacing');
+});
+
+test('surfacedLog: no session id → no write (the session key is the record key)', () => {
+  const root = installRoot('wrxn-surfaced-nosid-');
+  recall.surfacedLog(root, '', recall.qualifyingHits([hit({ file: '.wrxn/wiki/concepts/a.md', sources: ['bm25', 'semantic'], semanticScore: 0.7 })]));
+  recall.surfacedLog(root, undefined, recall.qualifyingHits([hit({ file: '.wrxn/wiki/concepts/a.md', sources: ['bm25', 'semantic'], semanticScore: 0.7 })]));
+  assert.equal(fs.existsSync(path.join(root, SURFACED_REL)), false, 'without a session id there is no record to write');
+});
+
+test('surfacedLog: an empty surfaced set → no write (nothing to record)', () => {
+  const root = installRoot('wrxn-surfaced-empty-');
+  recall.surfacedLog(root, 'sess-1', []);
+  assert.equal(fs.existsSync(path.join(root, SURFACED_REL)), false, 'no surfaced paths → no surfaced-log file');
+});
+
+test('surfacedLog: only PROSE wiki paths are recorded — a code hit alongside prose is never keyed in', () => {
+  const root = installRoot('wrxn-surfaced-proseonly-');
+  // qualifyingHits already drops code; pass a raw mix to surfacedPaths via surfacedLog to also prove the
+  // projection itself drops a non-wiki file even if one slipped through.
+  recall.surfacedLog(root, 'sess-1', [
+    hit({ name: 'spawnWidget', type: 'Function', file: 'lib/widgetry.cjs' }),
+    hit({ file: '.wrxn/wiki/concepts/a.md', sources: ['bm25', 'semantic'], semanticScore: 0.7 }),
+  ]);
+  assert.deepEqual(readSurfaced(root), { 'sess-1': ['concepts/a.md'] }, 'a non-wiki path is dropped from the surfaced record');
+});
+
+test('surfacedLog: a malformed existing sidecar → no throw, left untouched (fail-open via the shared helper)', () => {
+  const root = installRoot('wrxn-surfaced-corrupt-');
+  fs.mkdirSync(path.join(root, '.wrxn'), { recursive: true });
+  fs.writeFileSync(path.join(root, SURFACED_REL), 'not json{ broken');
+  assert.doesNotThrow(() =>
+    recall.surfacedLog(root, 'sess-1', recall.qualifyingHits([hit({ file: '.wrxn/wiki/concepts/a.md', sources: ['bm25', 'semantic'], semanticScore: 0.7 })]))
+  );
+  assert.equal(fs.readFileSync(path.join(root, SURFACED_REL), 'utf8'), 'not json{ broken', 'the corrupt surfaced-log is left untouched');
+});
+
+test('surfacedLog: never throws even on a bad root (best-effort, pure side effect)', () => {
+  const dir = tmp('wrxn-surfaced-badroot-');
+  const badRoot = path.join(dir, 'a-file-not-a-dir');
+  fs.writeFileSync(badRoot, 'x'); // root is a FILE → every fs op under it throws ENOTDIR
+  assert.doesNotThrow(() =>
+    recall.surfacedLog(badRoot, 'sess-1', recall.qualifyingHits([hit({ file: '.wrxn/wiki/concepts/a.md', sources: ['bm25', 'semantic'], semanticScore: 0.7 })]))
+  );
+});
+
+test('surfacedLog: a secret-shaped page path is never written (no-secret via the shared helper)', () => {
+  // A wiki-rel key should never carry a secret, but the no-secret guarantee must hold structurally:
+  // if a session id or path ever embedded a token shape, the helper refuses the whole write.
+  const root = installRoot('wrxn-surfaced-secret-');
+  recall.surfacedLog(root, 'npm_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', recall.qualifyingHits([hit({ file: '.wrxn/wiki/concepts/a.md', sources: ['bm25', 'semantic'], semanticScore: 0.7 })]));
+  assert.equal(fs.existsSync(path.join(root, SURFACED_REL)), false, 'a record carrying a secret-shaped value is refused, not written');
+});
+
+test('recallFromDoor: when recall surfaces, the session\'s surfaced pages are logged under its session id', async () => {
+  const root = installRoot('wrxn-surfaced-e2e-');
+  writeEndpoint(root, { pid: process.pid, port: 65030 });
+  const block = await recall.recallFromDoor(root, 'a prompt long enough to query the door', {
+    transport: proseDoor(['.wrxn/wiki/concepts/a.md', '.wrxn/wiki/gotchas/b.md']),
+    now: new Date('2026-06-22T10:00:00.000Z'),
+    sessionId: 'sess-e2e',
+  });
+  assert.ok(block, 'recall surfaces');
+  assert.deepEqual(
+    readSurfaced(root),
+    { 'sess-e2e': ['concepts/a.md', 'gotchas/b.md'] },
+    'end-to-end: after recall fires, the surfaced-log holds that session\'s surfaced pages (the exact qualifying set)'
+  );
+});
+
+test('recallFromDoor: when recall ABSTAINS, no surfaced-log is written (ignores non-surfaced)', async () => {
+  const root = installRoot('wrxn-surfaced-abstain-');
+  writeEndpoint(root, { pid: process.pid, port: 65031 });
+  const transport = async () => ({
+    statusCode: 200,
+    body: JSON.stringify({ result: '', hits: [hit({ file: '.wrxn/wiki/concepts/x.md', sources: ['bm25'], semanticScore: 0.1 })] }),
+  });
+  const block = await recall.recallFromDoor(root, 'a prompt that surfaces nothing qualifying at all', { transport, now: new Date('2026-06-22T10:00:00.000Z'), sessionId: 'sess-abstain' });
+  assert.equal(block, null, 'nothing clears the gate → abstain');
+  assert.equal(fs.existsSync(path.join(root, SURFACED_REL)), false, 'no surfacing → no surfaced-log (logged = surfaced only)');
+});
+
+test('recallFromDoor: surfacing with no session id still surfaces, writes no surfaced-log (fail-open on a missing id)', async () => {
+  const root = installRoot('wrxn-surfaced-noid-');
+  writeEndpoint(root, { pid: process.pid, port: 65032 });
+  const block = await recall.recallFromDoor(root, 'a prompt long enough to query the door', {
+    transport: proseDoor(['.wrxn/wiki/concepts/a.md']),
+    now: new Date('2026-06-22T10:00:00.000Z'),
+    // no sessionId
+  });
+  assert.ok(block, 'recall still surfaces without a session id');
+  assert.equal(fs.existsSync(path.join(root, SURFACED_REL)), false, 'no session id → no surfaced record, but surfacing is unaffected');
+});
+
+// ── self-contained: node stdlib + co-located payload siblings only (no kernel-lib / recon import) ──
+// The hook may require a SIBLING module that ships alongside it in the payload hooks dir (e.g. the
+// shared sidecar helper) — itself self-contained — but nothing outside: no kernel-lib, no recon, no
+// third-party package. A relative require is allowed only when it resolves to a real file inside the
+// hooks dir (and that sibling is independently held to the same node-stdlib bar by its own test).
+
+test('the hook imports nothing outside the node standard library or its co-located payload siblings', () => {
   const src = fs.readFileSync(RECALL, 'utf8');
+  const hooksDir = path.dirname(RECALL);
   const mods = [...src.matchAll(/require\(\s*['"]([^'"]+)['"]\s*\)/g)].map((m) => m[1]);
   assert.ok(mods.length > 0, 'sanity: the hook has require() calls');
   const builtins = new Set(require('module').builtinModules);
   for (const m of mods) {
+    if (m.startsWith('.')) {
+      const resolved = path.resolve(hooksDir, m);
+      assert.ok(resolved.startsWith(hooksDir + path.sep), `${m} must resolve inside the hooks dir — no reaching outside the payload`);
+      assert.ok(fs.existsSync(resolved), `${m} must be a real co-located sibling module`);
+      continue;
+    }
     const name = m.replace(/^node:/, '');
     assert.ok(builtins.has(name), `${m} must be a node builtin — no kernel-lib or recon import allowed`);
   }

@@ -23,6 +23,7 @@
 const fs = require('fs');
 const http = require('http');
 const path = require('path');
+const { coalesceSidecar } = require('./sidecar.cjs'); // shared coalesced read/rewrite/fail-open/secret-scan
 
 const MIN_PROMPT_LEN = 8;          // skip trivial prompts ("ok", "yes")
 const MAX_QUERY_CHARS = 512;       // trim the prompt before querying the door
@@ -37,6 +38,7 @@ const PROSE_TYPES = new Set(['Page', 'Section']); // prose scope — drop code s
 const ENDPOINT_REL = path.join('.recon-wrxn', 'serve-endpoint.json');
 const FIND_PATH = '/api/tools/recon_find';
 const REINFORCE_REL = path.join('.wrxn', 'reinforce.json'); // coalesced access-recency sidecar (STATE)
+const SURFACED_REL = path.join('.wrxn', 'surfaced.json'); // per-session surfaced-log sidecar (STATE)
 const WIKI_PREFIX = '.wrxn/wiki/'; // the wiki root — stripped to form the D1 join key
 
 function emit(envelope) {
@@ -169,27 +171,13 @@ function dayStamp(now) {
 // Stamp each surfaced prose hit's wiki-rel path → today into <root>/.wrxn/reinforce.json. Writes only
 // when the map actually changes (coalesced). Wholly best-effort: never throws, never blocks recall.
 function reinforce(root, hits, now) {
-  try {
-    const list = Array.isArray(hits) ? hits : [];
-    if (!root || !list.length) return;
-    const file = path.join(root, REINFORCE_REL);
-    let map = {};
-    let raw = null;
-    try {
-      raw = fs.readFileSync(file, 'utf8');
-    } catch {
-      raw = null; // absent → fresh map (normal, not a fault)
-    }
-    if (raw !== null) {
-      let parsed;
-      try {
-        parsed = JSON.parse(raw);
-      } catch {
-        return; // malformed existing sidecar → skip silently, leave it untouched (never clobber)
-      }
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return; // not a map → skip
-      map = parsed;
-    }
+  const list = Array.isArray(hits) ? hits : [];
+  if (!root || !list.length) return;
+  // The whole read/parse/coalesce/rewrite/fail-open/secret-scan mechanism lives in coalesceSidecar; here
+  // we supply only the domain mutation — stamp each surfaced prose hit's wiki-rel join key to today,
+  // reporting whether the map actually changed (so an all-already-today recall is a coalesced no-op). The
+  // day-stamp is computed INSIDE the mutate so an invalid clock is caught by the helper's fail-open envelope.
+  coalesceSidecar(path.join(root, REINFORCE_REL), (map) => {
     const day = dayStamp(now);
     let changed = false;
     for (const h of list) {
@@ -200,12 +188,49 @@ function reinforce(root, hits, now) {
         changed = true;
       }
     }
-    if (!changed) return; // coalesced no-op → file stays byte-identical (<= 1 write/page/day)
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, JSON.stringify(map, null, 2) + '\n');
-  } catch {
-    /* best-effort: a reinforce fault must NEVER alter or break the recall surfacing */
+    return changed;
+  });
+}
+
+// ── surfaced-log: the per-session record of what recall surfaced (S1 / kernel #12) ────
+//
+// When Recall surfaces prose pages, record THIS session's surfaced (qualifying) page-paths into
+// <root>/.wrxn/surfaced.json — a compact map { "<session_id>": ["<wiki-rel-path>", …] } via the shared
+// coalesced-sidecar helper. The value uses the SAME wiki-root-relative join key reinforce stamps (a
+// slug/path mismatch silently breaks downstream consumers). Coalesced: re-surfacing the identical set
+// for a session rewrites nothing. Best-effort + non-blocking — the helper swallows every fault, so a
+// surfaced-log write can never alter or break the recall surfacing.
+
+// Map the surfaced hits to their wiki-rel join keys, de-duplicated, order preserved. (qualifyingHits
+// has already prose-filtered + gated + capped; here we only project to the path key and drop non-wiki
+// hits / dupes.)
+function surfacedPaths(hits) {
+  const list = Array.isArray(hits) ? hits : [];
+  const seen = new Set();
+  const out = [];
+  for (const h of list) {
+    const key = wikiRelPath(h && h.file);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(key);
   }
+  return out;
+}
+
+// Record `paths(hits)` under `sessionId` in the surfaced-log. No session id or no surfaced paths → no
+// write. Coalesced: an unchanged set for the session leaves the file byte-identical.
+function surfacedLog(root, sessionId, hits) {
+  if (!root || !sessionId) return;
+  const paths = surfacedPaths(hits);
+  if (!paths.length) return;
+  coalesceSidecar(path.join(root, SURFACED_REL), (map) => {
+    const prev = map[sessionId];
+    if (Array.isArray(prev) && prev.length === paths.length && prev.every((v, i) => v === paths[i])) {
+      return false; // identical surfaced set for this session → coalesced no-op
+    }
+    map[sessionId] = paths;
+    return true;
+  });
 }
 
 // ── the door (IO shell, injectable transport) ───────────────────────────────────────
@@ -311,7 +336,7 @@ function httpTransport({ port, path: reqPath, body, timeoutMs }) {
 // IO shell: discover the door, POST the prose query, gate the hits. Returns the block string or null.
 // `transport` is injected in tests; production uses httpTransport. Sends NO `type` (recon_find takes a
 // single NodeType, not an array) — prose scope is enforced by decideRecall's post-filter.
-async function recallFromDoor(root, prompt, { transport, timeoutMs, now } = {}) {
+async function recallFromDoor(root, prompt, { transport, timeoutMs, now, sessionId } = {}) {
   const door = discoverEndpoint(root);
   if (!door) return null; // not warm → Abstain (silent)
   const query = String(prompt || '').trim().slice(0, MAX_QUERY_CHARS);
@@ -336,8 +361,13 @@ async function recallFromDoor(root, prompt, { transport, timeoutMs, now } = {}) 
   }
   const hits = Array.isArray(parsed.hits) ? parsed.hits : [];
   const block = decideRecall(hits);
-  // Side effect: stamp access-recency for the pages we actually surfaced (best-effort, never blocks).
-  if (block) reinforce(root, qualifyingHits(hits), now);
+  // Side effects on a surfacing (both best-effort, never block): stamp access-recency for the pages we
+  // surfaced, and record this session's surfaced set in the per-session surfaced-log.
+  if (block) {
+    const surfaced = qualifyingHits(hits);
+    reinforce(root, surfaced, now);
+    surfacedLog(root, sessionId, surfaced);
+  }
   return block;
 }
 
@@ -360,7 +390,7 @@ async function main() {
 
   let block = null;
   try {
-    block = await recallFromDoor(root, prompt.trim());
+    block = await recallFromDoor(root, prompt.trim(), { sessionId: event.session_id });
   } catch {
     return emit({});
   }
@@ -378,6 +408,7 @@ module.exports = {
   qualifyingHits,
   recallFromDoor,
   reinforce,
+  surfacedLog,
   wikiRelPath,
   dayStamp,
   discoverEndpoint,

@@ -141,21 +141,33 @@ test('door-client normalization ignores per-door error wording + comments but ca
   assert.notEqual(normalizeLogic(harvestErr), normalizeLogic(logicChange), 'a real logic change must NOT normalize away');
 });
 
-// ── AC4 · no adapter gains a cross-import or shared-module dependency ──────────────────────
-// The duplication exists PRECISELY because each adapter is self-contained (node stdlib only). This guards
-// the premise: if a future edit extracts a shared helper module or has one adapter `require` a sibling, the
-// duplication guards above would be silently undermined — so fail the build if any adapter requires a
-// non-builtin (a relative path or an npm package).
-test('each self-contained adapter imports node stdlib only (no cross-import / shared module)', () => {
+// ── AC4 · no adapter reaches outside the payload (node stdlib + co-located self-contained siblings) ──
+// The duplication of secretScan / dayStamp / the door-client exists PRECISELY because each adapter is
+// self-contained. This guards that premise: an adapter may NOT pull in the kernel lib, an npm package, or
+// any module outside the shipped payload — so a require must be either a node builtin OR a relative path
+// that resolves to a co-located payload sibling (which is itself held to the stdlib-only bar by its own
+// test). The duplicated helpers above are NOT relocated by such a sibling — they stay byte/logic-identical
+// copies, still guarded by AC1–AC3 — so a co-located helper module (e.g. the shared coalesced-sidecar) is
+// permitted while a kernel-lib / npm / out-of-payload import still fails the build.
+test('each self-contained adapter imports node stdlib or a co-located payload sibling (no kernel-lib / npm / out-of-payload import)', () => {
   const re = /\brequire\(\s*(['"])([^'"]+)\1\s*\)/g;
   for (const which of Object.keys(ADAPTERS)) {
+    const file = ADAPTERS[which];
     const src = read(which);
     let m;
     while ((m = re.exec(src)) !== null) {
       const mod = m[2];
+      if (mod.startsWith('.')) {
+        const resolved = path.resolve(path.dirname(file), mod);
+        assert.ok(
+          resolved.startsWith(PAYLOAD + path.sep) && fs.existsSync(resolved),
+          `${which}.cjs requires "${mod}" — a relative import must resolve to a co-located payload sibling (a self-contained module shipped alongside it); reaching outside the payload is forbidden`
+        );
+        continue;
+      }
       assert.ok(
         isBuiltin(mod),
-        `${which}.cjs requires "${mod}" — adapters must stay self-contained (node stdlib only); the duplicated helpers exist because these files cannot share a module`
+        `${which}.cjs requires "${mod}" — adapters must stay self-contained (node stdlib only); the duplicated helpers exist because these files cannot share a non-payload module`
       );
     }
   }

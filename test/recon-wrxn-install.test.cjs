@@ -156,6 +156,16 @@ test('init gitignores the .wrxn/reinforce.json recency sidecar (STATE, never com
   assert.equal(count, 1, 'exactly one .wrxn/reinforce.json line after re-init');
 });
 
+test('init gitignores the .wrxn/surfaced.json per-session surfaced-log (STATE, never committed — #12 S1)', () => {
+  const target = tmp('wrxn-gi-surfaced-');
+  init({ pkgRoot: PKG_ROOT, target, profile: 'project' });
+  init({ pkgRoot: PKG_ROOT, target, profile: 'project' }); // re-init: still exactly one (idempotent)
+  const gi = fs.readFileSync(path.join(target, '.gitignore'), 'utf8');
+  assert.match(gi, /^\.wrxn\/surfaced\.json$/m, '.wrxn/surfaced.json line present');
+  const count = gi.split('\n').filter((l) => l.trim() === '.wrxn/surfaced.json').length;
+  assert.equal(count, 1, 'exactly one .wrxn/surfaced.json line after re-init');
+});
+
 // ── AC-5: NO synchronous index at init (serve auto-indexes lazily) ──────────────
 
 test('init does NOT build the .recon-wrxn/ index (lazy: serve indexes on first use)', () => {
