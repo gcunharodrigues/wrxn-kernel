@@ -1,0 +1,155 @@
+'use strict';
+
+// Tests for the pure reward module (S2 / kernel #13). The learning-moat's value axis: a per-page
+// Beta-Bernoulli store keyed by wiki-rel path, { "<wiki-rel>": { s, f } }. `updateReward` maps
+// (counts, surfacedSet, signal) → counts′ once per session — +1 credits each surfaced page's `s`,
+// −1 credits its `f`, neutral leaves counts untouched. It is PURE (no IO, no clock/signal read — the
+// signal is injected), DETERMINISTIC, TOTAL (never throws on garbage), and BOUNDED (counts capped so
+// one lucky page can't dominate). Black-box over the exported functions — the kernel's pure-scorer
+// discipline (mirrors the recon decay-scorer: clock/signal injected, never reads them itself).
+
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+const PKG_ROOT = path.join(__dirname, '..');
+const REWARD = path.join(PKG_ROOT, 'payload', '.claude', 'hooks', 'reward.cjs');
+const reward = require('../payload/.claude/hooks/reward.cjs');
+const { loadManifest } = require('../lib/manifest.cjs');
+const { init } = require('../lib/install.cjs');
+
+// ── the core update: +1 credits success, −1 credits failure, neutral is a no-op ──────
+
+test('updateReward(+1): increments s for each surfaced page (new pages start from zero)', () => {
+  const next = reward.updateReward({}, ['concepts/a.md', 'gotchas/b.md'], +1);
+  assert.deepEqual(next, {
+    'concepts/a.md': { s: 1, f: 0 },
+    'gotchas/b.md': { s: 1, f: 0 },
+  });
+});
+
+test('updateReward(+1): accumulates onto existing counts (good sessions add up)', () => {
+  const prev = { 'concepts/a.md': { s: 2, f: 1 } };
+  const next = reward.updateReward(prev, ['concepts/a.md'], +1);
+  assert.deepEqual(next, { 'concepts/a.md': { s: 3, f: 1 } });
+});
+
+test('updateReward(−1): increments f for each surfaced page (bad sessions penalise)', () => {
+  const prev = { 'concepts/a.md': { s: 2, f: 1 } };
+  const next = reward.updateReward(prev, ['concepts/a.md'], -1);
+  assert.deepEqual(next, { 'concepts/a.md': { s: 2, f: 2 } });
+});
+
+test('updateReward(neutral/0): leaves counts unchanged (no commits ⇒ no update)', () => {
+  const prev = { 'concepts/a.md': { s: 2, f: 1 } };
+  assert.deepEqual(reward.updateReward(prev, ['concepts/a.md'], 0), prev);
+});
+
+// ── PURE: never mutates the inputs (the caller's map is its own) ──────────────────────
+
+test('updateReward is pure: the input counts object is not mutated', () => {
+  const prev = { 'concepts/a.md': { s: 1, f: 0 } };
+  const snapshot = JSON.parse(JSON.stringify(prev));
+  reward.updateReward(prev, ['concepts/a.md'], +1);
+  assert.deepEqual(prev, snapshot, 'the input is left untouched — a fresh object is returned');
+});
+
+// ── once per session: a page that appears twice in the surfaced set is credited once ──
+
+test('updateReward credits a duplicated surfaced page only ONCE (equal-credit-once-per-session)', () => {
+  const next = reward.updateReward({}, ['concepts/a.md', 'concepts/a.md'], +1);
+  assert.deepEqual(next, { 'concepts/a.md': { s: 1, f: 0 } }, 'a dupe in the set is a single credit');
+});
+
+// ── TOTAL: never throws on garbage; a malformed prior slot reads as zero evidence ─────
+
+test('updateReward is total: garbage inputs never throw and yield a sane map', () => {
+  assert.doesNotThrow(() => reward.updateReward(null, null, +1));
+  assert.deepEqual(reward.updateReward(null, null, +1), {}, 'no counts + no set → empty map');
+  assert.deepEqual(reward.updateReward([], 'concepts/a.md', +1), {}, 'a string set is not iterated char-by-char');
+  assert.deepEqual(reward.updateReward({}, ['', null, 0, '  '], +1), {}, 'empty/blank/null keys credit nobody');
+  // a non-numeric signal is neutral (no update), never a throw
+  assert.deepEqual(reward.updateReward({ 'x.md': { s: 1, f: 0 } }, ['x.md'], NaN), { 'x.md': { s: 1, f: 0 } });
+});
+
+test('updateReward rebuilds a malformed prior slot as zero evidence (totality), then applies the signal', () => {
+  const prev = { 'concepts/a.md': 'corrupt', 'gotchas/b.md': { s: -5, f: 'nope' } };
+  const next = reward.updateReward(prev, ['concepts/a.md', 'gotchas/b.md'], +1);
+  assert.deepEqual(next, {
+    'concepts/a.md': { s: 1, f: 0 }, // 'corrupt' → {0,0} then +1
+    'gotchas/b.md': { s: 1, f: 0 }, // {-5,'nope'} → {0,0} then +1
+  });
+});
+
+// ── BOUNDED: counts saturate at the cap (one page can't dominate once the factor is live) ──
+
+test('updateReward is bounded: a count at the cap does not exceed it', () => {
+  const prev = { 'concepts/a.md': { s: reward.COUNT_CAP, f: 0 } };
+  const next = reward.updateReward(prev, ['concepts/a.md'], +1);
+  assert.equal(next['concepts/a.md'].s, reward.COUNT_CAP, 's saturates at COUNT_CAP, never overflows');
+});
+
+// ── self-contained + shipped: node stdlib only, laid as managed payload into installs ──
+
+test('the reward module imports nothing outside the node standard library', () => {
+  const src = fs.readFileSync(REWARD, 'utf8');
+  const mods = [...src.matchAll(/require\(\s*['"]([^'"]+)['"]\s*\)/g)].map((m) => m[1]);
+  const builtins = new Set(require('module').builtinModules);
+  for (const m of mods) {
+    const name = m.replace(/^node:/, '');
+    assert.ok(builtins.has(name), `${m} must be a node builtin — the reward sibling imports no kernel-lib/recon`);
+  }
+});
+
+test('the reward module is classified managed in the manifest and laid into a fresh install', () => {
+  const manifest = loadManifest(path.join(PKG_ROOT, 'manifest.json'));
+  const entry = manifest.files.find((f) => f.path === '.claude/hooks/reward.cjs');
+  assert.ok(entry, 'reward.cjs is classified in the manifest (the installer refuses any unmanifested payload file)');
+  assert.equal(entry.class, 'managed', 'kernel-owned hook code → managed');
+  const target = fs.mkdtempSync(path.join(os.tmpdir(), 'wrxn-reward-laid-'));
+  init({ pkgRoot: PKG_ROOT, target, profile: 'project' });
+  assert.ok(
+    fs.existsSync(path.join(target, '.claude', 'hooks', 'reward.cjs')),
+    'the reward sibling is laid alongside the session-end shell so the require resolves in installs'
+  );
+});
+
+// ── optional discount: prior counts decay toward neutral so a stale regime can be unlearned ──
+
+test('updateReward with no discount opt leaves prior counts un-decayed (default behaviour)', () => {
+  const prev = { 'concepts/a.md': { s: 4, f: 2 } };
+  // default path: prior is carried as-is, then +1 to s
+  assert.deepEqual(reward.updateReward(prev, ['concepts/a.md'], +1), { 'concepts/a.md': { s: 5, f: 2 } });
+});
+
+test('updateReward applies an optional discount to prior counts before the new signal (non-stationarity)', () => {
+  const prev = { 'concepts/a.md': { s: 4, f: 2 }, 'gotchas/b.md': { s: 10, f: 0 } };
+  // discount 0.5 halves every prior count, THEN +1 credits the surfaced page's s.
+  const next = reward.updateReward(prev, ['concepts/a.md'], +1, { discount: 0.5 });
+  assert.deepEqual(next, {
+    'concepts/a.md': { s: 4 * 0.5 + 1, f: 2 * 0.5 }, // 3, 1
+    'gotchas/b.md': { s: 10 * 0.5, f: 0 }, // 5, 0 — unsurfaced pages still decay (lifetime regime)
+  });
+});
+
+test('updateReward neutral signal is a no-op EVEN with a discount (no update ⇒ no decay)', () => {
+  const prev = { 'concepts/a.md': { s: 4, f: 2 } };
+  assert.deepEqual(
+    reward.updateReward(prev, ['concepts/a.md'], 0, { discount: 0.5 }),
+    prev,
+    'a neutral session neither credits nor decays — counts are unchanged'
+  );
+});
+
+test('updateReward ignores an out-of-range or garbage discount (totality — falls back to no discount)', () => {
+  const prev = { 'concepts/a.md': { s: 4, f: 2 } };
+  for (const bad of [0, -1, 2, NaN, 'x', null]) {
+    assert.deepEqual(
+      reward.updateReward(prev, ['concepts/a.md'], +1, { discount: bad }),
+      { 'concepts/a.md': { s: 5, f: 2 } },
+      `discount ${String(bad)} is rejected → no decay`
+    );
+  }
+});
