@@ -479,9 +479,17 @@ function frontmatterBlock(content) {
   return m ? m[1] : '';
 }
 
+// A YAML-falsy scalar — a `stale:`/`superseded_by:` set to any of these means NOT retired (the page is
+// kept). It mirrors YAML's boolean/null primitives so that, e.g., `stale: false` un-flags a page rather
+// than being read as the truthy STRING 'false' (#25). Compared case-insensitively after quote-stripping.
+const YAML_FALSY = new Set(['false', 'no', 'null', '~', '0', '']);
+
 // Parse the two retirement keys from a page's frontmatter into { stale?, superseded_by? }. Values are
 // simple scalars (harvest writes `stale: <path>` / `superseded_by: <path>`); surrounding quotes are
-// stripped. Only these two keys are read — everything else in the frontmatter is ignored.
+// stripped. The scalar is interpreted as a YAML boolean: a falsy scalar (false / no / null / ~ / 0 /
+// empty) means NOT retired and is DROPPED — only a truthy flag (a non-empty non-falsy value, e.g.
+// `true`, `yes`, or a harvest source path) is kept, so the downstream truthiness check is correct (#25).
+// Only these two keys are read — everything else in the frontmatter is ignored.
 function parseRetirement(content) {
   const fm = frontmatterBlock(content);
   if (!fm) return {};
@@ -490,25 +498,52 @@ function parseRetirement(content) {
     const m = /^(stale|superseded_by):\s*(.*)$/.exec(line);
     if (!m) continue;
     const val = m[2].trim().replace(/^['"]|['"]$/g, '');
-    if (val) out[m[1]] = val;
+    if (val && !YAML_FALSY.has(val.toLowerCase())) out[m[1]] = val;
   }
   return out;
 }
 
+// Resolve a candidate hit.file to the absolute path to OPEN, confined to the REAL wiki root — or null
+// when it escapes (#26). wikiRelPath is a lenient substring join-key (an absolute or `..`-bearing path
+// passes it), so it is NOT a read guard: a hit.file like `.wrxn/wiki/../../../etc/passwd` would slip it
+// and `path.join(root, file)` would resolve OUTSIDE the wiki root (readFileSync also follows symlinks).
+// Here we canonicalize and enforce a resolved-prefix check — the same discipline as lib/connect.cjs'
+// `state:` confinement: the resolved path (and, when it exists, its symlink-realpath) MUST sit at or
+// under <root>/.wrxn/wiki/. A non-string path, an escaping/absolute path, or a symlink whose target
+// escapes → null (the caller treats it as unreadable/unflagged → kept, fail-open). A path that does not
+// yet exist on disk stays confined lexically and is returned (the read then fails-open as a missing page).
+function confinedWikiPath(root, file) {
+  if (typeof file !== 'string' || !file) return null;
+  const wikiRoot = path.resolve(root, WIKI_PREFIX); // <root>/.wrxn/wiki
+  const underWiki = (p) => p === wikiRoot || p.startsWith(wikiRoot + path.sep);
+  const abs = path.resolve(root, file);
+  if (!underWiki(abs)) return null; // lexical `..`/absolute escape → refused, never opened
+  let real;
+  try {
+    real = fs.realpathSync(abs); // follows symlinks — a link pointing outside is caught here
+  } catch {
+    return abs; // does not (yet) exist / unresolvable → lexically confined; read fails-open as missing
+  }
+  return underWiki(real) ? abs : null; // a symlink whose real target escapes the wiki root → refused
+}
+
 // Read the frontmatter of each prose candidate page into a view keyed by the EXACT path the hit carries
 // (hit.file), so buildExclusion's predicate — which reads off hit.file — joins to it directly. The path
-// is confined under the wiki root (a hit.file outside .wrxn/wiki/ is never opened — sec posture, mirrors
-// reinforce's join-key discipline); a read fault contributes {} (unflagged). Returns a {path: fm} map.
+// is CONFINED to the real wiki root via confinedWikiPath: a `..`-escaping, absolute, or symlink-escaping
+// hit.file is never opened (#26 — defense-in-depth, mirrors lib/connect.cjs' resolved-prefix discipline).
+// A read fault, a parse fault, or a refused path all contribute {} (unflagged → kept). Returns {path: fm}.
 function readExclusionView(root, hits) {
   const view = {};
   if (!root || !Array.isArray(hits)) return view;
   for (const h of hits) {
     const file = h && h.file;
     if (typeof file !== 'string' || !file || view[file]) continue;
-    if (wikiRelPath(file) == null) continue; // not under the wiki root → never opened, never flagged
+    if (wikiRelPath(file) == null) continue; // not under the wiki root (no join key) → never opened
+    const abs = confinedWikiPath(root, file); // resolved-prefix confinement (the real read guard)
+    if (abs == null) { view[file] = {}; continue; } // escapes the wiki root → refused, treated as unflagged
     let content;
     try {
-      content = fs.readFileSync(path.join(root, file), 'utf8');
+      content = fs.readFileSync(abs, 'utf8');
     } catch {
       view[file] = {}; // unreadable (e.g. a since-deleted page) → unflagged, kept
       continue;
@@ -620,6 +655,7 @@ module.exports = {
   recallFromDoor,
   readRewardLookup,
   readExclusionView,
+  confinedWikiPath,
   parseRetirement,
   reinforce,
   surfacedLog,

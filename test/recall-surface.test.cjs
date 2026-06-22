@@ -1034,6 +1034,49 @@ test('buildExclusion: TOTAL — a garbage view / nullish hit never throws and ne
   }
 });
 
+// ── #25: parseRetirement interprets the YAML scalar — `stale: false` means NOT stale ─────────────────
+// parseRetirement is a raw-text line scanner, not a full YAML parser, so it captured the scalar as a
+// STRING. `stale: false` then yielded the string 'false', which is truthy in JS → buildExclusion's
+// `if (fm.stale)` wrongly excluded a page the author explicitly marked not-stale. A YAML-falsy scalar
+// (false / no / null / ~ / 0 / empty) means NOT stale → the key must be dropped; only a truthy flag
+// excludes. (Harvest itself only ever writes `stale: <source-path>` (truthy) or omits the key, so this
+// only bites a human who hand-writes `stale: false` to un-flag — but the contract must honour them.)
+test('parseRetirement: a YAML-falsy stale scalar is dropped — `stale: false` / `no` / `0` is NOT stale', () => {
+  for (const falsy of ['false', 'False', 'FALSE', 'no', 'No', 'null', '~', '0']) {
+    const fm = recall.parseRetirement(`---\nstale: ${falsy}\n---\n\n# p\n`);
+    assert.equal(fm.stale, undefined, `stale: ${falsy} is YAML-falsy → key dropped (NOT stale)`);
+  }
+});
+
+test('parseRetirement: a truthy stale scalar is still captured — `stale: true` / `yes` / a source path', () => {
+  assert.equal(recall.parseRetirement('---\nstale: true\n---\n').stale, 'true', '`true` is captured');
+  assert.equal(recall.parseRetirement('---\nstale: yes\n---\n').stale, 'yes', '`yes` is captured');
+  assert.equal(
+    recall.parseRetirement('---\nstale: concepts/gone-source.md\n---\n').stale,
+    'concepts/gone-source.md',
+    'the harvest-written source path (the real-world case) is captured unchanged'
+  );
+});
+
+test('buildExclusion (#25): a page explicitly marked `stale: false` is NOT excluded (kept)', () => {
+  // The headline bug repro: a human un-flags a page with `stale: false`. The string 'false' is truthy
+  // in JS, so the pre-fix reader excluded it — contradicting YAML semantics and the AC word "truthy".
+  const view = { '.wrxn/wiki/concepts/not-stale.md': recall.parseRetirement('---\nstale: false\n---\n') };
+  const exclude = recall.buildExclusion(view);
+  assert.equal(exclude(pageHit('.wrxn/wiki/concepts/not-stale.md')), false, 'a `stale: false` page is kept, not excluded');
+});
+
+test('recallFromDoor (#25): a page flagged `stale: false` on disk surfaces — falsy means not-stale, end-to-end', async () => {
+  const root = installRoot('wrxn-recall-e2e-stalefalse-');
+  writeEndpoint(root, { pid: process.pid, port: 65054 });
+  writeWikiPage(root, '.wrxn/wiki/concepts/keepme.md', { stale: 'false' });
+  const block = await recall.recallFromDoor(root, 'a prompt long enough to query the door', {
+    transport: proseDoor(['.wrxn/wiki/concepts/keepme.md']),
+  });
+  assert.ok(block, 'a `stale: false` page is NOT retired → recall still surfaces');
+  assert.match(block, /keepme/, 'the explicitly-not-stale page surfaces (falsy honoured end-to-end)');
+});
+
 test('decideRecall: exclusion runs BEFORE the reward re-rank — an excluded top-reward page never surfaces', () => {
   // The excluded page has the highest reward factor; if exclusion ran AFTER the re-rank it would win a
   // slot. Excluding it first means it is gone before reward (or the gate, or the cut) is ever consulted.
@@ -1121,4 +1164,89 @@ test('recallFromDoor: exclusion reads frontmatter best-effort — an unreadable 
   });
   assert.ok(block, 'a candidate whose page is unreadable is kept (fail-open), recall still surfaces');
   assert.match(block, /ghost/, 'the unflagged-by-default page surfaces');
+});
+
+// ── #26: the exclusion reader is CONFINED to the real wiki root (path-traversal defense-in-depth) ─────
+// readExclusionView turns a hit.file into a real fs.readFileSync path. The pre-fix guard was a substring
+// check (`wikiRelPath != null`) with no canonicalization and no `..` rejection, so a hit.file like
+// `.wrxn/wiki/../../../secret` passed it and the join resolved OUTSIDE the wiki root (readFileSync also
+// follows symlinks). The fix RESOLVES the path and reads ONLY files truly under <root>/.wrxn/wiki/ —
+// an escaping / absolute / symlink-escaping path is treated as unreadable (unflagged, kept), fail-open,
+// never read, never throws. Black-box proof: a real flagged-`stale:` file PLANTED OUTSIDE the wiki root,
+// pointed at by an escaping hit.file, must NOT exclude its hit (which it would iff the reader read it).
+
+test('readExclusionView (#26): a `..`-escaping hit.file is NOT read — its flag never lands in the view', () => {
+  const root = installRoot('wrxn-excl-traversal-');
+  // A page OUTSIDE the wiki root that, IF read, would flag the hit stale (proving the read happened).
+  fs.mkdirSync(path.join(root, '.wrxn'), { recursive: true });
+  fs.writeFileSync(path.join(root, '.wrxn', 'outside-secret.md'), '---\nstale: pwned\n---\n\n# x\n');
+  const escaping = '.wrxn/wiki/../outside-secret.md'; // resolves to <root>/.wrxn/outside-secret.md (outside the wiki root)
+  let view;
+  assert.doesNotThrow(() => { view = recall.readExclusionView(root, [{ file: escaping, type: 'Page' }]); });
+  // confined → unflagged: either the path is omitted entirely, or it is recorded as empty frontmatter.
+  assert.deepEqual(view[escaping] || {}, {}, 'an escaping path is treated as unflagged — its outside `stale:` flag is never read');
+});
+
+test('readExclusionView (#26): a deep `..` escape to a sibling OUTSIDE the install root is refused (not read)', () => {
+  const root = installRoot('wrxn-excl-deep-');
+  // A flagged file in a SIBLING dir of the install root (fully outside it), reachable only by climbing out.
+  const sibling = path.join(path.dirname(root), `${path.basename(root)}-sibling-secret.md`);
+  fs.writeFileSync(sibling, '---\nstale: pwned\n---\n\n# x\n');
+  // From the wiki root (<root>/.wrxn/wiki) climb out three levels (wiki → .wrxn → root → parent) to the
+  // sibling. The path still contains the '.wrxn/wiki/' substring (slips the old indexOf guard) yet
+  // resolves fully OUTSIDE the install root.
+  const escaping = `.wrxn/wiki/../../../${path.basename(root)}-sibling-secret.md`;
+  // sanity: this genuinely resolves outside the wiki root (and outside the install root) under both join and resolve
+  assert.equal(path.resolve(root, escaping), sibling, 'fixture: the escaping path really resolves to the outside sibling');
+  let view;
+  assert.doesNotThrow(() => { view = recall.readExclusionView(root, [{ file: escaping, type: 'Page' }]); });
+  assert.deepEqual(view[escaping] || {}, {}, 'a deep escape is unflagged — its outside `stale:` flag is never read');
+});
+
+test('readExclusionView (#26): a legitimate in-root page is still read normally (no regression)', () => {
+  const root = installRoot('wrxn-excl-inroot-');
+  writeWikiPage(root, '.wrxn/wiki/concepts/real.md', { stale: 'concepts/gone.md' });
+  const f = '.wrxn/wiki/concepts/real.md';
+  const view = recall.readExclusionView(root, [{ file: f, type: 'Page' }]);
+  assert.equal(view[f] && view[f].stale, 'concepts/gone.md', 'a genuinely-in-root page is read and its flag captured');
+});
+
+test('recallFromDoor (#26): an escaping candidate fails open — its outside `stale:` flag cannot retire it', async () => {
+  const root = installRoot('wrxn-recall-e2e-traversal-');
+  writeEndpoint(root, { pid: process.pid, port: 65055 });
+  // Plant a stale-flagged file OUTSIDE the wiki root; the door returns a hit whose path escapes to it.
+  fs.mkdirSync(path.join(root, '.wrxn'), { recursive: true });
+  fs.writeFileSync(path.join(root, '.wrxn', 'evil.md'), '---\nstale: pwned\n---\n\n# evil\n');
+  const escaping = '.wrxn/wiki/../evil.md';
+  let block;
+  await assert.doesNotReject(async () => {
+    block = await recall.recallFromDoor(root, 'a prompt long enough to query the door', {
+      transport: proseDoor([escaping]),
+    });
+  }, 'an escaping candidate never makes recall throw (fail-open)');
+  assert.ok(block, 'the candidate is treated as unflagged (its outside flag was never read) → recall surfaces');
+  assert.match(block, /evil/, 'the page surfaces — the path-traversal read was refused, not honoured');
+});
+
+test('recallFromDoor (#26): a symlink INSIDE the wiki root pointing OUTSIDE is not followed to read external content', async function () {
+  const root = installRoot('wrxn-recall-e2e-symlink-');
+  writeEndpoint(root, { pid: process.pid, port: 65056 });
+  // A stale-flagged file outside the wiki root; a symlink at a legitimate in-root path points to it.
+  const outside = path.join(root, 'outside-stale.md');
+  fs.writeFileSync(outside, '---\nstale: pwned\n---\n\n# outside\n');
+  fs.mkdirSync(path.join(root, '.wrxn', 'wiki', 'concepts'), { recursive: true });
+  const linkRel = '.wrxn/wiki/concepts/link.md';
+  try {
+    fs.symlinkSync(outside, path.join(root, linkRel));
+  } catch (e) {
+    return; // platform without symlink support (e.g. restricted Windows) → skip
+  }
+  let block;
+  await assert.doesNotReject(async () => {
+    block = await recall.recallFromDoor(root, 'a prompt long enough to query the door', {
+      transport: proseDoor([linkRel]),
+    });
+  }, 'a symlink-escaping candidate never makes recall throw (fail-open)');
+  assert.ok(block, 'the symlinked page is treated as unflagged (external content not followed) → recall surfaces');
+  assert.match(block, /link/, 'the page surfaces — the symlink to outside content was not followed for the flag');
 });
