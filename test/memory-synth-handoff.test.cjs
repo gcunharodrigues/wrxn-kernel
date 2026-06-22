@@ -36,6 +36,26 @@ function pendingPath(root) {
 function handoffMarker(root) {
   return path.join(root, '.wrxn', 'continuity', '.pending-handoff');
 }
+function synthLogPath(root) {
+  return path.join(root, '.wrxn', 'continuity', '.synth.log');
+}
+
+// A no-op injected sleep so the retry loop runs instantly in tests (no wall-clock wait).
+const noSleep = () => {};
+
+// A fake invoke whose claude engine returns `{ok:false}` for the first `failures` calls, then succeeds
+// with `text`. Records the per-engine call count so a test can prove the retry happened (and is bounded).
+function flakyClaude(failures, text) {
+  const calls = [];
+  let n = 0;
+  const invoke = async (spec) => {
+    calls.push(spec);
+    if (spec.engine !== 'claude') return { ok: false };
+    n += 1;
+    return n <= failures ? { ok: false, detail: 'transient' } : { ok: true, text };
+  };
+  return { invoke, calls };
+}
 
 // Write a transcript file + stash the spawn payload + raise the markers, exactly as the spawn hook did.
 function stageSession(root, jsonl) {
@@ -292,4 +312,167 @@ test('runHandoff writes the baton atomically (temp + rename, no stray temp left 
   const leftovers = fs.readdirSync(dir).filter((f) => f.includes('.tmp') || f.endsWith('~'));
   assert.deepEqual(leftovers, [], 'no temp artifact is left in the continuity dir (rename was atomic)');
   assert.ok(fs.existsSync(batonPath(root)), 'the final baton exists at latest.md');
+});
+
+// ── synth-handoff-fix-01 AC1+AC3: a transient first-call engine failure is RETRIED → baton still written ──
+// The detached SessionEnd child's first `claude -p` call after the parent tears down intermittently
+// returns no output (`ok:false`). A single flaky call must no longer cost the whole handoff: the engine
+// spawn is retried (bounded), so a fail-then-succeed run writes the baton as normal. Driven through the
+// existing injectable `invoke` seam with a no-op injected sleep — no real `claude -p`, no wall sleep.
+
+test('runHandoff retries a transient engine failure (ok:false) then writes the baton on the retry', async () => {
+  const root = tmp('wrxn-handoff-retry1-');
+  stageSession(root, REAL_SESSION);
+  // claude fails once (the transient first-call-after-parent-exit), then succeeds.
+  const { invoke, calls } = flakyClaude(1, '**TL;DR** resumed after one transient miss\n**Next step** ship it');
+
+  const res = await synth.runHandoff({ root, invoke, sleep: noSleep });
+
+  assert.equal(res.wrote, true, 'the retry recovered the handoff and the baton was written');
+  assert.match(fs.readFileSync(batonPath(root), 'utf8'), /resumed after one transient miss/, 'the recovered handoff is the baton');
+  assert.equal(calls.length, 2, 'the engine was retried once (2 attempts: the transient miss + the success)');
+});
+
+test('runHandoff recovers from TWO transient failures (3rd attempt succeeds) and writes the baton', async () => {
+  const root = tmp('wrxn-handoff-retry2-');
+  stageSession(root, REAL_SESSION);
+  const { invoke, calls } = flakyClaude(2, '**TL;DR** recovered on the third attempt');
+
+  const res = await synth.runHandoff({ root, invoke, sleep: noSleep });
+
+  assert.equal(res.wrote, true, 'two transient misses are within the retry budget → baton written');
+  assert.match(fs.readFileSync(batonPath(root), 'utf8'), /recovered on the third attempt/);
+  assert.equal(calls.length, 3, 'three total attempts (2 retries) were spent');
+});
+
+// ── synth-handoff-fix-01 AC3+AC4: retries are BOUNDED and the fail-safe is intact ──
+// When every attempt fails (a real engine outage, not a transient blip), the retry must give up after a
+// bounded number of attempts, write NO baton, leave any prior baton untouched, and STILL clear the
+// markers (the existing fail-safe). The retry only adds bounded attempts before that fail-safe.
+
+test('runHandoff gives up after 3 bounded attempts on a persistent failure, preserves the prior baton, clears markers', async () => {
+  const root = tmp('wrxn-handoff-allfail-');
+  stageSession(root, REAL_SESSION);
+  // a prior good baton exists — it must survive a failed synth untouched (never replaced with nothing).
+  const prior = '**TL;DR** the PREVIOUS session baton that must be preserved\n';
+  fs.writeFileSync(batonPath(root), prior);
+  // claude never succeeds and there is no gemini key → only claude is attempted, and it is bounded.
+  const { invoke, calls } = flakyClaude(99, 'NEVER REACHED');
+
+  const res = await synth.runHandoff({ root, invoke, sleep: noSleep });
+
+  assert.equal(res.wrote, false, 'a persistent failure writes no baton (fail-safe)');
+  assert.equal(res.reason, 'no-engine', 'the give-up reason is no-engine');
+  assert.equal(calls.length, 3, 'attempts are BOUNDED to 3 total (no infinite retry)');
+  assert.equal(fs.readFileSync(batonPath(root), 'utf8'), prior, 'the prior baton is preserved byte-for-byte');
+  assert.ok(!fs.existsSync(handoffMarker(root)), 'the handoff marker is still cleared so session-start never hangs');
+  assert.ok(!fs.existsSync(pendingPath(root)), 'the pending marker is still cleared');
+});
+
+// ── synth-handoff-fix-01 AC2: the gemini-no-key early-out is UNCHANGED — no retry, no request ──
+// The retry only fires for a transient `ok:false`. A `gemini` engine with no API key must still fail
+// immediately to its own path (no key → no request) — it never reaches the invoker, retried or not.
+
+test('runHandoff: a gemini fallback with no API key is never invoked and is not retried (no key → no request)', async () => {
+  const root = tmp('wrxn-handoff-nokey-');
+  stageSession(root, REAL_SESSION);
+  // claude persistently fails; the gemini fallback has no key (no .env). Capture every engine reached.
+  const { invoke, calls } = flakyClaude(99, 'NEVER');
+
+  const res = await synth.runHandoff({ root, invoke, sleep: noSleep });
+
+  assert.equal(res.wrote, false);
+  assert.ok(calls.length >= 1 && calls.every((c) => c.engine === 'claude'), 'gemini is NEVER invoked without a key — only claude attempts were made');
+});
+
+// ── synth-handoff-fix-01 AC5: every synth run appends ONE outcome line to .wrxn/continuity/.synth.log ──
+// A missed baton must never be silent again. Each run records task, engine, attempts, and outcome
+// (wrote / trivial / no-engine / error). The log is install state under .wrxn/continuity/ (gitignored,
+// never shipped). The write is best-effort/fail-open — a logging fault never affects the handoff.
+
+function readSynthLogLines(root) {
+  return fs.readFileSync(synthLogPath(root), 'utf8').trim().split('\n').filter(Boolean);
+}
+
+test('runHandoff appends one synth-log line on a successful write (task, engine, attempts, outcome=wrote)', async () => {
+  const root = tmp('wrxn-handoff-log-ok-');
+  stageSession(root, REAL_SESSION);
+  const { invoke } = fakeInvoke({ claude: { ok: true, text: '**TL;DR** logged' } });
+
+  await synth.runHandoff({ root, invoke, sleep: noSleep });
+
+  const lines = readSynthLogLines(root);
+  assert.equal(lines.length, 1, 'exactly one outcome line per synth run');
+  const line = lines[0];
+  assert.match(line, /handoff/, 'the task is recorded');
+  assert.match(line, /claude/, 'the producing engine is recorded');
+  assert.match(line, /attempts=1/, 'the attempt count is recorded');
+  assert.match(line, /wrote/, 'the outcome is recorded');
+  assert.match(line, /sid-x/, 'the session id from the stash is recorded');
+});
+
+test('the synth-log line records the real attempt count when a transient failure was retried', async () => {
+  const root = tmp('wrxn-handoff-log-retry-');
+  stageSession(root, REAL_SESSION);
+  const { invoke } = flakyClaude(1, '**TL;DR** logged after a retry'); // one transient miss, then success on attempt 2.
+
+  await synth.runHandoff({ root, invoke, sleep: noSleep });
+
+  const lines = readSynthLogLines(root);
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /attempts=2/, 'the log shows 2 attempts (the retry is visible)');
+  assert.match(lines[0], /wrote/);
+});
+
+test('runHandoff logs outcome=no-engine when every attempt fails (the miss is never silent)', async () => {
+  const root = tmp('wrxn-handoff-log-fail-');
+  stageSession(root, REAL_SESSION);
+  const { invoke } = fakeInvoke({ claude: { ok: false }, gemini: { ok: false } });
+
+  await synth.runHandoff({ root, invoke, sleep: noSleep });
+
+  const lines = readSynthLogLines(root);
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /no-engine/, 'a failed synth is recorded as no-engine, so the operator can see the miss');
+});
+
+test('runHandoff logs outcome=trivial for a trivial session (engine recorded as "-", no model call)', async () => {
+  const root = tmp('wrxn-handoff-log-trivial-');
+  stageSession(root, JSON.stringify({ type: 'user', message: { role: 'user', content: 'hi' } }));
+  const { invoke, calls } = fakeInvoke({ claude: { ok: true, text: 'NEVER' } });
+
+  await synth.runHandoff({ root, invoke, sleep: noSleep });
+
+  assert.equal(calls.length, 0, 'a trivial session spends no model call');
+  const lines = readSynthLogLines(root);
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /trivial/, 'the trivial skip is logged');
+  assert.match(lines[0], /attempts=0/, 'no attempts were spent on a trivial session');
+});
+
+test('the synth log is best-effort: a logging fault never blocks the baton write or the marker clear', async () => {
+  const root = tmp('wrxn-handoff-log-failopen-');
+  stageSession(root, REAL_SESSION);
+  // make the log path UNWRITABLE: pre-create .synth.log as a directory so appendFileSync throws.
+  fs.mkdirSync(synthLogPath(root));
+  const { invoke } = fakeInvoke({ claude: { ok: true, text: '**TL;DR** baton survives a broken log' } });
+
+  const res = await synth.runHandoff({ root, invoke, sleep: noSleep });
+
+  assert.equal(res.wrote, true, 'the baton is still written even though the log write faulted');
+  assert.match(fs.readFileSync(batonPath(root), 'utf8'), /baton survives a broken log/);
+  assert.ok(!fs.existsSync(handoffMarker(root)), 'markers are still cleared despite the logging fault');
+});
+
+// ── synth-handoff-fix-01 AC6: the handoff prompt forbids any preamble leaking into the durable baton ──
+// A flaky run could leak a "Let me synthesize…" preamble or a thinking block into latest.md. The handoff
+// prompt must explicitly instruct the model to emit ONLY the handoff document — paralleling the dream
+// prompt's "STRICT JSON … no commentary" directive. Pin the directive so it cannot regress.
+
+test('HANDOFF_PROMPT contains an explicit output-only directive (no preamble / no commentary / no thinking)', () => {
+  const p = synth.HANDOFF_PROMPT;
+  assert.match(p, /output only/i, 'the prompt says to output ONLY the handoff document');
+  assert.match(p, /\bpreamble\b/i, 'the prompt forbids a preamble');
+  assert.match(p, /\bcommentary\b/i, 'the prompt forbids commentary');
+  assert.match(p, /\bthinking\b/i, 'the prompt forbids a thinking block');
 });

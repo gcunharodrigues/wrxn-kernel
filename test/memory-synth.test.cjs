@@ -164,11 +164,20 @@ function fakeInvoke(byEngine) {
 
 const DEFAULT_CFG = synth.DEFAULTS;
 
+// A no-op injected sleep so the transient-spawn retry (synth-handoff-fix-01) runs instantly here — a
+// failing engine is now retried before fallback, so these contract tests inject the sleep to stay fast.
+const noSleep = () => {};
+
 test('synthesize falls back to the secondary engine when the primary fails, in order', async () => {
   const { invoke, calls } = fakeInvoke({ claude: { ok: false }, gemini: { ok: true, text: 'FALLBACK HANDOFF' } });
-  const text = await synth.synthesize({ task: 'handoff', prompt: 'P', blob: 'B', config: DEFAULT_CFG, apiKey: 'KEY', invoke });
+  const text = await synth.synthesize({ task: 'handoff', prompt: 'P', blob: 'B', config: DEFAULT_CFG, apiKey: 'KEY', invoke, sleep: noSleep });
   assert.equal(text, 'FALLBACK HANDOFF', 'the fallback engine text is returned');
-  assert.deepEqual(calls.map((c) => c.engine), ['claude', 'gemini'], 'primary (claude) tried before fallback (gemini)');
+  // claude is exhausted (it is retried on a transient failure) BEFORE gemini is reached, and gemini wins.
+  const seq = calls.map((c) => c.engine);
+  const firstGemini = seq.indexOf('gemini');
+  assert.ok(firstGemini > 0, 'gemini (the fallback) is tried, and only after claude');
+  assert.ok(seq.slice(0, firstGemini).every((e) => e === 'claude'), 'every attempt before the fallback was the claude primary');
+  assert.equal(seq[seq.length - 1], 'gemini', 'the fallback engine is the last one tried');
 });
 
 test('synthesize short-circuits on a successful primary — the fallback is never attempted', async () => {
@@ -184,10 +193,11 @@ test('synthesize degrades to null when the CLI is unavailable AND there is no ke
   const { invoke, calls } = fakeInvoke({ claude: { ok: false }, gemini: { ok: true, text: 'WOULD-LEAK' } });
   let text;
   await assert.doesNotReject(async () => {
-    text = await synth.synthesize({ task: 'handoff', prompt: 'P', blob: 'B', config: DEFAULT_CFG, apiKey: undefined, invoke });
+    text = await synth.synthesize({ task: 'handoff', prompt: 'P', blob: 'B', config: DEFAULT_CFG, apiKey: undefined, invoke, sleep: noSleep });
   });
   assert.equal(text, null, 'no engine available → null, so the caller writes nothing');
-  assert.deepEqual(calls.map((c) => c.engine), ['claude'], 'gemini is never invoked without an API key (key missing fails that engine)');
+  // claude is exhausted (retried) but gemini is NEVER reached without a key (no key → no request).
+  assert.ok(calls.length >= 1 && calls.every((c) => c.engine === 'claude'), 'only the claude primary is ever invoked; gemini is never invoked without an API key');
 });
 
 test('synthesize never throws when an engine invoker throws — it degrades to the next engine, then to null', async () => {
@@ -195,7 +205,7 @@ test('synthesize never throws when an engine invoker throws — it degrades to t
   const { invoke } = fakeInvoke({ claude: boom, gemini: boom });
   let text;
   await assert.doesNotReject(async () => {
-    text = await synth.synthesize({ task: 'handoff', prompt: 'P', blob: 'B', config: DEFAULT_CFG, apiKey: 'KEY', invoke });
+    text = await synth.synthesize({ task: 'handoff', prompt: 'P', blob: 'B', config: DEFAULT_CFG, apiKey: 'KEY', invoke, sleep: noSleep });
   });
   assert.equal(text, null);
 });

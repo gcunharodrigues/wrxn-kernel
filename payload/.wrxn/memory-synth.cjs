@@ -70,7 +70,11 @@ FORMAT (markdown, exactly these sections; omit one only if empty):
 **Files/artifacts** - created/changed, with exact path.
 **Next step** - the immediate, concrete next action.
 **Open / to confirm** - pending items, blockers, questions.
-**Don't repeat** - dead ends already tried / gotchas discovered.`;
+**Don't repeat** - dead ends already tried / gotchas discovered.
+
+OUTPUT (critical — this text becomes the durable handoff verbatim):
+- Output ONLY the handoff document itself: start at the first "**TL;DR**" line.
+- NO preamble, NO commentary, NO thinking, NO "Let me…"/"Here is…" lead-in, NO closing remarks, NO code fences around the document. Emit the markdown and nothing else.`;
 
 // The dream task: propose durable wiki pages from the session, each grounded in a SUBSTANTIVE VERBATIM
 // quote copied from the transcript. The quote rule is load-bearing: auto-dream is unattended, so the only
@@ -361,42 +365,89 @@ async function defaultInvoke(spec) {
 // caller writes nothing (fail-safe). NEVER throws — an invoker error / missing key / missing CLI is a
 // per-engine failure that degrades to the next engine, then to null.
 
-/**
- * Run a single engine through the invoker; return its text or null. A `gemini` engine with no API key
- * fails WITHOUT calling the invoker (no key → no request). An invoker that throws is caught → null.
- */
-async function runEngine(engine, { prompt, blob, apiKey, invoke }) {
-  if (!engine || !engine.engine) return null;
+// ── transient-spawn retry (synth-handoff-fix-01) ────────────────────────────────
+// The detached SessionEnd child's FIRST `claude -p` call after the parent session tears down
+// intermittently returns no output (`ok:false`), so a single flaky call used to cost the whole handoff
+// baton (the dream call moments later succeeds). We retry the engine SPAWN at this single seam, so both
+// the handoff and the dream calls are hardened by one change. A transient failure returns fast, so the
+// bounded retries stay well within the 180s session-start hold-cap. Only a transient `ok:false` is
+// retried — the `gemini`-no-key early-out below still fails immediately (no key → no request).
+const ENGINE_ATTEMPTS = 3; // total attempts (1 try + 2 retries).
+const ENGINE_BACKOFF_MS = 1500; // fixed short backoff between attempts.
+
+// The real backoff (the production path). Atomics.wait blocks without a busy-spin (node stdlib). Tests
+// inject a no-op sleep and never reach this. Mirrors session-start.cjs's sleepMs.
+function defaultSleep(ms) {
   try {
-    let spec;
-    if (engine.engine === 'claude') {
-      spec = buildClaudeSpec({ model: engine.model, prompt, blob });
-    } else if (engine.engine === 'gemini') {
-      if (!apiKey) return null; // missing key fails this engine (→ fallback / null), never throws.
-      spec = buildGeminiSpec({ model: engine.model, prompt, blob, apiKey });
-    } else {
-      return null; // unknown engine name → skip.
-    }
-    const r = await invoke(spec);
-    const text = r && r.ok && typeof r.text === 'string' ? r.text.trim() : '';
-    return text || null;
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
   } catch {
-    return null;
+    /* SharedArrayBuffer unavailable → degrade to no wait (the bounded attempt count still caps us) */
   }
 }
 
 /**
+ * Run a single engine through the invoker; return `{ text, attempts }` (text null when no output). A
+ * `gemini` engine with no API key fails WITHOUT calling the invoker (no key → no request, attempts 0). A
+ * transient `ok:false` is retried up to ENGINE_ATTEMPTS with a fixed backoff via the injected sleep; the
+ * first non-empty text wins. An invoker that throws is caught → counts as a failed attempt, then null.
+ * @returns {Promise<{ text: string|null, attempts: number }>}
+ */
+async function runEngine(engine, { prompt, blob, apiKey, invoke, sleep = defaultSleep }) {
+  if (!engine || !engine.engine) return { text: null, attempts: 0 };
+  let spec;
+  if (engine.engine === 'claude') {
+    spec = buildClaudeSpec({ model: engine.model, prompt, blob });
+  } else if (engine.engine === 'gemini') {
+    if (!apiKey) return { text: null, attempts: 0 }; // missing key fails this engine (→ fallback / null), no request, no retry.
+    spec = buildGeminiSpec({ model: engine.model, prompt, blob, apiKey });
+  } else {
+    return { text: null, attempts: 0 }; // unknown engine name → skip.
+  }
+  let attempts = 0;
+  for (let i = 0; i < ENGINE_ATTEMPTS; i++) {
+    attempts += 1;
+    let text = null;
+    try {
+      const r = await invoke(spec);
+      const t = r && r.ok && typeof r.text === 'string' ? r.text.trim() : '';
+      text = t || null;
+    } catch {
+      text = null; // an invoker throw is a transient failure for this attempt (degrade, never throw).
+    }
+    if (text) return { text, attempts };
+    if (i < ENGINE_ATTEMPTS - 1) await sleep(ENGINE_BACKOFF_MS); // back off before the next attempt (not after the last).
+  }
+  return { text: null, attempts };
+}
+
+/**
+ * Synthesize text for `task` from `prompt` + `blob`, resolving the engine per task (primary → fallback),
+ * also reporting WHICH engine produced the text and HOW MANY attempts the producing engine spent (the
+ * total attempts across all engines tried when none produced output) — the diagnosability the synth log
+ * records. The transient-spawn retry lives in runEngine, so both engines are hardened here.
+ * @param {{ task:string, prompt:string, blob:string, config?:object, apiKey?:string, invoke?:Function, sleep?:Function }} opts
+ * @returns {Promise<{ text:string|null, engine:string|null, attempts:number }>}
+ */
+async function synthesizeDetailed({ task, prompt, blob, config, apiKey, invoke = defaultInvoke, sleep }) {
+  const { primary, fallback } = resolveTask(config || DEFAULTS, task);
+  let attempts = 0;
+  for (const engine of [primary, fallback]) {
+    const r = await runEngine(engine, { prompt, blob, apiKey, invoke, sleep });
+    attempts += r.attempts;
+    if (r.text) return { text: r.text, engine: engine && engine.engine, attempts };
+  }
+  return { text: null, engine: null, attempts };
+}
+
+/**
  * Synthesize text for `task` from `prompt` + `blob`, resolving the engine per task (primary → fallback).
- * @param {{ task:string, prompt:string, blob:string, config?:object, apiKey?:string, invoke?:Function }} opts
+ * Thin text-only wrapper over synthesizeDetailed (preserves the slice-02/04 contract).
+ * @param {{ task:string, prompt:string, blob:string, config?:object, apiKey?:string, invoke?:Function, sleep?:Function }} opts
  * @returns {Promise<string|null>} the synthesized text, or null if no engine produced any.
  */
-async function synthesize({ task, prompt, blob, config, apiKey, invoke = defaultInvoke }) {
-  const { primary, fallback } = resolveTask(config || DEFAULTS, task);
-  for (const engine of [primary, fallback]) {
-    const text = await runEngine(engine, { prompt, blob, apiKey, invoke });
-    if (text) return text;
-  }
-  return null;
+async function synthesize(opts) {
+  const { text } = await synthesizeDetailed(opts);
+  return text;
 }
 
 // ── the handoff path (auto-memory-03): stash → blob → synth → baton → clear marker ──
@@ -410,11 +461,39 @@ const CONTINUITY_REL = ['.wrxn', 'continuity'];
 const BATON = 'latest.md';
 const PENDING = '.pending';
 const PENDING_HANDOFF = '.pending-handoff';
+// One outcome line per synth run lands here so a missed baton is never silent (synth-handoff-fix-01).
+// Install state under .wrxn/continuity/ — gitignored by `wrxn init`, NEVER shipped in the payload manifest.
+const SYNTH_LOG = '.synth.log';
 // Below this many chars of blob the session is trivial/empty — write nothing, no model spend (PRD story 18).
 const TRIVIAL_BLOB_MIN = 40;
 
 function continuityPath(root, ...rel) {
   return path.join(root, ...CONTINUITY_REL, ...rel);
+}
+
+/**
+ * Append exactly one tab-separated outcome line to `.wrxn/continuity/.synth.log` — timestamp, session id
+ * (or `-`), task, engine (or `-`), attempts, outcome (`wrote`|`trivial`|`no-engine`|`error…`). Best-effort
+ * and FAIL-OPEN: a logging fault is swallowed so it can NEVER affect the handoff (the diagnosability log
+ * must not become a new failure mode). One `appendFileSync` per run.
+ * @param {{ sessionId?:string, task:string, engine?:string|null, attempts?:number, outcome:string }} rec
+ */
+function appendSynthLog(root, { sessionId, task, engine, attempts, outcome }) {
+  try {
+    const dir = continuityPath(root);
+    fs.mkdirSync(dir, { recursive: true });
+    const line = [
+      new Date().toISOString(),
+      sessionId || '-',
+      task || '-',
+      engine || '-',
+      `attempts=${attempts || 0}`,
+      outcome || '-',
+    ].join('\t');
+    fs.appendFileSync(path.join(dir, SYNTH_LOG), line + '\n');
+  } catch {
+    /* the log is best-effort — a write fault must never affect the handoff */
+  }
 }
 
 // ── secret redaction (PRD story 19) ─────────────────────────────────────────────
@@ -493,12 +572,16 @@ function writeBatonAtomic(root, body) {
  * @param {{ root:string, invoke?:Function }} opts
  * @returns {Promise<{ wrote:boolean, blob:string, reason?:string }>}
  */
-async function runHandoff({ root, invoke = defaultInvoke }) {
+async function runHandoff({ root, invoke = defaultInvoke, sleep }) {
   let wrote = false;
   let reason;
   let safeBlob = ''; // the redacted blob, returned so dream can reuse it in memory (auto-memory-04).
+  let engine = null; // which engine produced the baton (for the synth log).
+  let attempts = 0; // total engine attempts spent (retries included) — for the synth log.
+  let sessionId; // the session id from the stash, if present (for the synth log).
   try {
     const stash = readPending(root);
+    sessionId = stash.session_id;
     const blob = stash.transcript_path ? readTranscriptBlob(stash.transcript_path) : '';
     if (blob.trim().length < TRIVIAL_BLOB_MIN) {
       reason = 'trivial'; // empty/near-empty session — write nothing, spend no model call.
@@ -506,9 +589,11 @@ async function runHandoff({ root, invoke = defaultInvoke }) {
       const config = loadConfig(root);
       const apiKey = loadEnv(root).GEMINI_API_KEY;
       safeBlob = redactSecrets(blob); // scrub BEFORE the blob egresses to the external model (claude -p / off-box gemini POST).
-      const text = await synthesize({ task: 'handoff', prompt: PROMPTS.handoff, blob: safeBlob, config, apiKey, invoke });
-      if (text && text.trim()) {
-        const body = redactSecrets(text); // scrub secrets BEFORE the durable baton is written.
+      const r = await synthesizeDetailed({ task: 'handoff', prompt: PROMPTS.handoff, blob: safeBlob, config, apiKey, invoke, sleep });
+      engine = r.engine;
+      attempts = r.attempts;
+      if (r.text && r.text.trim()) {
+        const body = redactSecrets(r.text); // scrub secrets BEFORE the durable baton is written.
         writeBatonAtomic(root, body.endsWith('\n') ? body : body + '\n');
         wrote = true;
       } else {
@@ -518,6 +603,8 @@ async function runHandoff({ root, invoke = defaultInvoke }) {
   } catch (e) {
     reason = `error: ${(e && e.message) || e}`;
   } finally {
+    // One outcome line per synth run, so a missed baton is never silent (best-effort/fail-open).
+    appendSynthLog(root, { sessionId, task: 'handoff', engine, attempts, outcome: wrote ? 'wrote' : (reason || 'no-engine') });
     // Clear the handoff gate FIRST (releases SessionStart), then the pending marker. Always runs.
     rmQuiet(continuityPath(root, PENDING_HANDOFF));
     rmQuiet(continuityPath(root, PENDING));
