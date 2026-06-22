@@ -139,4 +139,77 @@ function rewardFactor(slot) {
   return 2 * mean; // centered factor ∈ (0,2), exactly 1 at zero evidence
 }
 
-module.exports = { updateReward, rewardFactor, COUNT_CAP };
+// ── starvedUseful: the learning-moat WATCHDOG (S4) ───────────────────────────────────
+// A pure, deterministic, TOTAL canary over the (reward, surfaced-log) sidecar pair. It counts the
+// STARVED-USEFUL set: pages the reward signal has learned are useful (high posterior) yet recall RARELY
+// surfaces (low surfaced-count) — because they sit below recon's floor, where a kernel-side re-rank
+// cannot lift them. A growing set means the cheap kernel-side approach has hit its ceiling; the count is
+// the data-driven signal toward graduating a recon reward term (option b). This module only COMPUTES the
+// count — the handoff emission lives in the session-end shell (synapse-engine), the SAME channel as
+// harvest's curation-debt nudge. Read-only: it never mutates the sidecars or touches recall ranking.
+
+// "High reward" REUSES the value axis's posterior (rewardFactor = 2·mean ⇒ mean = factor/2 — never a
+// second notion). R_HIGH is the posterior-mean bar for "learned useful"; S_LOW the surfaced-count bar
+// for "rarely surfaced". Both are PLACEHOLDERS pending the lift gate — recorded with the gate verdict,
+// exactly like COUNT_CAP and the decay half-life (the PRD records thresholds as gate-tuned, not guessed).
+// They exist now only so the canary is bounded and deterministic from day one, never as tuned values.
+const R_HIGH = 0.75; // posterior mean ≥ 0.75 (⇔ rewardFactor ≥ 1.5) — clearly net-positive evidence
+const S_LOW = 1; // surfaced in ≤ 1 recorded session — recall almost never brings it up
+
+// Build a { page → number-of-sessions-that-surfaced-it } map from the surfaced-log
+// ({ "<session_id>": ["<wiki-rel>", …] }). Each session credits a page AT MOST ONCE (a within-session
+// dupe is one surfacing), mirroring recall-surface's per-session de-dup. TOTAL: a non-object log, a
+// non-array session entry, or a non-string/blank page key contributes nothing — never throws.
+function surfacedCounts(surfaced) {
+  const counts = Object.create(null);
+  if (!surfaced || typeof surfaced !== 'object' || Array.isArray(surfaced)) return counts;
+  for (const sid of Object.keys(surfaced)) {
+    const entry = surfaced[sid];
+    if (!Array.isArray(entry)) continue;
+    const seen = new Set();
+    for (const raw of entry) {
+      if (!isWikiRelKey(raw) || seen.has(raw)) continue;
+      seen.add(raw);
+      counts[raw] = (counts[raw] || 0) + 1;
+    }
+  }
+  return counts;
+}
+
+/**
+ * PURE watchdog: count the STARVED-USEFUL pages over the (reward, surfaced) sidecar pair. A page is
+ * starved-useful when BOTH hold:
+ *   · posterior(reward[page]) ≥ rHigh   — learned useful (the SAME posterior the value axis uses)
+ *   · surfaced-count(page)    ≤ sLow    — rarely surfaced across the log (sits below recon's floor)
+ * Returns { count, pages } with `pages` sorted (DETERMINISTIC) and `count = pages.length`. TOTAL: any
+ * garbage (non-object reward/surfaced, malformed slot, garbage opts) yields { count: 0, pages: [] } and
+ * never throws. Thresholds default to the named constants R_HIGH / S_LOW; opts may override them for the
+ * gate's tuning (out-of-range / non-finite → the constant default).
+ *
+ * @param {Record<string,{s:number,f:number}>} reward  per-page Beta-Bernoulli counts (read-only)
+ * @param {Record<string,string[]>} surfaced           per-session surfaced-log (read-only)
+ * @param {{rHigh?:number, sLow?:number}} [opts]        optional threshold overrides (gate-tuned)
+ * @returns {{count:number, pages:string[]}}
+ */
+function starvedUseful(reward, surfaced, opts) {
+  const rh = Number(opts && opts.rHigh);
+  const rHigh = Number.isFinite(rh) && rh > 0 && rh < 1 ? rh : R_HIGH;
+  const sl = Number(opts && opts.sLow);
+  const sLow = Number.isFinite(sl) && sl >= 0 ? sl : S_LOW;
+
+  const counts = surfacedCounts(surfaced);
+  const pages = [];
+  if (reward && typeof reward === 'object' && !Array.isArray(reward)) {
+    for (const key of Object.keys(reward)) {
+      if (!isWikiRelKey(key)) continue;
+      const posterior = rewardFactor(reward[key]) / 2; // SAME posterior as the value axis (factor = 2·mean)
+      if (posterior < rHigh) continue; // not learned-useful
+      if ((counts[key] || 0) > sLow) continue; // surfaced often enough — recall already reaches it
+      pages.push(key);
+    }
+  }
+  pages.sort();
+  return { count: pages.length, pages };
+}
+
+module.exports = { updateReward, rewardFactor, starvedUseful, COUNT_CAP, R_HIGH, S_LOW };

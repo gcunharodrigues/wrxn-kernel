@@ -642,3 +642,143 @@ test('end-to-end: a malformed harvest report → handoff intact, dream line, NO 
   assert.match(ctx, /dream skill/);                         // dream line intact
   assert.doesNotMatch(ctx, /harvest skill/);                // malformed report → no debt → no harvest line
 });
+
+// ── S4: starved-useful watchdog nudge in the handoff directive (kernel #15) ───────────
+// The watchdog count (reward.starvedUseful over the reward + surfaced-log sidecars) rides the SAME
+// handoff channel as harvest's curation-debt nudge: handoffDirective appends ONE canary line to
+// [HANDOFF REQUIRED] when the starved-useful count >= STARVED_NUDGE_THRESHOLD, and stays SILENT below it.
+// The line states the count and that it is (b)-pressure — data toward graduating a recon reward term.
+// Canary only: it changes no recall ranking and no reward counts.
+
+test('STARVED_NUDGE_THRESHOLD is an exported named positive-integer constant', () => {
+  assert.equal(typeof engine.STARVED_NUDGE_THRESHOLD, 'number');
+  assert.ok(engine.STARVED_NUDGE_THRESHOLD >= 1 && Number.isInteger(engine.STARVED_NUDGE_THRESHOLD));
+});
+
+test('handoffDirective appends the starved-useful line at/above the threshold, stating the count + (b)-pressure', () => {
+  const n = engine.STARVED_NUDGE_THRESHOLD;
+  const d = engine.handoffDirective(0.5, 0.4, false, n);
+  assert.match(d, /\[HANDOFF REQUIRED\]/);
+  assert.match(d, /starved-useful/i);        // names the watchdog signal
+  assert.match(d, new RegExp(`\\b${n}\\b`));  // states the count
+  assert.match(d, /\(b\)-pressure/);          // the option-(b) graduation signal
+  assert.match(d, /recon reward term/i);      // … toward a recon reward term
+  assert.ok(d.indexOf('dream skill') < d.indexOf('starved-useful'), 'the canary rides after the dream line');
+});
+
+test('handoffDirective is SILENT below the threshold (and at zero / omitted) — no starved-useful line', () => {
+  const n = engine.STARVED_NUDGE_THRESHOLD;
+  assert.doesNotMatch(engine.handoffDirective(0.5, 0.4, false, n - 1), /starved-useful/i);
+  assert.doesNotMatch(engine.handoffDirective(0.5, 0.4, false, 0), /starved-useful/i);
+  assert.doesNotMatch(engine.handoffDirective(0.5, 0.4, false), /starved-useful/i); // arg omitted → silent
+});
+
+test('the starved-useful canary coexists with the harvest line without disturbing the dream→harvest order', () => {
+  const n = engine.STARVED_NUDGE_THRESHOLD;
+  const d = engine.handoffDirective(0.5, 0.4, true, n); // both curation debt AND starved-useful
+  assert.ok(d.indexOf('dream skill') < d.indexOf('harvest skill'), 'dream precedes harvest (unchanged)');
+  assert.match(d, /starved-useful/i);
+});
+
+// starvedUsefulSignal(root) is the thin, fail-open probe (mirrors hasCurationDebt): it reads the two
+// STATE sidecars (.wrxn/reward.json, .wrxn/surfaced.json) read-only and returns the pure watchdog count.
+// Any fault (missing/corrupt sidecar) → 0 (no nudge, no throw). Only invoked when a handoff is firing.
+
+// Write the reward + surfaced-log STATE sidecars under <root>/.wrxn (undefined arg → skip that sidecar).
+function writeSidecars(root, rewardMap, surfacedMap) {
+  const dir = path.join(root, '.wrxn');
+  fs.mkdirSync(dir, { recursive: true });
+  if (rewardMap !== undefined) fs.writeFileSync(path.join(dir, 'reward.json'), JSON.stringify(rewardMap));
+  if (surfacedMap !== undefined) fs.writeFileSync(path.join(dir, 'surfaced.json'), JSON.stringify(surfacedMap));
+}
+
+test('starvedUsefulSignal counts starved-useful pages over the reward + surfaced sidecars', () => {
+  const root = tmp('wrxn-starved-sig-');
+  writeSidecars(
+    root,
+    {
+      'concepts/a.md': { s: 20, f: 0 }, // high posterior, never surfaced → starved
+      'concepts/b.md': { s: 20, f: 0 }, // high posterior, never surfaced → starved
+      'concepts/c.md': { s: 20, f: 0 }, // high posterior, never surfaced → starved
+      'concepts/surfaced.md': { s: 20, f: 0 }, // high posterior BUT surfaced in 2 sessions → NOT starved
+    },
+    { s1: ['concepts/surfaced.md'], s2: ['concepts/surfaced.md'] }
+  );
+  assert.equal(engine.starvedUsefulSignal(root), 3, 'a, b, c are learned-useful & unsurfaced; surfaced.md is not starved');
+});
+
+test('starvedUsefulSignal is fail-open: missing or corrupt sidecars → 0, never a throw', () => {
+  const none = tmp('wrxn-starved-none-'); // no .wrxn at all
+  assert.doesNotThrow(() => engine.starvedUsefulSignal(none));
+  assert.equal(engine.starvedUsefulSignal(none), 0);
+
+  const bad = tmp('wrxn-starved-bad-');
+  const dir = path.join(bad, '.wrxn');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'reward.json'), 'not json{{{');
+  fs.writeFileSync(path.join(dir, 'surfaced.json'), 'also bad');
+  assert.doesNotThrow(() => engine.starvedUsefulSignal(bad));
+  assert.equal(engine.starvedUsefulSignal(bad), 0);
+});
+
+test('end-to-end: a firing handoff with >= threshold starved-useful pages shows the canary line after dream', () => {
+  const root = freshInstall('wrxn-ho-starved-');
+  const tx = writeTranscript(root, USAGE_90K);
+  const home = fakeHome('wrxn-home-starved-', root, ['claude-opus-4-8']); // 45% of 200k → handoff fires
+  const n = engine.STARVED_NUDGE_THRESHOLD;
+  const rewardMap = {};
+  for (let i = 0; i < n; i++) rewardMap[`concepts/starved-${i}.md`] = { s: 20, f: 0 }; // n high-reward, unsurfaced
+  writeSidecars(root, rewardMap, {}); // empty surfaced-log → all n are starved
+  const ctx = inject(
+    { prompt: 'continue', cwd: root, transcript_path: tx },
+    { CLAUDE_PROJECT_DIR: root, HOME: home, WRXN_RULES_BUDGET: '100000' }
+  );
+  assert.match(ctx, /\[HANDOFF REQUIRED\]/);
+  assert.match(ctx, /starved-useful/i);
+  assert.match(ctx, new RegExp(`\\b${n}\\b`)); // the count is stated
+  assert.match(ctx, /\(b\)-pressure/);
+  assert.ok(ctx.indexOf('dream skill') < ctx.indexOf('starved-useful'), 'the canary rides after the dream line');
+});
+
+test('end-to-end: a firing handoff on a fresh install (no reward sidecar) shows NO starved-useful canary', () => {
+  const root = freshInstall('wrxn-ho-nostarve-');
+  const tx = writeTranscript(root, USAGE_90K);
+  const home = fakeHome('wrxn-home-nostarve-', root, ['claude-opus-4-8']);
+  // no sidecars written — a fresh install has no .wrxn/reward.json
+  const ctx = inject(
+    { prompt: 'continue', cwd: root, transcript_path: tx },
+    { CLAUDE_PROJECT_DIR: root, HOME: home, WRXN_RULES_BUDGET: '100000' }
+  );
+  assert.match(ctx, /\[HANDOFF REQUIRED\]/); // handoff fires
+  assert.doesNotMatch(ctx, /starved-useful/i); // … but no starved-useful pages → silent canary
+});
+
+test('end-to-end: a firing handoff with a starved count BELOW threshold stays silent', () => {
+  const root = freshInstall('wrxn-ho-belowstarve-');
+  const tx = writeTranscript(root, USAGE_90K);
+  const home = fakeHome('wrxn-home-belowstarve-', root, ['claude-opus-4-8']);
+  writeSidecars(root, { 'concepts/only-one.md': { s: 20, f: 0 } }, {}); // 1 starved < threshold
+  const ctx = inject(
+    { prompt: 'continue', cwd: root, transcript_path: tx },
+    { CLAUDE_PROJECT_DIR: root, HOME: home, WRXN_RULES_BUDGET: '100000' }
+  );
+  assert.match(ctx, /\[HANDOFF REQUIRED\]/);
+  assert.doesNotMatch(ctx, /starved-useful/i); // 1 < STARVED_NUDGE_THRESHOLD → silent
+});
+
+test('end-to-end: the starved-useful canary rides the handoff channel ONLY — silent when no handoff fires', () => {
+  const root = freshInstall('wrxn-ho-starve-nohandoff-');
+  // 20% of 200k → below the context threshold → no handoff at all
+  const tx = writeTranscript(root, { input_tokens: 40000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 0 });
+  const home = fakeHome('wrxn-home-starve-nohandoff-', root, ['claude-opus-4-8']);
+  const n = engine.STARVED_NUDGE_THRESHOLD;
+  const rewardMap = {};
+  for (let i = 0; i < n + 2; i++) rewardMap[`concepts/starved-${i}.md`] = { s: 20, f: 0 }; // plenty starved
+  writeSidecars(root, rewardMap, {});
+  const ctx = inject(
+    { prompt: 'continue', cwd: root, transcript_path: tx },
+    { CLAUDE_PROJECT_DIR: root, HOME: home, WRXN_RULES_BUDGET: '100000' }
+  );
+  assert.doesNotMatch(ctx, /\[HANDOFF REQUIRED\]/); // no handoff
+  assert.doesNotMatch(ctx, /starved-useful/i); // … so the canary never surfaces (same channel, doubly bounded)
+});

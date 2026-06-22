@@ -191,3 +191,76 @@ test('rewardFactor is total: garbage slots read as zero evidence → neutral 1, 
     assert.equal(v, 1, `garbage ${JSON.stringify(bad)} reads as zero evidence → neutral`);
   }
 });
+
+// ── starvedUseful: the learning-moat watchdog (S4 / kernel #15) ───────────────────────
+// Counts pages that are LEARNED-USEFUL but RARELY SURFACED — posterior ≥ R_HIGH AND surfaced-count
+// ≤ S_LOW — over the (reward sidecar, surfaced-log) pair. The canary for option-(b) (a recon reward
+// term): a page recall has learned is useful but rarely surfaces because it sits below recon's floor,
+// where a kernel-side re-rank can't lift it. PURE, deterministic, TOTAL; reuses the SAME posterior the
+// value axis uses (mean = rewardFactor(slot)/2 — never a second notion of "high reward").
+
+test('starvedUseful counts pages with high posterior AND low surfaced-count, naming them', () => {
+  const counts = {
+    'concepts/starved.md': { s: 20, f: 0 },   // posterior ≈ 0.95 (high), never in the surfaced-log → starved
+    'concepts/surfaced.md': { s: 20, f: 0 },  // posterior ≈ 0.95 (high) BUT surfaced in many sessions → not starved
+    'concepts/neutral.md': { s: 0, f: 0 },    // posterior 0.5 → not high
+    'concepts/useless.md': { s: 0, f: 20 },   // posterior ≈ 0.05 → not high
+  };
+  const surfaced = {
+    s1: ['concepts/surfaced.md', 'concepts/neutral.md'],
+    s2: ['concepts/surfaced.md'],
+    s3: ['concepts/surfaced.md', 'concepts/useless.md'],
+  };
+  const out = reward.starvedUseful(counts, surfaced);
+  assert.equal(out.count, 1, 'only the high-posterior, rarely-surfaced page is starved-useful');
+  assert.deepEqual(out.pages, ['concepts/starved.md'], 'the starved page is named for the nudge text');
+});
+
+test('starvedUseful requires BOTH conditions: failing high-posterior OR low-surfaced excludes the page', () => {
+  // Crisp thresholds via opts so the AND-gate is pinned independent of the default constants.
+  const counts = {
+    'a.md': { s: 20, f: 0 }, // high posterior, surfaced 0 times → starved (both hold)
+    'b.md': { s: 20, f: 0 }, // high posterior BUT surfaced 5 times → fails low-surfaced
+    'c.md': { s: 0, f: 0 },  // surfaced 0 times BUT posterior 0.5 → fails high-posterior
+  };
+  const surfaced = { s1: ['b.md'], s2: ['b.md'], s3: ['b.md'], s4: ['b.md'], s5: ['b.md'] };
+  const out = reward.starvedUseful(counts, surfaced, { rHigh: 0.75, sLow: 1 });
+  assert.deepEqual(out.pages, ['a.md'], 'only the page satisfying BOTH gates is starved-useful');
+});
+
+test('starvedUseful reuses the value-axis posterior: a zero-evidence page never qualifies (even at sLow huge)', () => {
+  // rewardFactor({s:0,f:0}) = 1 ⇒ posterior 0.5 < any R_HIGH ∈ (0.5,1): never "learned useful".
+  const out = reward.starvedUseful({ 'neutral.md': { s: 0, f: 0 } }, {}, { sLow: 1e6 });
+  assert.equal(out.count, 0, 'a neutral (zero-evidence) page is never starved-useful — same posterior as rewardFactor');
+});
+
+test('starvedUseful is deterministic: pages come back sorted', () => {
+  const counts = {
+    'z.md': { s: 20, f: 0 },
+    'a.md': { s: 20, f: 0 },
+    'm.md': { s: 20, f: 0 },
+  };
+  const out = reward.starvedUseful(counts, {}); // none surfaced → all three starved
+  assert.deepEqual(out.pages, ['a.md', 'm.md', 'z.md'], 'sorted order is deterministic for the nudge text');
+});
+
+test('starvedUseful is TOTAL: garbage reward/surfaced/opts never throw → { count: 0, pages: [] }', () => {
+  for (const [r, s, o] of [
+    [null, null, undefined],
+    [undefined, undefined, undefined],
+    [[], 'not-a-map', { rHigh: 'x', sLow: -1 }],
+    [{ '': { s: 9, f: 0 }, '  ': { s: 9, f: 0 } }, { s1: 'not-an-array' }, { rHigh: 5 }], // blank keys credit nobody
+    [{ 'a.md': 'corrupt' }, { s1: [42, null, {}] }, null], // malformed slot → zero evidence; non-string surfacings ignored
+  ]) {
+    let out;
+    assert.doesNotThrow(() => { out = reward.starvedUseful(r, s, o); }, 'garbage must never throw');
+    assert.deepEqual(out, { count: 0, pages: [] }, 'garbage in → empty starved set');
+  }
+});
+
+test('starvedUseful thresholds are exported NAMED constants in sane ranges', () => {
+  assert.equal(typeof reward.R_HIGH, 'number');
+  assert.ok(reward.R_HIGH > 0.5 && reward.R_HIGH < 1, 'R_HIGH is a posterior-mean bar strictly inside (0.5, 1)');
+  assert.equal(typeof reward.S_LOW, 'number');
+  assert.ok(reward.S_LOW >= 0 && Number.isInteger(reward.S_LOW), 'S_LOW is a non-negative integer surfaced-count bar');
+});
