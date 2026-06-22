@@ -24,6 +24,7 @@ const fs = require('fs');
 const http = require('http');
 const path = require('path');
 const { coalesceSidecar } = require('./sidecar.cjs'); // shared coalesced read/rewrite/fail-open/secret-scan
+const { rewardFactor } = require('./reward.cjs'); // S3 re-rank: per-page Beta-Bernoulli counts → reward factor
 
 const MIN_PROMPT_LEN = 8;          // skip trivial prompts ("ok", "yes")
 const MAX_QUERY_CHARS = 512;       // trim the prompt before querying the door
@@ -40,6 +41,13 @@ const FIND_PATH = '/api/tools/recon_find';
 const REINFORCE_REL = path.join('.wrxn', 'reinforce.json'); // coalesced access-recency sidecar (STATE)
 const SURFACED_REL = path.join('.wrxn', 'surfaced.json'); // per-session surfaced-log sidecar (STATE)
 const WIKI_PREFIX = '.wrxn/wiki/'; // the wiki root — stripped to form the D1 join key
+const REWARD_REL = path.join('.wrxn', 'reward.json'); // per-page Beta-Bernoulli store (STATE) — read-only here
+
+// The single shipped mode gating the reward re-rank (mirrors recon's SHIPPED_DECAY_MODE). DEFAULT
+// 'shadow': reward counts accrue at session-end but the factor NEVER moves a recall rank — recall output
+// is byte-identical to pre-reward behaviour. Flips to 'live' ONLY when the offline lift gate proves the
+// re-rank helps a gold set — never a silent enable. Tests force 'live' via the recallFromDoor option.
+const SHIPPED_REWARD_MODE = 'shadow';
 
 function emit(envelope) {
   process.stdout.write(JSON.stringify(envelope));
@@ -126,16 +134,60 @@ function renderBlock(hits) {
   return block;
 }
 
-// PURE: the prose hits that clear the gate, capped at TOP_N — exactly the hits decideRecall renders
-// (and the pages reinforce stamps). Factored out so the IO shell can stamp the surfaced pages by path.
-function qualifyingHits(hits) {
-  const list = Array.isArray(hits) ? hits : [];
-  return list.filter((h) => isProse(h) && qualifies(h)).slice(0, TOP_N);
+// ── S3 reward re-rank (PURE) ─────────────────────────────────────────────────────────
+//
+// The learning-moat's value axis applied to recall: a per-page reward factor (∈(0,2), neutral 1) from
+// the Beta-Bernoulli store re-ranks the qualifying prose candidates by `base relevance × factor` BEFORE
+// the top-N cut, so a page that has preceded good sessions rises and one that preceded nothing fades.
+// The factor is INJECTED as a lookup { <wiki-rel-path>: factor } (the impure shell reads .wrxn/reward.json
+// and pre-computes factors via reward.cjs's rewardFactor) — decideRecall stays pure and reward-math-free.
+//
+// SHADOW BY DEFAULT: the re-rank only fires when a NON-EMPTY lookup is passed. An absent / empty lookup
+// is the IDENTITY — the door order is preserved byte-for-byte, exactly today's behaviour. The shell
+// passes a lookup only in 'live' mode (SHIPPED_REWARD_MODE), so the shipped default is a provable no-op.
+
+// The relevance magnitude the reward factor modulates: the door's fused score, with the dense cosine as
+// a fallback when a hit carries no fused score (totality), else 0.
+function baseScore(hit) {
+  const sc = Number(hit && hit.score);
+  if (Number.isFinite(sc)) return sc;
+  const sem = Number(hit && hit.semanticScore);
+  return Number.isFinite(sem) ? sem : 0;
 }
 
-// PURE: prose-filter → gate → top-N → format. Returns the block string, or null (Abstain).
-function decideRecall(hits) {
-  const qualified = qualifyingHits(hits);
+// A hit's reward factor from the lookup, keyed by its wiki-rel path. A page absent from the lookup, a
+// non-wiki hit, or a non-positive / garbage factor → neutral 1 (fail-open: reward never zeroes a rank).
+function factorFor(lookup, hit) {
+  const key = wikiRelPath(hit && hit.file);
+  const f = key ? Number(lookup[key]) : NaN;
+  return Number.isFinite(f) && f > 0 ? f : 1;
+}
+
+// Re-rank prose candidates by base relevance × reward factor, descending. STABLE: equal effective
+// scores keep door order (so an all-neutral lookup is the exact identity). An absent / empty / non-object
+// lookup short-circuits to the identity — the shadow no-op, by construction byte-identical to today.
+function rerankByReward(prose, rewardLookup) {
+  if (!rewardLookup || typeof rewardLookup !== 'object' || !Object.keys(rewardLookup).length) return prose;
+  return prose
+    .map((h, i) => ({ h, i, eff: baseScore(h) * factorFor(rewardLookup, h) }))
+    .sort((a, b) => b.eff - a.eff || a.i - b.i)
+    .map((x) => x.h);
+}
+
+// PURE: the prose hits that clear the gate, reward-re-ranked, capped at TOP_N — exactly the hits
+// decideRecall renders (and the pages reinforce stamps). The optional reward lookup is injected; absent
+// → door order (shadow). Factored out so the IO shell can stamp the surfaced pages by path.
+function qualifyingHits(hits, rewardLookup) {
+  const list = Array.isArray(hits) ? hits : [];
+  const prose = list.filter((h) => isProse(h) && qualifies(h));
+  return rerankByReward(prose, rewardLookup).slice(0, TOP_N);
+}
+
+// PURE: prose-filter → gate → reward re-rank → top-N → format. Returns the block string, or null
+// (Abstain). The reward lookup is optional and injected; with none (the shadow default) the output is
+// byte-identical to the pre-reward behaviour.
+function decideRecall(hits, rewardLookup) {
+  const qualified = qualifyingHits(hits, rewardLookup);
   if (!qualified.length) return null;
   return renderBlock(qualified);
 }
@@ -333,10 +385,35 @@ function httpTransport({ port, path: reqPath, body, timeoutMs }) {
   });
 }
 
+// Read the reward sidecar (.wrxn/reward.json = { "<wiki-rel-path>": { s, f } }) and pre-compute each
+// page's reward factor → { "<wiki-rel-path>": factor } for the live re-rank. FAIL-OPEN: a missing /
+// corrupt / non-object store → null (a neutral lookup → recall unaffected). The keys are treated ONLY
+// as join keys (map lookups against wikiRelPath), NEVER as filesystem paths (sec posture). rewardFactor
+// is total, so a malformed per-page slot reads as zero evidence → neutral 1.
+function readRewardLookup(root) {
+  if (!root) return null;
+  let raw;
+  try {
+    raw = fs.readFileSync(path.join(root, REWARD_REL), 'utf8');
+  } catch {
+    return null; // absent → neutral (the common case before the gate flips, and on any read fault)
+  }
+  let counts;
+  try {
+    counts = JSON.parse(raw);
+  } catch {
+    return null; // corrupt JSON → neutral, recall proceeds unchanged
+  }
+  if (!counts || typeof counts !== 'object' || Array.isArray(counts)) return null;
+  const lookup = {};
+  for (const key of Object.keys(counts)) lookup[key] = rewardFactor(counts[key]);
+  return lookup;
+}
+
 // IO shell: discover the door, POST the prose query, gate the hits. Returns the block string or null.
 // `transport` is injected in tests; production uses httpTransport. Sends NO `type` (recon_find takes a
 // single NodeType, not an array) — prose scope is enforced by decideRecall's post-filter.
-async function recallFromDoor(root, prompt, { transport, timeoutMs, now, sessionId } = {}) {
+async function recallFromDoor(root, prompt, { transport, timeoutMs, now, sessionId, rewardMode } = {}) {
   const door = discoverEndpoint(root);
   if (!door) return null; // not warm → Abstain (silent)
   const query = String(prompt || '').trim().slice(0, MAX_QUERY_CHARS);
@@ -360,11 +437,17 @@ async function recallFromDoor(root, prompt, { transport, timeoutMs, now, session
     return null; // malformed body → silent
   }
   const hits = Array.isArray(parsed.hits) ? parsed.hits : [];
-  const block = decideRecall(hits);
+  // SHADOW (shipped default): pass NO lookup → decideRecall is the identity (door order), byte-identical
+  // to pre-reward recall regardless of what sits in reward.json. LIVE (gate-flipped / test-forced): read
+  // the reward sidecar and re-rank the qualifying candidates by reward factor before the top-N cut.
+  const mode = rewardMode || SHIPPED_REWARD_MODE;
+  const rewardLookup = mode === 'live' ? readRewardLookup(root) : null;
+  const block = decideRecall(hits, rewardLookup);
   // Side effects on a surfacing (both best-effort, never block): stamp access-recency for the pages we
-  // surfaced, and record this session's surfaced set in the per-session surfaced-log.
+  // surfaced, and record this session's surfaced set in the per-session surfaced-log. Use the SAME lookup
+  // so the recorded set matches the re-ranked top-N that was rendered.
   if (block) {
-    const surfaced = qualifyingHits(hits);
+    const surfaced = qualifyingHits(hits, rewardLookup);
     reinforce(root, surfaced, now);
     surfacedLog(root, sessionId, surfaced);
   }
@@ -407,6 +490,7 @@ module.exports = {
   decideRecall,
   qualifyingHits,
   recallFromDoor,
+  readRewardLookup,
   reinforce,
   surfacedLog,
   wikiRelPath,
@@ -421,4 +505,5 @@ module.exports = {
   findInstallRoot,
   SEMANTIC_FLOOR,
   PROSE_TYPES,
+  SHIPPED_REWARD_MODE,
 };

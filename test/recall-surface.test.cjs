@@ -709,11 +709,13 @@ test('recallFromDoor: surfacing with no session id still surfaces, writes no sur
 // Two independent proofs: recall-surface consults NO reward state, and decideRecall's output does not
 // change when a populated reward sidecar exists on disk.
 
-test('SHADOW: recall-surface.cjs does not reference the reward sidecar or reward module (no re-rank in S2)', () => {
+// S3 supersedes the S2 "recall references no reward at all" structural lock: S3 adds the re-rank, so
+// recall now READS reward factors (in live mode) to re-order candidates. The enduring invariant is that
+// recall stays a READ-ONLY consumer — it never WRITES reward counts (updateReward is session-end's sole
+// job); the no-op-in-shadow guarantee is now behavioural (locked byte-identical below), not structural.
+test('S3 invariant: recall consumes reward read-only — it never calls updateReward (writing counts stays session-end\'s job)', () => {
   const src = fs.readFileSync(RECALL, 'utf8');
-  assert.doesNotMatch(src, /reward\.json/, 'recall must not read the reward sidecar in shadow');
-  assert.doesNotMatch(src, /require\(\s*['"]\.\/reward\.cjs['"]\s*\)/, 'recall must not import the reward module in shadow');
-  assert.doesNotMatch(src, /updateReward/, 'recall must not call the reward update in shadow');
+  assert.doesNotMatch(src, /updateReward/, 'recall must never WRITE reward counts — it only reads factors to re-rank');
 });
 
 test('SHADOW: decideRecall output is byte-identical whether or not a populated reward sidecar exists', () => {
@@ -736,6 +738,113 @@ test('SHADOW: decideRecall output is byte-identical whether or not a populated r
   // ORDER are identical: alpha still precedes beta (input order), proving no reward re-rank occurred.
   assert.equal(recall.decideRecall(hits), baseline, 'recall output is unchanged by the reward state (shadow)');
   assert.ok(baseline.indexOf('alpha') < baseline.indexOf('beta'), 'order follows the hits, not the reward counts');
+});
+
+// ── S3 re-rank: decideRecall accepts a reward lookup and re-ranks by score × factor before top-N ──
+// The pure seam. A reward lookup is { <wiki-rel-path>: factor } (factors come from rewardFactor; the
+// caller pre-computes them). Given a non-empty lookup, candidates are re-ranked by base relevance score
+// × reward factor BEFORE the TOP_N cut. An absent / empty lookup is the IDENTITY (door order preserved)
+// — that is the shadow no-op, locked separately. decideRecall stays PURE: the lookup is injected.
+
+test('decideRecall (live lookup): a higher-reward page outranks a lower-reward one (re-rank by factor)', () => {
+  // Two equally-relevant, equally-qualifying prose hits; DOOR order puts the low-reward page first.
+  // With the reward lookup, the proven page must surface first — the re-rank moved it.
+  const hits = [
+    hit({ name: 'Loser Page', file: '.wrxn/wiki/concepts/loser.md', sources: ['bm25', 'semantic'], semanticScore: 0.7, score: 0.5 }),
+    hit({ name: 'Winner Page', file: '.wrxn/wiki/concepts/winner.md', sources: ['bm25', 'semantic'], semanticScore: 0.7, score: 0.5 }),
+  ];
+  const lookup = { 'concepts/loser.md': 0.2, 'concepts/winner.md': 1.8 }; // winner is the proven page
+  const block = recall.decideRecall(hits, lookup);
+  assert.ok(block, 'both qualify → a block surfaces');
+  assert.ok(block.indexOf('winner') < block.indexOf('loser'), 'the higher-reward page is ranked first');
+  // and the door order alone (no lookup) keeps the loser first — proving the lookup is what moved it
+  const doorOrder = recall.decideRecall(hits);
+  assert.ok(doorOrder.indexOf('loser') < doorOrder.indexOf('winner'), 'without a lookup the door order is preserved');
+});
+
+// A door returning the two reward fixtures (Loser then Winner) in DOOR order, both equally relevant.
+function rewardDoor() {
+  return async () => ({
+    statusCode: 200,
+    body: JSON.stringify({
+      result: '',
+      hits: [
+        hit({ name: 'Loser', file: '.wrxn/wiki/concepts/loser.md', sources: ['bm25', 'semantic'], semanticScore: 0.7, score: 0.5 }),
+        hit({ name: 'Winner', file: '.wrxn/wiki/concepts/winner.md', sources: ['bm25', 'semantic'], semanticScore: 0.7, score: 0.5 }),
+      ],
+    }),
+  });
+}
+
+// A lopsided reward sidecar on disk: winner proven (s≫f), loser disproven (f≫s).
+function writeReward(root, counts) {
+  fs.mkdirSync(path.join(root, '.wrxn'), { recursive: true });
+  fs.writeFileSync(path.join(root, '.wrxn', 'reward.json'), JSON.stringify(counts, null, 2) + '\n');
+}
+
+test('recallFromDoor (live mode, test-forced): reads .wrxn/reward.json and re-ranks surfaced pages by reward', async () => {
+  const root = installRoot('wrxn-recall-live-');
+  writeEndpoint(root, { pid: process.pid, port: 65040 });
+  writeReward(root, { 'concepts/loser.md': { s: 0, f: 40 }, 'concepts/winner.md': { s: 40, f: 0 } });
+  const block = await recall.recallFromDoor(root, 'a prompt long enough to query the door', {
+    transport: rewardDoor(),
+    rewardMode: 'live',
+  });
+  assert.ok(block, 'recall surfaces');
+  assert.ok(block.indexOf('winner') < block.indexOf('loser'), 'live mode re-ranked the proven page above the disproven one');
+});
+
+// ── THE HEADLINE GUARANTEE: in the shipped default (shadow), recall is byte-identical to pre-reward ──
+// behaviour even with a fully-populated reward.json on disk. This is the AC that de-risks the ship: ①
+// can merge to trunk as a provable recall no-op; the live flip is a later, gated change.
+
+test('SHADOW (shipped default): a fully-populated reward.json does NOT move a recall rank — byte-identical', async () => {
+  const root = installRoot('wrxn-recall-shadow-e2e-');
+  writeEndpoint(root, { pid: process.pid, port: 65041 });
+  // a lopsided reward that, IF applied, would clearly reorder (winner ≫ loser)
+  writeReward(root, { 'concepts/loser.md': { s: 0, f: 99 }, 'concepts/winner.md': { s: 99, f: 0 } });
+
+  // the pre-reward (door-order) baseline for these exact hits — exactly what recall emitted before S3
+  const doorHits = [
+    hit({ name: 'Loser', file: '.wrxn/wiki/concepts/loser.md', sources: ['bm25', 'semantic'], semanticScore: 0.7, score: 0.5 }),
+    hit({ name: 'Winner', file: '.wrxn/wiki/concepts/winner.md', sources: ['bm25', 'semantic'], semanticScore: 0.7, score: 0.5 }),
+  ];
+  const baseline = recall.decideRecall(doorHits); // single-arg = the pre-S3 behaviour
+
+  // full recall path in the SHIPPED mode (shadow, default): reward.json on disk must be ignored entirely
+  const shadowBlock = await recall.recallFromDoor(root, 'a prompt long enough to query the door', { transport: rewardDoor() });
+  assert.equal(shadowBlock, baseline, 'shadow recall is byte-identical to pre-reward recall despite a populated reward.json');
+  assert.ok(shadowBlock.indexOf('loser') < shadowBlock.indexOf('winner'), 'door order preserved — reward had zero influence');
+
+  // non-vacuous: the SAME inputs under live WOULD reorder, proving shadow deliberately declined to apply it
+  const liveBlock = await recall.recallFromDoor(root, 'a prompt long enough to query the door', { transport: rewardDoor(), rewardMode: 'live' });
+  assert.ok(liveBlock.indexOf('winner') < liveBlock.indexOf('loser'), 'the reward IS live-relevant — shadow chose not to apply it');
+});
+
+test('SHIPPED_REWARD_MODE defaults to shadow (the live flip is never a silent default)', () => {
+  assert.equal(recall.SHIPPED_REWARD_MODE, 'shadow', 'the shipped reward mode is shadow until the offline lift gate flips it');
+});
+
+// ── fail-open: a missing / corrupt reward store → neutral lookup → recall proceeds unchanged ──
+
+test('readRewardLookup: a missing reward.json → null (neutral); a well-formed store → a path→factor map', () => {
+  const root = installRoot('wrxn-recall-reward-read-');
+  assert.equal(recall.readRewardLookup(root), null, 'no reward.json → null lookup (the common pre-gate case)');
+  writeReward(root, { 'concepts/winner.md': { s: 40, f: 0 }, 'concepts/loser.md': { s: 0, f: 40 } });
+  const lookup = recall.readRewardLookup(root);
+  assert.ok(lookup['concepts/winner.md'] > 1, 'a proven page maps to a factor above neutral');
+  assert.ok(lookup['concepts/loser.md'] < 1, 'a disproven page maps to a factor below neutral');
+});
+
+test('live mode: a corrupt reward.json fails open to a neutral re-rank — recall still surfaces in door order', async () => {
+  const root = installRoot('wrxn-recall-reward-corrupt-');
+  writeEndpoint(root, { pid: process.pid, port: 65042 });
+  fs.mkdirSync(path.join(root, '.wrxn'), { recursive: true });
+  fs.writeFileSync(path.join(root, '.wrxn', 'reward.json'), 'not json{ broken');
+  assert.equal(recall.readRewardLookup(root), null, 'a corrupt store reads as a neutral (null) lookup');
+  const block = await recall.recallFromDoor(root, 'a prompt long enough to query the door', { transport: rewardDoor(), rewardMode: 'live' });
+  assert.ok(block, 'recall still surfaces despite a corrupt reward store (fail-open)');
+  assert.ok(block.indexOf('loser') < block.indexOf('winner'), 'a corrupt store → neutral → door order preserved');
 });
 
 // ── self-contained: node stdlib + co-located payload siblings only (no kernel-lib / recon import) ──

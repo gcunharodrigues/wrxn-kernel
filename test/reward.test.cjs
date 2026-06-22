@@ -153,3 +153,41 @@ test('updateReward ignores an out-of-range or garbage discount (totality — fal
     );
   }
 });
+
+// ── rewardFactor: the value axis (S3) — Laplace posterior mean → centered multiplicative factor ──
+// `(s,f)` → posterior mean (s+1)/(s+f+2) ∈ (0,1) → factor 2·mean ∈ (0,2). A page with NO evidence
+// (zero or missing counts) maps to factor EXACTLY 1 (neutral) so it cannot move a rank. PURE, total,
+// bounded — the recon decay-scorer discipline (no clock/IO; garbage → neutral, never a throw).
+
+test('rewardFactor: zero evidence → factor EXACTLY 1 (a no-record page is perfectly neutral)', () => {
+  assert.equal(reward.rewardFactor({ s: 0, f: 0 }), 1, 's=f=0 → 2·(1/2) = 1 exactly');
+  assert.equal(reward.rewardFactor({}), 1, 'an empty slot is zero evidence → neutral');
+  assert.equal(reward.rewardFactor(undefined), 1, 'a missing slot (page not in the store) → neutral');
+  assert.equal(reward.rewardFactor(null), 1, 'a null slot → neutral');
+});
+
+test('rewardFactor is monotonic: more good lifts above 1, more bad sinks below 1', () => {
+  // success monotonically increases the factor (toward 2); each is strictly above the previous
+  assert.ok(reward.rewardFactor({ s: 1, f: 0 }) > 1, 'one good session lifts above neutral');
+  assert.ok(reward.rewardFactor({ s: 10, f: 0 }) > reward.rewardFactor({ s: 1, f: 0 }), 'more good ⇒ higher factor');
+  // failure monotonically decreases the factor (toward 0); each is strictly below the previous
+  assert.ok(reward.rewardFactor({ s: 0, f: 1 }) < 1, 'one bad session sinks below neutral');
+  assert.ok(reward.rewardFactor({ s: 0, f: 10 }) < reward.rewardFactor({ s: 0, f: 1 }), 'more bad ⇒ lower factor');
+  // a proven page outranks a disproven one — the mechanism the gate fixture locks
+  assert.ok(reward.rewardFactor({ s: 9, f: 1 }) > reward.rewardFactor({ s: 1, f: 9 }), 'useful page beats useless page');
+});
+
+test('rewardFactor is bounded strictly inside (0,2) even at the count cap (no page can zero-out or double a rank)', () => {
+  const hiGood = reward.rewardFactor({ s: reward.COUNT_CAP, f: 0 });
+  const hiBad = reward.rewardFactor({ s: 0, f: reward.COUNT_CAP });
+  assert.ok(hiGood > 1 && hiGood < 2, `maximal success stays below 2 (got ${hiGood})`);
+  assert.ok(hiBad > 0 && hiBad < 1, `maximal failure stays above 0 (got ${hiBad})`);
+});
+
+test('rewardFactor is total: garbage slots read as zero evidence → neutral 1, never a throw', () => {
+  for (const bad of ['corrupt', [], 42, NaN, { s: 'x', f: 'y' }, { s: -5, f: Infinity }]) {
+    let v;
+    assert.doesNotThrow(() => { v = reward.rewardFactor(bad); }, `garbage ${JSON.stringify(bad)} must not throw`);
+    assert.equal(v, 1, `garbage ${JSON.stringify(bad)} reads as zero evidence → neutral`);
+  }
+});

@@ -117,4 +117,26 @@ function updateReward(counts, surfacedSet, signal, opts) {
   return out;
 }
 
-module.exports = { updateReward, COUNT_CAP };
+/**
+ * The reward VALUE AXIS (S3): map a page's Beta-Bernoulli slot `{s,f}` to a centered multiplicative
+ * factor for the recall re-rank. Laplace-smoothed posterior mean `(s+1)/(s+f+2)` ∈ (0,1) (neutral 1/2
+ * at zero evidence) → factor `2·mean` ∈ (0,2): a proven page (s≫f) lifts toward 2, a disproven page
+ * (f≫s) sinks toward 0, and a page with NO evidence maps to EXACTLY 1 so it never moves a rank.
+ *
+ * BOUNDED by construction: s,f are finite non-negative (and saturate at COUNT_CAP in updateReward), so
+ * the mean is strictly inside (0,1) and the factor strictly inside (0,2) — it can never reach 0 or 2,
+ * so one lucky page can neither zero out nor double a rank. PURE + TOTAL: garbage / missing slot reads
+ * as zero evidence → neutral 1, never a throw, never reads a clock. The same posterior the mechanism
+ * gate fixtures lock (a known-useful page outranks a known-useless one).
+ *
+ * @param {{s:number,f:number}} [slot]  a page's reward counts (missing/garbage → zero evidence)
+ * @returns {number} the centered reward factor in (0,2); exactly 1 at zero evidence
+ */
+function rewardFactor(slot) {
+  const s = asCount(slot && slot.s);
+  const f = asCount(slot && slot.f);
+  const mean = (s + 1) / (s + f + 2); // Laplace posterior mean ∈ (0,1), exactly 1/2 at s=f=0
+  return 2 * mean; // centered factor ∈ (0,2), exactly 1 at zero evidence
+}
+
+module.exports = { updateReward, rewardFactor, COUNT_CAP };
