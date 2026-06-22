@@ -450,6 +450,33 @@ test('runHandoff logs outcome=trivial for a trivial session (engine recorded as 
   assert.match(lines[0], /attempts=0/, 'no attempts were spent on a trivial session');
 });
 
+// ── synth-handoff-fix-01 (security LOW): a session id with control chars cannot forge a log line ──
+// session_id comes from the untrusted `.pending` stash (transcript-adjacent). A value carrying a
+// newline/tab would inject extra rows into the tab-separated .synth.log, forging fake outcomes and
+// destroying the log's diagnosability. The id must be sanitized (strip control chars) before it goes
+// into the line, so one synth run ALWAYS produces exactly one well-formed line.
+test('runHandoff sanitizes a session id with a newline: exactly one log line, no forged second row', async () => {
+  const root = tmp('wrxn-handoff-log-forge-');
+  continuityDir(root); // ensure .wrxn/continuity exists for the marker writes below.
+  const tx = path.join(root, 'session.jsonl');
+  fs.writeFileSync(tx, REAL_SESSION);
+  // a malicious/garbled session id that tries to forge a second tab-separated outcome line.
+  const forged = 'abc\nFORGED\toutcome=wrote';
+  fs.writeFileSync(pendingPath(root), JSON.stringify({ session_id: forged, transcript_path: tx, cwd: root }));
+  fs.writeFileSync(handoffMarker(root), String(Date.now()));
+  const { invoke } = fakeInvoke({ claude: { ok: true, text: '**TL;DR** logged with a hostile id' } });
+
+  await synth.runHandoff({ root, invoke, sleep: noSleep });
+
+  const raw = fs.readFileSync(synthLogPath(root), 'utf8');
+  const lines = raw.trim().split('\n').filter(Boolean);
+  assert.equal(lines.length, 1, 'exactly one log line — the newline in the id did not forge a second row');
+  assert.doesNotMatch(raw, /\nFORGED/, 'the forged second line never appears in the log');
+  assert.match(lines[0], /abc/, 'the sanitized id keeps its printable head');
+  assert.doesNotMatch(lines[0], /[\t\r\n]FORGED/, 'no control char survives inside the id field');
+  assert.match(lines[0], /wrote/, 'the real outcome is still recorded on the single line');
+});
+
 test('the synth log is best-effort: a logging fault never blocks the baton write or the marker clear', async () => {
   const root = tmp('wrxn-handoff-log-failopen-');
   stageSession(root, REAL_SESSION);

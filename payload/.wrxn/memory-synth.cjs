@@ -415,7 +415,7 @@ async function runEngine(engine, { prompt, blob, apiKey, invoke, sleep = default
       text = null; // an invoker throw is a transient failure for this attempt (degrade, never throw).
     }
     if (text) return { text, attempts };
-    if (i < ENGINE_ATTEMPTS - 1) await sleep(ENGINE_BACKOFF_MS); // back off before the next attempt (not after the last).
+    if (i < ENGINE_ATTEMPTS - 1) sleep(ENGINE_BACKOFF_MS); // back off before the next attempt (not after the last). sleep is synchronous (Atomics.wait / injected no-op) — no await.
   }
   return { text: null, attempts };
 }
@@ -471,20 +471,33 @@ function continuityPath(root, ...rel) {
   return path.join(root, ...CONTINUITY_REL, ...rel);
 }
 
+// The session id comes from the untrusted `.pending` stash (transcript-adjacent). A control char in it
+// (newline/tab) would inject extra rows into the tab-separated .synth.log — forging fake outcomes and
+// wrecking the log's whole purpose (trustworthy diagnosability). Strip ALL C0/C1 control chars and cap
+// the length before the id enters the line. PURE and total — it never throws (so it can't break the
+// best-effort log) and only touches the log field (never the baton).
+const LOG_FIELD_MAX = 64;
+function sanitizeLogField(v) {
+  // eslint-disable-next-line no-control-regex
+  return String(v == null ? '' : v).replace(/[\x00-\x1f\x7f-\x9f]/g, '').slice(0, LOG_FIELD_MAX);
+}
+
 /**
  * Append exactly one tab-separated outcome line to `.wrxn/continuity/.synth.log` — timestamp, session id
  * (or `-`), task, engine (or `-`), attempts, outcome (`wrote`|`trivial`|`no-engine`|`error…`). Best-effort
  * and FAIL-OPEN: a logging fault is swallowed so it can NEVER affect the handoff (the diagnosability log
- * must not become a new failure mode). One `appendFileSync` per run.
+ * must not become a new failure mode). One `appendFileSync` per run. The untrusted session id is
+ * control-char-stripped + length-capped so a hostile id can't forge extra log rows.
  * @param {{ sessionId?:string, task:string, engine?:string|null, attempts?:number, outcome:string }} rec
  */
 function appendSynthLog(root, { sessionId, task, engine, attempts, outcome }) {
   try {
     const dir = continuityPath(root);
     fs.mkdirSync(dir, { recursive: true });
+    const id = sanitizeLogField(sessionId) || '-'; // untrusted stash value — strip control chars, cap length.
     const line = [
       new Date().toISOString(),
-      sessionId || '-',
+      id,
       task || '-',
       engine || '-',
       `attempts=${attempts || 0}`,
