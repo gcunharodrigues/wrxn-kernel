@@ -540,3 +540,56 @@ test('runHandoff leaves a handoff with NO **TL;DR** marker unchanged (fail-open 
   assert.match(baton, /wire the SessionStart hold/, 'the body is preserved when there is no marker to anchor on');
   assert.match(baton, /ship the fix/, 'nothing is dropped from a no-marker handoff (fail-open)');
 });
+
+// ── #45 stash-presence gate: a synth with NO .pending writes NO synth-log row ─────
+// The secondary defense behind the spawn hook's once-per-session guard: if a synth runs with no `.pending`
+// stash (a 2nd synth whose sibling already consumed+cleared the stash, or a manual --from-spawn with none),
+// it has no session to process. Without the gate it falls through to the trivial path and logs a spurious
+// `trivial` row — polluting .synth.log and the baton-staleness signal that reads it. The gate is SPECIFIC
+// to the ABSENT-file case: a present-but-trivial stash keeps logging `trivial` (covered above). Never throws.
+
+test('runHandoff with NO .pending stash no-ops: writes NO synth-log row and never throws (#45 stash-presence gate)', async () => {
+  const root = tmp('wrxn-handoff-nostash-');
+  // deliberately do NOT stageSession → there is no `.pending` at all (absent, not merely trivial/empty).
+  const { invoke, calls } = fakeInvoke({ claude: { ok: true, text: 'NEVER' } });
+
+  const res = await synth.runHandoff({ root, invoke });
+
+  assert.equal(res.wrote, false, 'nothing is written — there was no stash to process');
+  assert.equal(calls.length, 0, 'the engine is never reached for a stash-less run (no model spend)');
+  assert.equal(fs.existsSync(synthLogPath(root)), false, 'NO synth-log row is written for an absent stash (no spurious trivial/no-engine)');
+});
+
+test('run --from-spawn with no .pending exits 0, logs nothing, never throws (#45 stash-presence gate, entry seam)', async () => {
+  const root = tmp('wrxn-fromspawn-nostash-');
+  // the detached child's real entry point, but with no stash staged (the gate's target case).
+  const { invoke, calls } = fakeInvoke({ claude: { ok: true, text: 'NEVER' } });
+
+  const code = await synth.run(['--from-spawn', '--root', root], { invoke });
+
+  assert.equal(code, 0, 'the from-spawn path still exits 0 (graceful, never an error code)');
+  assert.equal(calls.length, 0, 'no engine call for a stash-less from-spawn run');
+  assert.equal(fs.existsSync(synthLogPath(root)), false, 'no synth-log row is written for a stash-less from-spawn run');
+});
+
+// ── #45 NB-1 (review): the stash-gate must still RELEASE session-start's hold ─────
+// The stash-presence gate early-returns before runHandoff's finally, which clears `.pending-handoff`. In a
+// concurrent / no-session-id race `.pending` can be absent while `.pending-handoff` lingers (one synth
+// cleared `.pending` after a fresh 2nd spawn re-raised both). If the gate returns without clearing the
+// handoff marker, the NEXT session-start's holdForHandoff waits up to the 180s cap (self-heals, never
+// blocks close, but it's a regression from the pre-gate behavior). The gate clears the handoff marker
+// before returning — preserving the no-log-row goal.
+test('runHandoff with no .pending but a stranded .pending-handoff clears the handoff marker, writes no log row (#45 NB-1)', async () => {
+  const root = tmp('wrxn-handoff-strand-');
+  continuityDir(root); // ensure the dir exists for the marker write below.
+  // .pending is ABSENT but .pending-handoff lingers from a racing sibling spawn — the gate must release it.
+  fs.writeFileSync(handoffMarker(root), String(Date.now()));
+  const { invoke, calls } = fakeInvoke({ claude: { ok: true, text: 'NEVER' } });
+
+  const res = await synth.runHandoff({ root, invoke });
+
+  assert.equal(res.wrote, false, 'nothing written — there was no stash to process');
+  assert.equal(calls.length, 0, 'no engine call for a stash-less run');
+  assert.ok(!fs.existsSync(handoffMarker(root)), 'the stranded handoff marker is cleared so session-start never waits the full cap');
+  assert.equal(fs.existsSync(synthLogPath(root)), false, 'still NO synth-log row for an absent stash');
+});

@@ -146,3 +146,67 @@ test('the hook process emits {} on stdout for a SessionEnd event (wire contract)
   });
   assert.deepEqual(out.trim() ? JSON.parse(out) : {}, {}, 'stdout is {} and exit is 0');
 });
+
+// ── #45 once-per-session guard: the SessionEnd hook is idempotent per session ────
+// The harness fires SessionEnd more than once per session (clear / exit / logout end-paths). Without a
+// guard the hook spawns a fresh detached synth on EACH fire, and N synths race on one shared `.pending`
+// stash + pollute .synth.log (the incident: session 6898c0a9 logged `wrote`, then a spurious `no-engine`
+// 2.16s later). The hook now CLAIMS the session ATOMICALLY (an exclusive-create marker keyed by a
+// sanitized session_id) before it stages markers + spawns, so exactly ONE synth launches per session.
+
+test('two SessionEnd fires for the SAME session_id spawn the synth exactly once (#45 once-per-session)', () => {
+  const root = freshInstall('wrxn-synth-spawn-once-');
+  const sp = fakeSpawner();
+  const payload = { session_id: 'sid-dup', transcript_path: '/tmp/t.jsonl', cwd: root };
+
+  const out1 = runCore(root, payload, {}, sp);
+  // sentinels: a 2nd fire that re-ran the body would OVERWRITE these markers — they must survive untouched,
+  // proving the 2nd fire no-oped BEFORE the marker writes (wrote no `.pending`/`.pending-handoff`).
+  const dir = continuityDir(root);
+  fs.writeFileSync(path.join(dir, '.pending'), 'SENTINEL-pending');
+  fs.writeFileSync(path.join(dir, '.pending-handoff'), 'SENTINEL-handoff');
+  const out2 = runCore(root, payload, {}, sp);
+
+  assert.deepEqual(out1, {}, 'the first fire returns {}');
+  assert.deepEqual(out2, {}, 'the second fire also returns {} (never blocks session close)');
+  assert.equal(sp.calls.length, 1, 'the synth is spawned EXACTLY once across two fires for one session');
+  assert.equal(sp.unrefCount(), 1, 'only the first fire launched (and unref()d) a synth');
+  assert.equal(fs.readFileSync(path.join(dir, '.pending'), 'utf8'), 'SENTINEL-pending', 'the 2nd fire wrote NO .pending (no re-stash racing the synth)');
+  assert.equal(fs.readFileSync(path.join(dir, '.pending-handoff'), 'utf8'), 'SENTINEL-handoff', 'the 2nd fire wrote NO .pending-handoff');
+});
+
+test('two fires with DIFFERENT session_ids each spawn once (#45 the claim is per-session, not global)', () => {
+  const root = freshInstall('wrxn-synth-spawn-persession-');
+  const sp = fakeSpawner();
+  runCore(root, { session_id: 'sid-A', transcript_path: '/tmp/a.jsonl', cwd: root }, {}, sp);
+  runCore(root, { session_id: 'sid-B', transcript_path: '/tmp/b.jsonl', cwd: root }, {}, sp);
+  assert.equal(sp.calls.length, 2, 'a different session is a distinct claim → it launches its own synth');
+  assert.equal(sp.unrefCount(), 2, 'both fires launched (and unref()d) a synth');
+});
+
+test('the no-session-id path is preserved: every fire still spawns (cannot dedup without an id) (#45)', () => {
+  const root = freshInstall('wrxn-synth-spawn-nosid-');
+  const sp = fakeSpawner();
+  // a payload with no session_id (the harness occasionally omits it) — today's spawn-every-time behavior
+  // MUST be preserved (and the missing id must not crash the guard).
+  runCore(root, { transcript_path: '/tmp/x.jsonl', cwd: root }, {}, sp);
+  runCore(root, { transcript_path: '/tmp/x.jsonl', cwd: root }, {}, sp);
+  assert.equal(sp.calls.length, 2, 'with no id to claim, both fires spawn (no-session-id path unchanged)');
+});
+
+// ── #45 / sec: the per-session marker derives from a SANITIZED session_id (no traversal) ────────
+// session_id is attacker-influenceable (it reaches this hook from the harness payload). Concatenated raw
+// into the marker path, a `../../evil` id would escape .wrxn/continuity and let an exclusive-create land an
+// arbitrary file at the install root. safeId canonicalizes it, so the marker stays INSIDE the markers dir.
+// Mirrors the session-start safeId traversal test (sec-F1).
+
+test('the once-per-session marker is sanitized — a traversal session_id cannot escape the markers dir (#45)', () => {
+  const root = freshInstall('wrxn-synth-spawn-traversal-');
+  const sp = fakeSpawner();
+  runCore(root, { session_id: '../../evil', transcript_path: '/tmp/x.jsonl', cwd: root }, {}, sp);
+
+  const dir = continuityDir(root);
+  assert.equal(fs.existsSync(path.join(root, 'evil')), false, 'no marker escapes the continuity dir to the install root');
+  assert.equal(fs.existsSync(path.join(dir, '.spawned-evil')), true, 'the sanitized per-session marker lives INSIDE .wrxn/continuity');
+  assert.equal(sp.calls.length, 1, 'the (sanitized) first fire still spawns its synth');
+});

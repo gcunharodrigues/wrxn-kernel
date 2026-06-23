@@ -631,6 +631,18 @@ function writeBatonAtomic(root, body) {
  * @returns {Promise<{ wrote:boolean, blob:string, reason?:string }>}
  */
 async function runHandoff({ root, invoke = defaultInvoke, sleep }) {
+  // Stash-presence gate (#45): a synth with NO `.pending` stash has no session to process — no-op cleanly
+  // and write NO synth-log row. This is the secondary defense behind the spawn hook's once-per-session
+  // guard: a 2nd synth whose sibling already consumed+cleared the stash (or a manual --from-spawn with
+  // none) must not log a spurious `trivial`/`no-engine` row that pollutes the log + the baton-staleness
+  // signal. SPECIFIC to the ABSENT-file case — a present-but-trivial stash still logs `trivial` below.
+  // existsSync is total (never throws). NB-1: a stranded `.pending-handoff` can linger here (a concurrent /
+  // no-session-id race cleared `.pending` after a sibling re-raised both) — release session-start's hold
+  // before returning, or its holdForHandoff waits the full cap. rmQuiet is best-effort/total.
+  if (!fs.existsSync(continuityPath(root, PENDING))) {
+    rmQuiet(continuityPath(root, PENDING_HANDOFF));
+    return { wrote: false, blob: '', reason: 'no-stash' };
+  }
   let wrote = false;
   let reason;
   let safeBlob = ''; // the redacted blob, returned so dream can reuse it in memory (auto-memory-04).
