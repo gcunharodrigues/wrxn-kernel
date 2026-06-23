@@ -218,11 +218,137 @@ function stampLineage(content, lineage) {
   return text.slice(0, m.index) + ['---', lines.join('\n'), '---'].join('\n') + text.slice(m.index + m[0].length);
 }
 
+// PURE resolver (deterministic given its injected IO): gather the evidence FACTS into { session, commit,
+// symbols }. The git HEAD resolver + the touched set + the session anchor are all injected, so the core is
+// unit-tested with no live repo (mirrors session-end-reward's gitFacts injection). FAIL-OPEN: a resolveHead
+// that throws or returns nothing → commit null (stampEvidence omits it); a missing touched set → []. NEVER
+// throws — a field that cannot be resolved must never break consolidation.
+function resolveEvidence({ session, resolveHead, touched } = {}) {
+  let commit = null;
+  try {
+    const head = typeof resolveHead === 'function' ? resolveHead() : null;
+    commit = head ? String(head) : null;
+  } catch {
+    commit = null; // no git binary / not a repo / detached → no commit (fail-open)
+  }
+  return {
+    session: session == null ? '' : String(session),
+    commit,
+    symbols: Array.isArray(touched) ? touched : [],
+  };
+}
+
+// ── evidence production IO (the real resolvers resolveEvidence injects at the CLI boundary) ─────
+// Resolve the install repo's current git HEAD sha — the citation's `commit`. Rooted at the install so a
+// nested cwd can't resolve a different repo's HEAD. Fail-open: no git binary / not a repo / detached →
+// null (commit omitted). Mirrors session-end-reward.cjs / session-start.cjs resolveGitHead byte-for-byte.
+function resolveGitHead(root) {
+  try {
+    const out = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    const sha = String(out || '').trim();
+    return sha || null;
+  } catch {
+    return null; // no git binary / not a repo / detached with no commit → no commit (fail-open)
+  }
+}
+
+// The session-id → filename transform — MUST match code-intel-push's safeId byte-for-byte, or the read
+// targets the wrong .touched file (replicated here, no shared import — the self-contained discipline).
+function safeSessionId(sid) {
+  return String(sid || 'session').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'session';
+}
+
+// Read this session's edited paths from <root>/.wrxn/history/<safeId>.touched — the list code-intel-push
+// already maintains (REUSE; no new persistence path). Deduped, order preserved. FAIL-OPEN: an absent/
+// unreadable file → [] (the citation simply carries no symbols). This is the citation's `symbols` set.
+function readTouched(root, sessionId) {
+  if (!root) return [];
+  let raw;
+  try {
+    raw = fs.readFileSync(path.join(root, '.wrxn', 'history', `${safeSessionId(sessionId)}.touched`), 'utf8');
+  } catch {
+    return []; // absent / unreadable → no edits this session
+  }
+  const seen = new Set();
+  const out = [];
+  for (const line of raw.split('\n')) {
+    const p = line.trim();
+    if (!p || seen.has(p)) continue;
+    seen.add(p);
+    out.push(p);
+  }
+  return out;
+}
+
+// Stamp the just-written wiki page's evidence in place (read → stampEvidence → write). Same page reach as
+// stampPageImportance/Lineage — the stamp never re-routes the write (AC6: the existing stamp seam, not a new one).
+function stampPageEvidence(root, tier, slug, evidence) {
+  const file = path.join(root, '.wrxn', 'wiki', tier, `${slug}.md`);
+  fs.writeFileSync(file, stampEvidence(fs.readFileSync(file, 'utf8'), evidence));
+}
+
 // Stamp the just-written wiki page's lineage in place (read → stampLineage → write). Same page reach as
 // stampPageImportance — the stamp never re-routes the write.
 function stampPageLineage(root, tier, slug, lineage) {
   const file = path.join(root, '.wrxn', 'wiki', tier, `${slug}.md`);
   fs.writeFileSync(file, stampLineage(fs.readFileSync(file, 'utf8'), lineage));
+}
+
+// ── evidence stamp — the forward citation PRODUCER (C3 / #36) ──────────────────
+// Every committed page records the FACTS that make its citation resolvable: `session` (the quote-verified
+// source anchor — the session id), `commit` (the real git HEAD at write time), `symbols` (the session's
+// .touched set). This FREEZES the evidence-frontmatter contract recon-wrxn ②'s edge resolver reads to draw
+// EVIDENCED_BY / DOCUMENTED_BY edges — every field is computed from ground truth, so the citation is
+// inherently resolvable. Written as an `evidence:` MAPPING (nested under one key, distinct from the flat
+// lineage/importance scalars). Machine-written frontmatter only — the prose body is preserved byte-for-byte.
+
+// One bare nested scalar (session/commit) — strip CR/LF/colon to a space so a hostile value can never
+// inject a frontmatter key or a YAML mapping (mirrors lineageScalar's shape-safety). Empty stays empty —
+// the session sentinel + the commit/symbols omission are the caller-visible policy applied in stampEvidence.
+function evidenceScalar(value) {
+  return String(value == null ? '' : value).replace(/[\r\n:]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+// One symbol list item — additionally strip the inline-flow-list breakers ([ ] ,) so a path can never break
+// the `symbols: [a, b]` list shape (defense in depth; .touched values are real paths without these chars).
+function symbolScalar(value) {
+  return String(value == null ? '' : value).replace(/[[\],\r\n:]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+// Drop any pre-existing `evidence:` mapping (its key line + the indented members beneath it) so a re-stamp
+// updates in place with no duplicate block — the in-place discipline stampLineage gets for free with flat keys.
+function stripEvidence(lines) {
+  const out = [];
+  let inBlock = false;
+  for (const line of lines) {
+    if (/^evidence:/.test(line)) { inBlock = true; continue; }   // the mapping key line → drop
+    if (inBlock && /^\s+\S/.test(line)) continue;                // an indented nested member → drop
+    inBlock = false;
+    out.push(line);
+  }
+  return out;
+}
+
+// PURE in-place stamp (mirrors stampLineage): append an `evidence:` mapping to the frontmatter fence; the
+// body after the closing fence is preserved byte-for-byte. A page with no frontmatter fence is returned
+// unchanged (defensive — wiki pages always carry one).
+function stampEvidence(content, evidence) {
+  const text = String(content);
+  const m = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text);
+  if (!m) return text;
+  const ev = evidence || {};
+  const lines = stripEvidence(m[1].split(/\r?\n/)); // in-place: remove any prior evidence block first
+  lines.push('evidence:');
+  // session — always present: an unresolvable anchor falls back to the 'unknown' sentinel (parseable key).
+  lines.push(`  session: ${evidenceScalar(ev.session) || 'unknown'}`);
+  // commit / symbols — FAIL-OPEN: a field that cannot be resolved (no git HEAD → empty; empty .touched → no
+  // items) is OMITTED, never written blank. The block still writes with whatever facts ARE known.
+  const commit = evidenceScalar(ev.commit);
+  if (commit) lines.push(`  commit: ${commit}`);
+  const symbols = (Array.isArray(ev.symbols) ? ev.symbols : []).map(symbolScalar).filter(Boolean);
+  if (symbols.length) lines.push(`  symbols: [${symbols.join(', ')}]`);
+  // splice ONLY the frontmatter fence back; the body after the closing --- is byte-for-byte preserved.
+  return text.slice(0, m.index) + ['---', lines.join('\n'), '---'].join('\n') + text.slice(m.index + m[0].length);
 }
 
 // The current session id for a CLI-invoked adapter (no hook event payload exists here). The whole codebase
@@ -592,6 +718,9 @@ function runCommit() {
   const ts = new Date().toISOString();
   const runId = runIdFromTs(ts);
   const session = currentSession();
+  // C3 (#36): the forward citation FACTS, resolved ONCE per run from ground truth — the session anchor, the
+  // real git HEAD, the session's .touched symbol set. Fail-open by construction (resolveEvidence never throws).
+  const evidence = resolveEvidence({ session, resolveHead: () => resolveGitHead(root), touched: readTouched(root, session) });
   const written = [];
   const skipped = [];
   for (const slug of approved) {
@@ -610,7 +739,8 @@ function runCommit() {
       const r = wikiWritePage(root, p.tier, p.slug, p.title, p.body);
       stampPageImportance(root, p.tier, p.slug, p.confidence); // persist dream's score as importance: (harvest-10)
       stampPageLineage(root, p.tier, p.slug, { origin_session: session, synth_run: runId, proposal_id: p.slug }); // S3 provenance
-      // capture the content hash of EXACTLY what this run wrote (after both stamps) so --revert can detect a
+      stampPageEvidence(root, p.tier, p.slug, evidence); // C3 (#36): forward citation facts (session/commit/symbols)
+      // capture the content hash of EXACTLY what this run wrote (after all stamps) so --revert can detect a
       // page hand-edited since (current hash ≠ this) and refuse to clobber it.
       const hash = sha256(pageContent(root, p.tier, p.slug));
       written.push({ slug: p.slug, tier: p.tier, file: r.written, hash });
@@ -747,4 +877,4 @@ if (require.main === module) {
   main();
 }
 
-module.exports = { stampImportance, stampLineage, lineageScalar, sha256, resolveRevert, runPagesFromAudit };
+module.exports = { stampImportance, stampLineage, stampEvidence, resolveEvidence, lineageScalar, sha256, resolveRevert, runPagesFromAudit };

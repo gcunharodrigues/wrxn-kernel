@@ -499,6 +499,88 @@ test('AC2 (no churn): the survivor lineage stamp leaves the merged body + merge 
   assert.match(surv, /^merged_from: \[alpha, beta\]$/m, 'the merge provenance is still present');
 });
 
+// ── C3 (#36): the harvest-survivor forward evidence stamp ──────────────────────
+// A merged survivor is a net-new durable page, so it ALSO carries the citation evidence: block dream
+// stamps from FACTS — session (the consolidating session), commit (the real git HEAD), symbols (.touched).
+// Machine-written frontmatter only; the merged body + merge provenance are never touched.
+
+function gitInit(target) {
+  execFileSync('git', ['init', '-q'], { cwd: target });
+  execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'seed'], { cwd: target });
+  return execFileSync('git', ['rev-parse', 'HEAD'], { cwd: target, encoding: 'utf8' }).trim();
+}
+
+function evidenceOf(text) {
+  const lines = String(text).split(/\r?\n/);
+  const i = lines.findIndex((l) => /^evidence:/.test(l));
+  if (i < 0) return null;
+  const out = {};
+  for (let j = i + 1; j < lines.length; j++) {
+    const kv = /^  ([a-z]+):\s*(.*)$/.exec(lines[j]);
+    if (!kv) break;
+    out[kv[1]] = kv[2].trim();
+  }
+  return out;
+}
+
+test('C3 AC3: a harvest-survivor page carries the evidence{session,commit,symbols} block from real facts', () => {
+  const t = freshInstall('harvest-evidence-');
+  const head = gitInit(t);
+  plantCluster(t);
+  const histDir = path.join(t, '.wrxn', 'history');
+  fs.mkdirSync(histDir, { recursive: true });
+  fs.writeFileSync(path.join(histDir, 'sid-harv-evi.touched'), 'src/widget.js\n');
+  stage(t, mergeProposal());
+  execFileSync('node', [path.join(t, HARVEST_REL), 'commit', writeJson(t, 'merge-approved.json', ['.wrxn/wiki/concepts/widget-pagination.md']), '--root', t],
+    { encoding: 'utf8', env: Object.assign({}, process.env, { CLAUDE_SESSION_ID: 'sid-harv-evi' }) });
+  const surv = fs.readFileSync(path.join(t, '.wrxn/wiki/concepts/widget-pagination.md'), 'utf8');
+  const ev = evidenceOf(surv);
+  assert.ok(ev, 'the survivor carries an evidence: block');
+  assert.equal(ev.session, 'sid-harv-evi', 'session is the consolidating session id');
+  assert.equal(ev.commit, head, 'commit is the real git HEAD at write time');
+  assert.equal(ev.symbols, '[src/widget.js]', 'symbols is the session .touched set');
+  // no churn: the merged provenance + body survive the evidence stamp
+  assert.match(surv, /^merged_from: \[alpha, beta\]$/m, 'the merge provenance is still present');
+});
+
+test('C3 AC5: a harvest survivor still writes with no git repo / no .touched — commit/symbols omitted, session present (fail-open)', () => {
+  const t = freshInstall('harvest-evidence-failopen-'); // NOT a git repo; no .wrxn/history
+  plantCluster(t);
+  stage(t, mergeProposal());
+  assert.doesNotThrow(() => {
+    execFileSync('node', [path.join(t, HARVEST_REL), 'commit', writeJson(t, 'merge-approved.json', ['.wrxn/wiki/concepts/widget-pagination.md']), '--root', t],
+      { encoding: 'utf8', env: Object.assign({}, process.env, { CLAUDE_SESSION_ID: 'sid-harv-fo' }) });
+  }, 'an unresolvable git HEAD / empty touched never throws');
+  const surv = path.join(t, '.wrxn/wiki/concepts/widget-pagination.md');
+  assert.ok(fs.existsSync(surv), 'the survivor still writes');
+  const ev = evidenceOf(fs.readFileSync(surv, 'utf8'));
+  assert.equal(ev.session, 'sid-harv-fo', 'session is present');
+  assert.equal(ev.commit, undefined, 'commit is omitted with no git HEAD');
+  assert.equal(ev.symbols, undefined, 'symbols is omitted with an empty/absent .touched');
+});
+
+test('C3 (pure): harvest stampEvidence/resolveEvidence match the dream contract — shape-safe, fail-open, no body churn', () => {
+  const page = '---\nname: x\ndescription: X\ntier: concepts\n---\n\n# X\n\nbody.\n';
+  // happy path + shape-safety (colon/list-breaker sanitise) + re-stamp in place
+  const out = harvest.stampEvidence(page, { session: 'sid-1', commit: 'a:b', symbols: ['ok.js', 'a]b'] });
+  assert.match(out, /^  session: sid-1$/m);
+  assert.match(out, /^  commit: a b$/m, 'a colon in commit is collapsed (shape-safe)');
+  assert.match(out, /^  symbols: \[ok\.js, a b\]$/m, 'list-breaking chars in symbols are sanitised');
+  assert.ok(out.includes('# X\n\nbody.'), 'the body is untouched (no churn)');
+  const twice = harvest.stampEvidence(out, { session: 'sid-2', commit: 'c', symbols: ['z.js'] });
+  assert.equal((twice.match(/^evidence:$/gm) || []).length, 1, 'no duplicate evidence: block on re-stamp');
+  // fail-open omission + session sentinel
+  const fo = harvest.stampEvidence(page, { commit: null, symbols: [] });
+  assert.match(fo, /^  session: unknown$/m, 'session falls back to the unknown sentinel');
+  assert.doesNotMatch(fo, /^  commit:/m, 'an unresolvable commit is omitted');
+  assert.doesNotMatch(fo, /^  symbols:/m, 'an empty touched set omits symbols');
+  // resolveEvidence fails open (no live repo) and never throws
+  let r;
+  assert.doesNotThrow(() => { r = harvest.resolveEvidence({ session: 's', resolveHead: () => { throw new Error('no repo'); }, touched: ['a.js'] }); });
+  assert.equal(r.commit, null, 'a throwing HEAD resolver → commit null');
+  assert.deepEqual(r.symbols, ['a.js'], 'symbols pass through from the injected touched set');
+});
+
 // ── self-contained: node stdlib only (no kernel-lib / recon import) ──────────────
 
 test('the harvest adapter still imports nothing outside the node standard library after the merge extension', () => {
