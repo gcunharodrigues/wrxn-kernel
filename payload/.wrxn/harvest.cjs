@@ -735,6 +735,43 @@ function composeSurvivor({ tier, slug, description, body, mergedFrom }) {
   ].join('\n');
 }
 
+// ── lineage stamp — the provenance PRODUCER (S3 / #22, mirrors dream.cjs) ───────
+// A merged survivor is a net-new durable page, so it records WHO wrote it: origin_session (the session id),
+// synth_run (the per-run id = this run's audit ts), proposal_id (the survivor slug). Machine-written
+// frontmatter only — the survivor body is preserved byte-for-byte (no churn). Replicated here (not imported)
+// because each install-only adapter is self-contained (node stdlib only) — same discipline as secretScan.
+const LINEAGE_KEYS = ['origin_session', 'synth_run', 'proposal_id'];
+
+// One bare frontmatter scalar — strip CR/LF/colon to a space so a value can never inject a key or YAML
+// mapping (composeSurvivor's frontmatter write-channel discipline). Empty → 'unknown' (the key is always present).
+function lineageScalar(value) {
+  const s = String(value == null ? '' : value).replace(/[\r\n:]+/g, ' ').trim();
+  return s || 'unknown';
+}
+
+// PURE in-place stamp: set each lineage key (no duplicate key) in the frontmatter fence; the body after the
+// closing fence is preserved byte-for-byte. No fence → returned unchanged (defensive — wiki pages carry one).
+function stampLineage(content, lineage) {
+  const text = String(content);
+  const m = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text);
+  if (!m) return text;
+  const lines = m[1].split(/\r?\n/);
+  for (const key of LINEAGE_KEYS) {
+    const value = lineageScalar(lineage && lineage[key]);
+    let found = false;
+    for (let i = 0; i < lines.length; i++) {
+      if (new RegExp(`^${key}:\\s*`).test(lines[i])) { lines[i] = `${key}: ${value}`; found = true; break; }
+    }
+    if (!found) lines.push(`${key}: ${value}`);
+  }
+  return text.slice(0, m.index) + ['---', lines.join('\n'), '---'].join('\n') + text.slice(m.index + m[0].length);
+}
+
+// The current session id for this CLI-invoked adapter — Claude Code exports it; absent ⇒ 'unknown' (fail-open).
+function currentSession() {
+  return lineageScalar(process.env.CLAUDE_SESSION_ID);
+}
+
 // ── the wiki delete bridge (dream.cjs indirection contract) ──────────────────────
 function wikiAdapter() {
   return path.join(__dirname, 'wiki.cjs'); // sibling in the same install .wrxn/ dir
@@ -837,7 +874,7 @@ function runStage() {
 // proposal cannot write or delete (AC2). Then — and only then — WRITE THE SURVIVOR FIRST (knowledge
 // preserved), THEN delete each absorbed (AC4 survivor-before-delete). Atomic on validation: if ANY target
 // is unsafe the whole merge is refused (no partial delete). Returns { ok, ... } | { ok:false, reason }.
-function commitOne(root, rec) {
+function commitOne(root, rec, lineage) {
   const description = rec.description ? String(rec.description) : '';
   const sec = secretScan(`${description}\n${rec.body}`); // re-scan at the write boundary
   if (sec) return { ok: false, reason: sec };
@@ -869,8 +906,15 @@ function commitOne(root, rec) {
   // WRITE THE SURVIVOR FIRST — the merged knowledge exists on disk before any page is deleted (AC4).
   const mergedFrom = targets.map((t) => t.slug).slice().sort();
   const page = composeSurvivor({ tier: rec.tier, slug: rec.slug, description, body: rec.body, mergedFrom });
+  // S3 (#22): stamp the survivor's lineage (origin_session/synth_run/proposal_id) into its frontmatter at
+  // compose time — proposal_id is the survivor slug. The body is preserved byte-for-byte (no churn).
+  const stamped = stampLineage(page, {
+    origin_session: (lineage && lineage.origin_session) || currentSession(),
+    synth_run: (lineage && lineage.synth_run) || 'unknown',
+    proposal_id: rec.slug,
+  });
   fs.mkdirSync(path.dirname(survAbs), { recursive: true });
-  fs.writeFileSync(survAbs, page);
+  fs.writeFileSync(survAbs, stamped);
 
   // THEN delete each absorbed — ONLY the staged cluster members (no free-form delete path) (AC4).
   const deleted = [];
@@ -897,15 +941,19 @@ function runCommit() {
   const staged = readStaged(root);
   const merged = [];
   const skipped = [];
+  // One ts per run: it keys this run's audit event AND is the survivors' synth_run, so a survivor's stamped
+  // synth_run is byte-identical to the run id in the audit log (S3 #22 provenance binding, dream parity).
+  const ts = new Date().toISOString();
+  const lineage = { origin_session: currentSession(), synth_run: lineageScalar(ts) };
   for (const ref of approved) {
     const key = String(ref);
     const rec = staged.get(key);
     if (!rec) { skipped.push({ survivor: key, reason: 'not_staged' }); continue; }
-    const res = commitOne(root, rec);
+    const res = commitOne(root, rec, lineage);
     if (res.ok) merged.push({ survivor: res.survivor, merged_from: res.merged_from, deleted: res.deleted, deleteFailed: res.deleteFailed });
     else skipped.push({ survivor: key, reason: res.reason });
   }
-  appendLine(path.join(harvestDir(root), AUDIT_FILE), { ts: new Date().toISOString(), op: 'commit', merged: merged.map((m) => m.survivor), skipped });
+  appendLine(path.join(harvestDir(root), AUDIT_FILE), { ts, op: 'commit', synth_run: lineageScalar(ts), origin_session: lineage.origin_session, merged: merged.map((m) => m.survivor), skipped });
   return print({ merged, skipped });
 }
 

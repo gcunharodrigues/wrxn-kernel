@@ -459,6 +459,46 @@ test('commit (harvest-review): a CANONICAL survivor still stages + commits and c
   assert.doesNotMatch(surv, /^tier:\s*null$/m, 'no malformed tier: null page is ever written');
 });
 
+// ── S3 (#22): the harvest-survivor lineage stamp ──────────────────────────────
+// A merged survivor is a net-new durable page, so it carries the SAME provenance keys dream stamps:
+// origin_session, synth_run, proposal_id. proposal_id is the survivor slug (the merge's stable id); the
+// stamp is machine-written frontmatter and never touches the survivor's prose body.
+
+function frontmatterOf(text) {
+  const m = /^---\r?\n([\s\S]*?)\r?\n---/.exec(String(text));
+  if (!m) return {};
+  const out = {};
+  for (const line of m[1].split(/\r?\n/)) {
+    const kv = /^([A-Za-z0-9_]+):\s*(.*)$/.exec(line);
+    if (kv) out[kv[1]] = kv[2].trim();
+  }
+  return out;
+}
+
+test('AC2: a harvest-survivor page carries origin_session, synth_run and proposal_id frontmatter', () => {
+  const t = freshInstall('harvest-lineage-');
+  plantCluster(t);
+  stage(t, mergeProposal());
+  execFileSync('node', [path.join(t, HARVEST_REL), 'commit', writeJson(t, 'merge-approved.json', ['.wrxn/wiki/concepts/widget-pagination.md']), '--root', t],
+    { encoding: 'utf8', env: Object.assign({}, process.env, { CLAUDE_SESSION_ID: 'sid-harvest-99' }) });
+  const surv = fs.readFileSync(path.join(t, '.wrxn/wiki/concepts/widget-pagination.md'), 'utf8');
+  const fm = frontmatterOf(surv);
+  assert.equal(fm.origin_session, 'sid-harvest-99', 'origin_session from CLAUDE_SESSION_ID');
+  assert.ok(fm.synth_run, 'synth_run is stamped');
+  assert.equal(fm.proposal_id, 'widget-pagination', 'proposal_id is the survivor slug');
+});
+
+test('AC2 (no churn): the survivor lineage stamp leaves the merged body + merge provenance unchanged', () => {
+  const t = freshInstall('harvest-lineage-body-');
+  plantCluster(t);
+  const body = '# Widget pagination\n\nUnion of both pages: the API paginates with cursor + limit, and the UI debounces.';
+  stage(t, mergeProposal({ body }));
+  commit(t, ['.wrxn/wiki/concepts/widget-pagination.md']);
+  const surv = fs.readFileSync(path.join(t, '.wrxn/wiki/concepts/widget-pagination.md'), 'utf8');
+  assert.ok(surv.includes(body), 'the merged survivor body is present verbatim after the lineage stamp');
+  assert.match(surv, /^merged_from: \[alpha, beta\]$/m, 'the merge provenance is still present');
+});
+
 // ── self-contained: node stdlib only (no kernel-lib / recon import) ──────────────
 
 test('the harvest adapter still imports nothing outside the node standard library after the merge extension', () => {
