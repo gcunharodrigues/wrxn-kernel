@@ -49,7 +49,7 @@ test('the reward shell imports nothing outside node stdlib + its co-located hook
   const builtins = new Set(require('module').builtinModules);
   for (const m of mods) {
     if (m.startsWith('./')) {
-      assert.ok(/^\.\/(sidecar|reward)\.cjs$/.test(m), `only the co-located sidecar/reward siblings may be required: ${m}`);
+      assert.ok(/^\.\/(sidecar|reward|prune)\.cjs$/.test(m), `only the co-located sidecar/reward/prune siblings may be required: ${m}`);
       continue;
     }
     const name = m.replace(/^node:/, '');
