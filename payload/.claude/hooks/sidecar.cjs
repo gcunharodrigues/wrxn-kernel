@@ -20,7 +20,15 @@ const SECRET_PATTERNS = [
   /gh[pousr]_[A-Za-z0-9]{36}/,           // GitHub token (ghp_/gho_/ghu_/ghs_/ghr_)
   /npm_[A-Za-z0-9]{36}/,                 // npm automation token
   /sk-[A-Za-z0-9]{20,}/,                 // OpenAI-style secret key
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----/,  // PEM private-key header
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/, // FULL PEM block (BEGIN…END) — MUST precede the header-only line so redaction consumes the body, not just the header
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----/,  // PEM private-key header (fallback: a lone/truncated header with no END)
+  /Bearer\s+[A-Za-z0-9\-._~+/]{16,}=*/i, // HTTP bearer / Authorization token (case-insensitive scheme)
+  // password=/pwd= assignment (=, :, quoted JSON/YAML). The keyword is EITHER fully quoted ("password":)
+  // OR bare (password=) — never a lone trailing quote, so a path ending in "passwd" used as a JSON key
+  // (e.g. "../../etc/passwd": …) is NOT misread as an assignment (it would falsely refuse a sidecar write).
+  /(?:["'](?:password|passwd|pwd)["']|(?:password|passwd|pwd))\s*[:=]\s*["']?[^\s"',;)&}{]+/i,
+  /[a-z][a-z0-9+.\-]+:\/\/[^\s:/@]+:[^\s/@]+@\S+/i, // URI connection string with inline creds (scheme://user:pass@host)
+  /eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}/, // JWT: base64url header(eyJ…).payload.signature
 ];
 
 function secretScan(text) {
@@ -35,8 +43,10 @@ function secretScan(text) {
 // (metadata-grade redaction, not a whole-value drop) — so a persisted prompt stays useful for analysis
 // yet never hardens a credential onto disk. Global-flagged clones of the patterns so EVERY occurrence on a
 // line is scrubbed, not just the first; String#replace resets a global regex's lastIndex per call, so
-// reusing these module-level clones is safe. TOTAL: a non-string coerces (null/undefined → '').
-const SECRET_PATTERNS_GLOBAL = SECRET_PATTERNS.map((re) => new RegExp(re.source, 'g'));
+// reusing these module-level clones is safe. TOTAL: a non-string coerces (null/undefined → ''). The clone
+// PRESERVES each pattern's own flags (e.g. /i) and only ADDS the global flag — so a case-insensitive shape
+// scans and redacts identically (dropping the flags here would let detection and redaction diverge).
+const SECRET_PATTERNS_GLOBAL = SECRET_PATTERNS.map((re) => new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g'));
 const SECRET_PLACEHOLDER = '[redacted]';
 
 function redactSecrets(text) {

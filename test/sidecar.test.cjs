@@ -154,6 +154,113 @@ test('redactSecrets leaves secret-free text byte-identical and coerces non-strin
   assert.equal(sidecar.redactSecrets(undefined), '', 'undefined → empty string');
 });
 
+// ── #38 F2: broaden redaction to common secret shapes the 5-pattern set missed ──────────
+// C2 is the slice that newly persists RAW prompt text (emit-event.cjs → .wrxn/events/<sid>.jsonl), so
+// redaction must also scrub bearer tokens, password=/pwd= assignments, URI connection strings with inline
+// creds, JWTs, and the FULL PEM private-key block (not just its header line). Each shape is fabricated
+// (repeated chars / "notreal" — never a live token) so the assertions never harden a real credential and
+// never trip push protection. Broadening is ADDITIVE: secretScan's gate consumers must not regress (see
+// the false-positive regression below).
+
+// fabricated, obviously-not-real tokens (clear the length floors; not live secrets)
+const FAKE_BEARER = 'A'.repeat(40);
+
+test('redactSecrets scrubs a Bearer token, case-insensitively (#38 F2)', () => {
+  const out = sidecar.redactSecrets(`Authorization: Bearer ${FAKE_BEARER}`);
+  assert.ok(!out.includes(FAKE_BEARER), 'the capitalized Bearer token is gone');
+  assert.match(out, /^Authorization: /, 'the surrounding header text is preserved');
+
+  // a lowercase scheme must redact too — this PROVES the global redaction clone preserves the /i flag
+  // (the SECRET_PATTERNS_GLOBAL map must not drop case-insensitivity, or detection and redaction diverge)
+  const lower = `authorization: bearer ${FAKE_BEARER}`;
+  assert.ok(!sidecar.redactSecrets(lower).includes(FAKE_BEARER), 'a lowercase bearer token is redacted too');
+  assert.equal(sidecar.secretScan(lower), 'contains_secret', 'and the scanner gate flags the lowercase form');
+});
+
+test('redactSecrets scrubs password=/pwd= assignments (=, :, and quoted-JSON forms) (#38 F2)', () => {
+  const cases = [
+    ['password=NotARealSecret123', 'NotARealSecret123'],
+    ['PWD = fakefakefakevalue', 'fakefakefakevalue'],
+    ['passwd: notrealcolonvalue', 'notrealcolonvalue'],
+    ['{"password": "notrealjsonvalue"}', 'notrealjsonvalue'],
+  ];
+  for (const [dirty, secret] of cases) {
+    const out = sidecar.redactSecrets(dirty);
+    assert.ok(!out.includes(secret), `the credential value is redacted in: ${dirty}`);
+    assert.equal(sidecar.secretScan(dirty), 'contains_secret', `the scanner gate flags: ${dirty}`);
+  }
+});
+
+test('redactSecrets scrubs a URI connection string with inline creds (#38 F2)', () => {
+  const cases = [
+    'postgres://dbuser:notrealdbpass@db.example.com:5432/app',
+    'mongodb://admin:notrealmongo@cluster.example.net/db',
+    'redis://user:notrealredis@127.0.0.1:6379',
+  ];
+  for (const dirty of cases) {
+    const out = sidecar.redactSecrets(dirty);
+    assert.ok(!/notreal\w*/.test(out), `the inline credential is redacted in: ${dirty}`);
+    assert.equal(sidecar.secretScan(dirty), 'contains_secret', `the scanner gate flags: ${dirty}`);
+  }
+  // a credential-free URL is NOT a connection-string secret — it must survive untouched
+  assert.equal(sidecar.redactSecrets('see https://github.com/org/repo'), 'see https://github.com/org/repo', 'a plain URL is left intact');
+});
+
+test('redactSecrets scrubs a JWT (three base64url parts) (#38 F2)', () => {
+  const FAKE_JWT = 'eyJ' + 'a'.repeat(20) + '.' + 'b'.repeat(20) + '.' + 'c'.repeat(20); // fabricated, not signed
+  const out = sidecar.redactSecrets(`token=${FAKE_JWT} end`);
+  assert.ok(!out.includes(FAKE_JWT), 'the JWT is redacted');
+  assert.match(out, / end$/, 'the surrounding text is preserved');
+  assert.equal(sidecar.secretScan(FAKE_JWT), 'contains_secret', 'the scanner gate flags a JWT');
+});
+
+test('redactSecrets scrubs the FULL PEM private-key block, not just the header line (#38 F2)', () => {
+  const block = [
+    '-----BEGIN RSA PRIVATE KEY-----',
+    'FAKEKEYBODYLINEONEnotarealkeymaterial',
+    'FAKEKEYBODYLINETWOnotarealkeymaterial',
+    '-----END RSA PRIVATE KEY-----',
+  ].join('\n');
+  const out = sidecar.redactSecrets(`before\n${block}\nafter`);
+  assert.ok(!out.includes('FAKEKEYBODYLINEONE'), 'the key BODY is redacted, not left exposed below a redacted header');
+  assert.ok(!out.includes('-----END RSA PRIVATE KEY-----'), 'the END boundary is consumed too');
+  assert.match(out, /^before/, 'leading text preserved');
+  assert.match(out, /after$/, 'trailing text preserved');
+
+  // a lone/truncated header (no END) still trips the gate via the retained header-line fallback
+  assert.equal(sidecar.secretScan('-----BEGIN OPENSSH PRIVATE KEY-----'), 'contains_secret', 'a lone PEM header is still detected');
+});
+
+// blast-radius: secretScan is ALSO the coalesceSidecar write GATE (reinforce/surfaced/reward). Broadening
+// must stay ADDITIVE — it must NOT start flagging the wiki-rel paths, session-id slugs, ISO dates and counts
+// those sidecars store (a false positive would silently REFUSE a legit state write), nor mangle them via redact.
+test('the broadened patterns do NOT falsely flag wiki-page-path sidecar keys/values (#38 F2 blast-radius)', () => {
+  const benign = [
+    'concepts/some-page.md',
+    'decisions/reset-password-flow.md', // carries the word "password" — but it is a PATH, not an assignment
+    'gotchas/pwd-and-cwd-confusion.md', // carries "pwd" — not an assignment
+    'gotchas/recall-surface-door-race.md',
+    '2026-06-22',
+    'session-abc-123-def',
+  ];
+  for (const key of benign) {
+    assert.equal(sidecar.secretScan(key), null, `not a secret (gate must not refuse): ${key}`);
+    assert.equal(sidecar.redactSecrets(key), key, `left byte-identical (no over-redaction): ${key}`);
+  }
+
+  // the exact shape that regressed the reward gate: a traversal/path-shaped value ENDING in "passwd" used
+  // as a JSON KEY — the JSON key-colon then follows "passwd", which must NOT read as a `passwd:` assignment.
+  const rewardBody = '{\n  "../../etc/passwd": { "s": 1, "f": 0 },\n  "concepts/a.md": { "s": 1, "f": 0 }\n}';
+  assert.equal(sidecar.secretScan(rewardBody), null, 'a path ending in "passwd" as a JSON key is not a password assignment (gate must still write)');
+
+  // and the gate still WRITES a realistic reinforce-style body whose KEY contains "password"
+  const dir = tmp('wrxn-sidecar-fp-');
+  const file = path.join(dir, '.wrxn', 'reinforce.json');
+  const wrote = sidecar.coalesceSidecar(file, (map) => { map['decisions/reset-password-flow.md'] = '2026-06-22'; return true; });
+  assert.equal(wrote, true, 'a reinforce body with a password-containing PATH key still writes (gate not tripped)');
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { 'decisions/reset-password-flow.md': '2026-06-22' });
+});
+
 // ── self-contained: node stdlib only (it ships into installs alongside the hooks) ────
 
 test('the sidecar helper imports nothing outside the node standard library', () => {
