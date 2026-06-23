@@ -393,7 +393,16 @@ async function main(argv) {
       process.stderr.write(`wrxn: cannot read issue: ${err.message}\n`);
       return 2;
     }
-    process.stdout.write(JSON.stringify(executor.buildDispatchSpec(issueText, type), null, 2) + '\n');
+    // S5 dispatch-RAG (#24): seed a recon_find from the issue's referenced symbols and inject the prose
+    // hits as "Relevant prior knowledge" so the executor starts warm. The door is REUSED from the
+    // package-layer brain client (lib/brain.cjs) — prose-filtered + limit-capped there. Fully fail-open:
+    // an unreachable / cold Brain (brain.query rejects) leaves the spec byte-identical to today.
+    const priorKnowledge = await executor
+      .retrievePriorKnowledge(issueText, {
+        find: (seed) => brain.query(seed, { type: 'prose', limit: executor.PRIOR_KNOWLEDGE_CAP }, {}).then((r) => r.hits),
+      })
+      .catch(() => []);
+    process.stdout.write(JSON.stringify(executor.buildDispatchSpec(issueText, type, priorKnowledge), null, 2) + '\n');
     return 0;
   }
 
