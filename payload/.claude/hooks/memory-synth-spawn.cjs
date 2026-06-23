@@ -25,6 +25,19 @@ const { spawn } = require('child_process');
 
 const SENTINEL = 'WRXN_MEMORY_SYNTH'; // recursion guard (mirrors memory-synth.cjs's SENTINEL).
 
+// safeId — canonicalize a session id used as a FILESYSTEM PATH component (#45): lowercase, collapse every
+// non-alnum run to '-', trim, cap length. A raw session id concatenated into a path is a traversal surface;
+// this keeps the once-per-session marker INSIDE .wrxn/continuity. REPLICATED byte-identically from
+// session-start.cjs (and code-intel-push / the reward shell) — each install-only hook is self-contained
+// (node stdlib only, no shared import).
+function safeId(sid) {
+  return String(sid || 'session')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48) || 'session';
+}
+
 function findInstallRoot(startDir) {
   let dir = startDir || process.env.CLAUDE_PROJECT_DIR || process.cwd();
   for (let i = 0; i < 12; i++) {
@@ -51,6 +64,19 @@ function run({ payload, root, env = process.env, spawn: spawnFn = spawn }) {
 
     const dir = path.join(root, '.wrxn', 'continuity');
     fs.mkdirSync(dir, { recursive: true });
+
+    // Once-per-session claim (#45): the harness fires SessionEnd more than once per session, so an
+    // unguarded hook launches N synths that race on one shared `.pending`. CLAIM the session ATOMICALLY
+    // with an exclusive create (`wx` throws EEXIST if the marker exists) BEFORE staging markers / spawning:
+    // the FIRST fire creates the marker and proceeds; every later fire for the same session throws → the
+    // outer catch returns {} (spawns nothing, writes no markers). Race-safe across the separate hook
+    // processes (no TOCTOU). The marker is a PERSISTENT per-session file — it must OUTLIVE the synth, so it
+    // is NOT `.pending`/`.pending-handoff` (which the synth clears on exit). A missing/empty session_id
+    // cannot be deduped → preserve today's spawn-every-time behavior for that path.
+    const sid = payload && payload.session_id;
+    if (sid) {
+      fs.closeSync(fs.openSync(path.join(dir, `.spawned-${safeId(sid)}`), 'wx'));
+    }
 
     // Stash the payload as .pending (the synth reads it for transcript_path) and raise the handoff gate.
     fs.writeFileSync(path.join(dir, '.pending'), JSON.stringify(payload || {}));
