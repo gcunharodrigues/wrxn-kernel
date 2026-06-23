@@ -121,6 +121,39 @@ test('coalesceSidecar: a clean map writes even when a sibling secret-free value 
   assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { 'concepts/some-page.md': '2026-06-22' });
 });
 
+// ── redactSecrets: scrub known secret shapes from free text (the event source reuses it, S2 / #35) ──
+// The metadata-grade event source (emit-event.cjs) persists REDACTED prompt text. Rather than reinvent
+// secret shapes it reuses THIS module's primitive: redactSecrets must scrub the exact same SECRET_PATTERNS
+// secretScan already detects (one source of truth), replacing every match in place while preserving the
+// surrounding text — so a recalled prompt stays useful but never hardens a credential onto disk.
+
+const FAKE_NPM = 'npm_' + 'a'.repeat(36); // matches the npm-token shape; fabricated (all 'a') — never a real token
+const FAKE_AWS = 'AKIA' + 'A'.repeat(16); // matches the AWS access-key-id shape; fabricated
+
+test('redactSecrets scrubs a known secret shape but preserves the surrounding text', () => {
+  const out = sidecar.redactSecrets(`before ${FAKE_NPM} after`);
+  assert.ok(!out.includes(FAKE_NPM), 'the secret token is gone');
+  assert.match(out, /^before .+ after$/, 'the non-secret text around the secret is preserved');
+});
+
+test('redactSecrets scrubs EVERY occurrence and MULTIPLE shapes on one line (global, multi-pattern)', () => {
+  const out = sidecar.redactSecrets(`${FAKE_NPM} x ${FAKE_AWS} x ${FAKE_NPM}`);
+  assert.ok(!out.includes(FAKE_NPM), 'no npm-shape survives (global replace)');
+  assert.ok(!out.includes(FAKE_AWS), 'no aws-shape survives (every pattern applied)');
+});
+
+test('redactSecrets reuses the SAME shapes as secretScan — a redacted string no longer scans as a secret', () => {
+  const dirty = `key=${FAKE_NPM}`;
+  assert.equal(sidecar.secretScan(dirty), 'contains_secret', 'sanity: the scanner flags the raw secret');
+  assert.equal(sidecar.secretScan(sidecar.redactSecrets(dirty)), null, 'after redaction the same scanner finds nothing — one source of shapes');
+});
+
+test('redactSecrets leaves secret-free text byte-identical and coerces non-strings (total)', () => {
+  assert.equal(sidecar.redactSecrets('a normal prompt about foo.cjs'), 'a normal prompt about foo.cjs', 'clean text unchanged');
+  assert.equal(sidecar.redactSecrets(null), '', 'null → empty string');
+  assert.equal(sidecar.redactSecrets(undefined), '', 'undefined → empty string');
+});
+
 // ── self-contained: node stdlib only (it ships into installs alongside the hooks) ────
 
 test('the sidecar helper imports nothing outside the node standard library', () => {

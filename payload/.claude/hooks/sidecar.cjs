@@ -29,6 +29,22 @@ function secretScan(text) {
   return null;
 }
 
+// redactSecrets — scrub known secret shapes OUT of free text before it is persisted, built on the SAME
+// SECRET_PATTERNS as secretScan (one source of truth: when a shape is added, both detection and redaction
+// follow). Every match is replaced with a fixed placeholder while the surrounding text is preserved
+// (metadata-grade redaction, not a whole-value drop) — so a persisted prompt stays useful for analysis
+// yet never hardens a credential onto disk. Global-flagged clones of the patterns so EVERY occurrence on a
+// line is scrubbed, not just the first; String#replace resets a global regex's lastIndex per call, so
+// reusing these module-level clones is safe. TOTAL: a non-string coerces (null/undefined → '').
+const SECRET_PATTERNS_GLOBAL = SECRET_PATTERNS.map((re) => new RegExp(re.source, 'g'));
+const SECRET_PLACEHOLDER = '[redacted]';
+
+function redactSecrets(text) {
+  let s = String(text == null ? '' : text); // NOT lowercased — the token shapes are case-sensitive.
+  for (const re of SECRET_PATTERNS_GLOBAL) s = s.replace(re, SECRET_PLACEHOLDER);
+  return s;
+}
+
 // Read the JSON object map at `file`, hand it to `mutate(map)`, and rewrite the file iff mutate signals
 // a change (returns truthy). Returns true when a write happened, false otherwise (including every
 // fail-open path). `mutate` mutates the map in place and returns whether it changed it. The fully
@@ -64,4 +80,4 @@ function coalesceSidecar(file, mutate) {
   }
 }
 
-module.exports = { coalesceSidecar };
+module.exports = { coalesceSidecar, secretScan, redactSecrets };

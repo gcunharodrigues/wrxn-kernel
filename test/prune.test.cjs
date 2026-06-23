@@ -21,7 +21,7 @@ const crypto = require('crypto');
 
 const PKG_ROOT = path.join(__dirname, '..');
 const PRUNE = path.join(PKG_ROOT, 'payload', '.claude', 'hooks', 'prune.cjs');
-const { prune, retain, MAX_AGE_DAYS, MAX_RECORDS, LOG_DIRS } = require('../payload/.claude/hooks/prune.cjs');
+const { prune, pruneFiles, retain, retainFiles, MAX_AGE_DAYS, MAX_RECORDS, MAX_FILES, LOG_DIRS } = require('../payload/.claude/hooks/prune.cjs');
 const { loadManifest } = require('../lib/manifest.cjs');
 const { init } = require('../lib/install.cjs');
 
@@ -39,6 +39,10 @@ function readLog(file) {
 const DAY = 86400000;
 const iso = (ms) => new Date(ms).toISOString();
 const sha = (file) => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'); // content fingerprint
+function touchFile(file, mtimeMs) {
+  const d = new Date(mtimeMs);
+  fs.utimesSync(file, d, d); // set the mtime the whole-file GC ages by
+}
 
 // ── AC: trims a jsonl log oldest-first down to maxRecords ────────────────────────────
 
@@ -165,7 +169,11 @@ test('retention bounds are exported named constants with sane defaults', () => {
   assert.equal(typeof MAX_AGE_DAYS, 'number', 'MAX_AGE_DAYS is a named constant');
   assert.equal(typeof MAX_RECORDS, 'number', 'MAX_RECORDS is a named constant');
   assert.ok(MAX_AGE_DAYS > 0 && MAX_RECORDS > 0, 'the bounds are positive');
-  assert.deepEqual(LOG_DIRS, ['.wrxn/dream', '.wrxn/sync', '.wrxn/harvest'], 'the three append-only log dirs');
+  assert.deepEqual(
+    LOG_DIRS,
+    ['.wrxn/dream', '.wrxn/sync', '.wrxn/harvest', '.wrxn/events'],
+    'the append-only log dirs — events added in S2 (#35) so the per-session event records are within-file bounded'
+  );
 });
 
 // ── shipping: managed payload, self-contained, laid into installs (session-end requires it) ──
@@ -314,4 +322,148 @@ test('prune rewrite leaves no temp behind on success — the original is replace
   assert.equal(res.rewritten, 1, 'the over-bound log is rewritten');
   assert.deepEqual(readLog(path.join(dir, 'audit.jsonl')).map((r) => r.n), [2, 3, 4, 5], 'content is correct after the atomic rewrite');
   assert.deepEqual(fs.readdirSync(dir).sort(), ['audit.jsonl'], 'no sibling temp file is left behind — the temp was renamed over the original');
+});
+
+// ── S2 (#35): WHOLE-FILE GC — old/empty per-session event files are deleted as whole files ──
+// The within-file prune (above) bounds records inside ONE file; it cannot delete a file. But the event
+// source writes one file PER SESSION, so the files themselves accumulate. pruneFiles GCs whole *.jsonl
+// files: an EMPTY file (e.g. one the within-file prune drained to nothing), a file whose mtime is older
+// than the age bound, and any beyond a newest-N file-count cap. PURE core (retainFiles) with the clock
+// INJECTED; the IO shell is symlink-safe + fail-open exactly like prune.
+
+test('retainFiles (pure): drops empty files and ages others by mtime against the injected clock', () => {
+  const now = Date.parse('2026-06-23T00:00:00Z');
+  const files = [
+    { name: 'old.jsonl', mtimeMs: now - 100 * DAY, size: 50 },   // mtime beyond 90d → drop
+    { name: 'fresh.jsonl', mtimeMs: now - 1 * DAY, size: 50 },   // within 90d → keep
+    { name: 'empty.jsonl', mtimeMs: now - 1 * DAY, size: 0 },    // empty (fresh) → drop on the size rule
+    { name: 'undatable.jsonl', mtimeMs: NaN, size: 50 },         // unknown mtime → keep (never drop what we cannot date)
+  ];
+  const kept = retainFiles(files, { maxAgeDays: 90, maxFiles: 9999, now }).map((f) => f.name).sort();
+  assert.deepEqual(kept, ['fresh.jsonl', 'undatable.jsonl'], 'empty + too-old dropped; fresh + undatable kept');
+});
+
+test('retainFiles (pure): the count cap keeps the newest maxFiles by mtime', () => {
+  const now = Date.parse('2026-06-23T00:00:00Z');
+  const files = [];
+  for (let i = 0; i < 5; i++) files.push({ name: `s${i}.jsonl`, mtimeMs: now - i * 1000, size: 10 }); // s0 newest
+  const kept = retainFiles(files, { maxAgeDays: 9999, maxFiles: 2, now }).map((f) => f.name).sort();
+  assert.deepEqual(kept, ['s0.jsonl', 's1.jsonl'], 'only the two newest-by-mtime survive the count cap');
+});
+
+test('retainFiles reads no wall clock (the clock is injected) and MAX_FILES is a sane named constant', () => {
+  const src = fs.readFileSync(PRUNE, 'utf8');
+  const m = src.match(/function retainFiles\([\s\S]*?\n}/);
+  assert.ok(m, 'retainFiles is defined');
+  assert.equal(/Date\.now\s*\(/.test(m[0]), false, 'retainFiles reads no wall clock');
+  assert.equal(typeof MAX_FILES, 'number', 'MAX_FILES is exported');
+  assert.ok(MAX_FILES > 0, 'MAX_FILES is positive');
+});
+
+test('pruneFiles deletes whole stale (old mtime) + empty event files, keeps fresh + non-jsonl', () => {
+  const dir = tmp('wrxn-prunefiles-');
+  const now = Date.parse('2026-06-23T00:00:00Z');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'fresh.jsonl'), JSON.stringify({ ts: iso(now - DAY) }) + '\n');
+  touchFile(path.join(dir, 'fresh.jsonl'), now - DAY);
+  fs.writeFileSync(path.join(dir, 'old.jsonl'), JSON.stringify({ ts: iso(now - 200 * DAY) }) + '\n');
+  touchFile(path.join(dir, 'old.jsonl'), now - 200 * DAY);
+  fs.writeFileSync(path.join(dir, 'drained.jsonl'), ''); // emptied by the within-file prune
+  touchFile(path.join(dir, 'drained.jsonl'), now - DAY);
+  fs.writeFileSync(path.join(dir, '.gitkeep'), ''); // the shipped sentinel — never a *.jsonl
+  const res = pruneFiles(dir, { maxAgeDays: 90, maxFiles: 9999, now });
+  assert.deepEqual(fs.readdirSync(dir).sort(), ['.gitkeep', 'fresh.jsonl'], 'old + empty *.jsonl deleted; fresh + non-jsonl preserved');
+  assert.equal(res.deleted, 2, 'two whole files GC\'d');
+});
+
+test('pruneFiles caps the event dir to the newest maxFiles whole files', () => {
+  const dir = tmp('wrxn-prunefiles-cap-');
+  const now = Date.parse('2026-06-23T00:00:00Z');
+  fs.mkdirSync(dir, { recursive: true });
+  for (let i = 0; i < 4; i++) {
+    const f = path.join(dir, `s${i}.jsonl`);
+    fs.writeFileSync(f, JSON.stringify({ ts: iso(now) }) + '\n');
+    touchFile(f, now - i * 1000); // s0 newest
+  }
+  pruneFiles(dir, { maxAgeDays: 9999, maxFiles: 2, now });
+  assert.deepEqual(fs.readdirSync(dir).sort(), ['s0.jsonl', 's1.jsonl'], 'only the two newest whole files survive the cap');
+});
+
+test('pruneFiles is fail-open + a safe no-op on missing / garbage input', () => {
+  let res;
+  assert.doesNotThrow(() => {
+    res = pruneFiles(path.join(tmp('wrxn-pf-missing-'), 'nope'));
+    pruneFiles(undefined);
+    pruneFiles(12345, { maxFiles: 'x', now: 'soon' });
+  });
+  assert.deepEqual(res, { scanned: 0, deleted: 0 }, 'missing dir → nothing scanned/deleted');
+});
+
+test('pruneFiles does NOT follow or delete a planted *.jsonl symlink out of the dir', (t) => {
+  const dir = tmp('wrxn-pf-symfile-');
+  const outDir = tmp('wrxn-pf-out-');
+  const now = Date.parse('2026-06-23T00:00:00Z');
+  const outside = path.join(outDir, 'secret.jsonl');
+  fs.writeFileSync(outside, JSON.stringify({ ts: iso(now - 500 * DAY) }) + '\n'); // ancient → would be GC'd if followed
+  touchFile(outside, now - 500 * DAY);
+  fs.mkdirSync(dir, { recursive: true });
+  try {
+    fs.symlinkSync(outside, path.join(dir, 'evil.jsonl'));
+  } catch {
+    t.skip('symlinks not supported on this platform');
+    return;
+  }
+  const res = pruneFiles(dir, { maxAgeDays: 90, maxFiles: 9999, now });
+  assert.ok(fs.existsSync(outside), 'the outside target is untouched — the symlink was not followed');
+  assert.equal(res.deleted, 0, 'the planted symlink is skipped, never deleted');
+});
+
+test('pruneFiles does NOT descend into a symlinked event dir', (t) => {
+  const realOut = tmp('wrxn-pf-realdir-');
+  const now = Date.parse('2026-06-23T00:00:00Z');
+  const outFile = path.join(realOut, 'old.jsonl');
+  fs.writeFileSync(outFile, JSON.stringify({ ts: iso(now - 500 * DAY) }) + '\n');
+  touchFile(outFile, now - 500 * DAY);
+  const base = tmp('wrxn-pf-symdir-');
+  const linkDir = path.join(base, 'events');
+  try {
+    fs.symlinkSync(realOut, linkDir, 'dir');
+  } catch {
+    t.skip('symlinks not supported on this platform');
+    return;
+  }
+  const res = pruneFiles(linkDir, { maxAgeDays: 90, maxFiles: 9999, now });
+  assert.ok(fs.existsSync(outFile), 'a symlinked event dir is not descended — the outside files are untouched');
+  assert.equal(res.deleted, 0, 'nothing is deleted through a symlinked event dir');
+});
+
+// ── AC: the session-end hook GCs whole stale/empty event files in .wrxn/events end-to-end ──
+
+test('the session-end hook GCs whole stale + drained event files in .wrxn/events, preserving fresh + .gitkeep', () => {
+  const target = tmp('wrxn-events-gc-wiring-');
+  init({ pkgRoot: PKG_ROOT, target, profile: 'project' });
+  const realNow = Date.now(); // the real hook dates against wall time, so seed relative to it
+  const eventsDir = path.join(target, '.wrxn', 'events');
+  // ancient: 1 record well beyond MAX_AGE_DAYS — within-file prune drains it to empty, whole-file GC then removes it
+  const ancient = path.join(eventsDir, 'ancient.jsonl');
+  fs.writeFileSync(ancient, JSON.stringify({ ts: iso(realNow - 200 * DAY), sid: 'ancient', kind: 'prompt', text: 'x' }) + '\n');
+  touchFile(ancient, realNow - 200 * DAY);
+  // drained: already empty (a prior prune) → whole-file GC removes it
+  const drained = path.join(eventsDir, 'drained.jsonl');
+  fs.writeFileSync(drained, '');
+  touchFile(drained, realNow - DAY);
+  // fresh: a recent record → survives both passes
+  const fresh = path.join(eventsDir, 'fresh.jsonl');
+  fs.writeFileSync(fresh, JSON.stringify({ ts: iso(realNow - DAY), sid: 'fresh', kind: 'prompt', text: 'y' }) + '\n');
+  touchFile(fresh, realNow - DAY);
+  execFileSync('node', [path.join(target, '.claude', 'hooks', 'session-end-reward.cjs')], {
+    input: JSON.stringify({ session_id: 'events-gc', cwd: target }),
+    encoding: 'utf8',
+    env: { ...process.env, CLAUDE_PROJECT_DIR: target },
+  });
+  const remaining = fs.readdirSync(eventsDir).sort();
+  assert.ok(remaining.includes('fresh.jsonl'), 'the fresh event file survives');
+  assert.ok(!remaining.includes('ancient.jsonl'), 'the ancient event file is GC\'d as a whole file');
+  assert.ok(!remaining.includes('drained.jsonl'), 'the drained (empty) event file is GC\'d');
+  assert.ok(remaining.includes('.gitkeep'), 'the shipped .gitkeep sentinel is preserved');
 });

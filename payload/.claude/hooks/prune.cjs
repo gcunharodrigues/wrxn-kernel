@@ -28,8 +28,10 @@ const MAX_AGE_DAYS = 90; // one quarter of history — the primary bound; older 
 const MAX_RECORDS = 500; // hard per-file ceiling — the safety net against pathological (runaway-append) growth
 const MS_PER_DAY = 86400000;
 
-// The install-relative log dirs the session-end hook sweeps. (S2 will add `events/` here.)
-const LOG_DIRS = ['.wrxn/dream', '.wrxn/sync', '.wrxn/harvest'];
+// The install-relative log dirs the session-end hook sweeps for WITHIN-FILE record bounding. `.wrxn/events`
+// (the S2/#35 metadata-grade event source) is included so a long session's per-session *.jsonl is bounded
+// by age + count like the rest; whole STALE event FILES are GC'd separately by pruneFiles (below).
+const LOG_DIRS = ['.wrxn/dream', '.wrxn/sync', '.wrxn/harvest', '.wrxn/events'];
 
 // Coerce an injected clock (ms-epoch number or a Date) to ms. Anything else → NaN (no clock).
 function clockMs(now) {
@@ -156,4 +158,95 @@ function prune(dir, opts) {
   return out;
 }
 
-module.exports = { prune, retain, MAX_AGE_DAYS, MAX_RECORDS, LOG_DIRS };
+// ── WHOLE-FILE GC (S2 / #35) ─────────────────────────────────────────────────────────
+//
+// The event source writes one file PER SESSION, so the FILES accumulate even though retain bounds the
+// records WITHIN each file. pruneFiles GCs whole *.jsonl files; retainFiles is its PURE core (same split
+// as retain/prune: the clock is INJECTED, no Date.now() here).
+
+const MAX_FILES = 200; // per-dir whole-file ceiling — the safety net (mirrors MAX_RECORDS) against unbounded per-session files
+
+/**
+ * PURE: given file descriptors {name, mtimeMs, size}, return the survivors (the files to KEEP).
+ * EMPTY-DROP: a size-0 file (e.g. one the within-file prune drained to nothing) is dropped — it carries
+ *   no records. AGE-DROP: a file whose mtime is older than `now - maxAgeDays` is dropped; a file with NO
+ *   datable mtime is NEVER aged out (conservative). The clock is INJECTED via `now`; with no clock, age
+ *   is skipped. COUNT-TRIM: of what remains, keep the newest `maxFiles` by mtime.
+ * @param {{name:string, mtimeMs:number, size:number}[]} files
+ * @param {{maxAgeDays?:number, maxFiles?:number, now?:number|Date}} [opts]
+ * @returns {object[]}
+ */
+function retainFiles(files, { maxAgeDays = MAX_AGE_DAYS, maxFiles = MAX_FILES, now } = {}) {
+  let kept = (Array.isArray(files) ? files : []).filter((f) => f && typeof f.name === 'string');
+  kept = kept.filter((f) => !(Number.isFinite(f.size) && f.size === 0)); // empty file → no records → drop
+  const clock = clockMs(now);
+  if (Number.isFinite(maxAgeDays) && maxAgeDays > 0 && Number.isFinite(clock)) {
+    const cutoff = clock - maxAgeDays * MS_PER_DAY;
+    kept = kept.filter((f) => {
+      const t = Number(f.mtimeMs);
+      return Number.isFinite(t) ? t >= cutoff : true; // undatable mtime → keep
+    });
+  }
+  if (Number.isFinite(maxFiles) && maxFiles >= 0 && kept.length > maxFiles) {
+    kept = [...kept].sort((a, b) => Number(b.mtimeMs) - Number(a.mtimeMs)).slice(0, maxFiles); // newest-first, keep N
+  }
+  return kept;
+}
+
+/**
+ * IO shell: delete whole stale `*.jsonl` files directly under `dir` (the non-survivors of retainFiles).
+ * The clock defaults to Date.now() here, then flows into the pure core. SYMLINK-SAFE exactly like prune:
+ * lstat refuses a symlinked dir (no descend) and processes ONLY regular files (a planted *.jsonl symlink
+ * is skipped, never deleted/followed). SAFE NO-OP on a missing/empty dir. FAIL-OPEN: never throws — one
+ * bad entry never aborts the sweep.
+ * @param {string} dir
+ * @param {{maxAgeDays?:number, maxFiles?:number, now?:number}} [opts]
+ * @returns {{scanned:number, deleted:number}}
+ */
+function pruneFiles(dir, opts) {
+  const out = { scanned: 0, deleted: 0 };
+  try {
+    const o = opts && typeof opts === 'object' ? opts : {};
+    const now = Number.isFinite(clockMs(o.now)) ? clockMs(o.now) : Date.now();
+    let dirStat;
+    try {
+      dirStat = fs.lstatSync(dir);
+    } catch {
+      return out; // missing / unreadable dir → no-op
+    }
+    if (!dirStat.isDirectory()) return out; // a symlink (or non-dir) at the event-dir path → do not descend
+    let names;
+    try {
+      names = fs.readdirSync(dir);
+    } catch {
+      return out;
+    }
+    const descriptors = [];
+    for (const name of names) {
+      if (!name.endsWith('.jsonl')) continue; // never touch the .gitkeep sentinel or anything non-jsonl
+      try {
+        const st = fs.lstatSync(path.join(dir, name)); // lstat → never follow a symlink
+        if (!st.isFile()) continue; // a planted symlink / sub-dir / special file → skip
+        out.scanned++;
+        descriptors.push({ name, mtimeMs: st.mtimeMs, size: st.size });
+      } catch {
+        /* one bad entry never aborts the sweep */
+      }
+    }
+    const survivors = new Set(retainFiles(descriptors, { maxAgeDays: o.maxAgeDays, maxFiles: o.maxFiles, now }).map((f) => f.name));
+    for (const d of descriptors) {
+      if (survivors.has(d.name)) continue;
+      try {
+        fs.unlinkSync(path.join(dir, d.name));
+        out.deleted++;
+      } catch {
+        /* best-effort: a failed unlink never aborts the sweep */
+      }
+    }
+  } catch {
+    /* fail-open: whole-file GC must never throw into session shutdown */
+  }
+  return out;
+}
+
+module.exports = { prune, pruneFiles, retain, retainFiles, MAX_AGE_DAYS, MAX_RECORDS, MAX_FILES, LOG_DIRS };

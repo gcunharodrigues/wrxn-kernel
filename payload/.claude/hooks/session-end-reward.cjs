@@ -28,7 +28,7 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 const { coalesceSidecar } = require('./sidecar.cjs');
 const { updateReward } = require('./reward.cjs');
-const { prune, LOG_DIRS } = require('./prune.cjs');
+const { prune, pruneFiles, LOG_DIRS } = require('./prune.cjs');
 
 const BASELINE_DIR_REL = ['.wrxn', 'baseline'];
 const SURFACED_REL = ['.wrxn', 'surfaced.json'];
@@ -236,6 +236,9 @@ function main() {
   if (root) {
     try {
       for (const rel of LOG_DIRS) prune(path.join(root, rel));
+      // S2 (#35): the event source writes one file per session, so after the within-file pass also GC
+      // whole STALE / drained event files (the within-file prune can bound records but never delete a file).
+      pruneFiles(path.join(root, '.wrxn', 'events'));
     } catch {
       /* retention is best-effort — never block shutdown */
     }
