@@ -172,3 +172,121 @@ test('session-start does NOT surface a leftover session page when there is no ba
   assert.doesNotMatch(ctx, /\.wrxn\/wiki\/sessions/, 'orientation does not reference the retired sessions tier');
   assert.match(ctx, /no prior|fresh|first session/i, 'with no baton it reports no prior handoff');
 });
+
+// ── #51: SessionStart baton-staleness guard (double-spawn-resilient) ─────────────
+// The handoff baton (.wrxn/continuity/latest.md) is surfaced as the resume point with no health check, so
+// a baton frozen by a failed SessionEnd synth (no-engine / error) is shown as current — silently (real
+// incident 2026-06-22→23: the baton froze ~20h while .synth.log logged no-engine). `batonStaleness` is the
+// PURE decision: given the baton's mtime + the synth-log rows (chronological, newest-resolvable last) it
+// returns the FAILING outcome to name, or null when fresh. Unit-tested directly (the holdDecision idiom);
+// then a black-box assertion that main() surfaces the warning given an on-disk stale log + baton.
+
+const { batonStaleness } = sessionStart;
+const T = 1_700_000_000_000; // a fixed base epoch-ms for synthetic rows (clock-free decision)
+const synthLogPath = (target) => path.join(target, '.wrxn', 'continuity', '.synth.log');
+
+test('batonStaleness warns when the baton predates a newer failed run with no wrote since (AC a)', () => {
+  const failing = batonStaleness({
+    batonMtimeMs: T,
+    rows: [
+      { timestampMs: T - 5000, outcome: 'wrote' },       // an OLD success (before the baton) does NOT rescue
+      { timestampMs: T + 10000, outcome: 'no-engine' },  // newest attempt failed, AFTER the baton write
+    ],
+  });
+  assert.equal(failing, 'no-engine', 'stale → names the failing outcome');
+});
+
+test('batonStaleness treats an error… newest row as a failure (AC a)', () => {
+  assert.equal(
+    batonStaleness({ batonMtimeMs: T, rows: [{ timestampMs: T + 9000, outcome: 'error: claude CLI ENOENT' }] }),
+    'error: claude CLI ENOENT',
+  );
+});
+
+test('batonStaleness does NOT warn when the baton is newer than the last row (AC b)', () => {
+  const failing = batonStaleness({
+    batonMtimeMs: T + 100000,                            // baton written AFTER every logged attempt
+    rows: [
+      { timestampMs: T, outcome: 'wrote' },
+      { timestampMs: T + 5000, outcome: 'no-engine' },
+    ],
+  });
+  assert.equal(failing, null);
+});
+
+test('batonStaleness does NOT warn when the newest row is wrote/trivial (AC c)', () => {
+  assert.equal(
+    batonStaleness({
+      batonMtimeMs: T,
+      rows: [{ timestampMs: T - 1000, outcome: 'no-engine' }, { timestampMs: T + 5000, outcome: 'wrote' }],
+    }),
+    null,
+    'a healthy wrote newest → fresh',
+  );
+  assert.equal(
+    batonStaleness({ batonMtimeMs: T, rows: [{ timestampMs: T + 5000, outcome: 'trivial' }] }),
+    null,
+    'a trivial newest → fresh',
+  );
+});
+
+test('batonStaleness does NOT cry wolf on the double-spawn wrote-then-no-engine pattern (AC d, #45)', () => {
+  const failing = batonStaleness({
+    batonMtimeMs: T,
+    rows: [
+      { timestampMs: T + 50, outcome: 'wrote' },         // the successful write (≥ the baton mtime it wrote)
+      { timestampMs: T + 2000, outcome: 'no-engine' },   // a spurious second spawn ~2s later
+    ],
+  });
+  assert.equal(failing, null, 'a wrote row ≥ baton mtime suppresses the warning');
+});
+
+test('batonStaleness is fail-safe on a missing/empty log — no rows → no warn, no throw (AC e)', () => {
+  assert.doesNotThrow(() => {
+    assert.equal(batonStaleness({ batonMtimeMs: T, rows: [] }), null);
+    assert.equal(batonStaleness({ batonMtimeMs: T, rows: undefined }), null);
+    assert.equal(batonStaleness({}), null);
+  });
+});
+
+test('session-start surfaces a staleness warning naming the outcome + baton age + the synth log (AC2)', () => {
+  const target = freshInstall('wrxn-sess-stale-');
+  const realNow = Date.now();
+  const batonMtime = realNow - 20 * 3600 * 1000; // baton frozen ~20h ago (the real incident shape)
+  fs.mkdirSync(path.dirname(batonPath(target)), { recursive: true });
+  fs.writeFileSync(batonPath(target), '# Handoff\nNEXT: ship issue 11\n');
+  fs.utimesSync(batonPath(target), new Date(batonMtime), new Date(batonMtime));
+  // the latest synth attempt FAILED (no-engine), logged AFTER the frozen baton, with no wrote since.
+  fs.writeFileSync(
+    synthLogPath(target),
+    `${new Date(realNow).toISOString()}\tsid-x\thandoff\t-\tattempts=0\tno-engine\n`,
+  );
+
+  const env = runHook(START, { session_id: 'sid-stale', source: 'startup' }, target);
+  const ctx = env.hookSpecificOutput.additionalContext;
+  assert.match(ctx, /ship issue 11/, 'the baton is still surfaced as the resume');
+  assert.match(ctx, /stale/i, 'a staleness warning fires');
+  assert.match(ctx, /no-engine/, 'the warning NAMES the failing outcome');
+  assert.match(ctx, /\b\d+h\b/, 'the warning NAMES the baton age in hours');
+  assert.match(ctx, /\.wrxn\/continuity\/\.synth\.log/, 'the warning POINTS at the synth log');
+});
+
+test('session-start does NOT warn on the double-spawn wrote-then-no-engine pattern (no false alarm)', () => {
+  const target = freshInstall('wrxn-sess-nofalse-');
+  const realNow = Date.now();
+  const t0 = realNow - 3600 * 1000; // a healthy baton from ~1h ago
+  fs.mkdirSync(path.dirname(batonPath(target)), { recursive: true });
+  fs.writeFileSync(batonPath(target), '# Handoff\nNEXT: do the thing\n');
+  fs.utimesSync(batonPath(target), new Date(t0), new Date(t0));
+  // a successful write (logged just after the baton) then a spurious second spawn 1min later.
+  fs.writeFileSync(
+    synthLogPath(target),
+    `${new Date(t0 + 60000).toISOString()}\tsid-y\thandoff\tgemini\tattempts=1\twrote\n` +
+      `${new Date(t0 + 120000).toISOString()}\tsid-y\thandoff\t-\tattempts=0\tno-engine\n`,
+  );
+
+  const env = runHook(START, { session_id: 'sid-nofalse', source: 'startup' }, target);
+  const ctx = env.hookSpecificOutput.additionalContext;
+  assert.match(ctx, /do the thing/, 'the baton resume is surfaced');
+  assert.doesNotMatch(ctx, /stale/i, 'a wrote row ≥ baton mtime means no false staleness alarm');
+});
