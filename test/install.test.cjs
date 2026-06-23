@@ -117,6 +117,24 @@ test('the synth log is NOT a payload manifest entry (install state, never shippe
   assert.ok(!PAYLOAD_PATHS.includes('.wrxn/continuity/.synth.log'), 'the synth log must never be a shipped payload file');
 });
 
+// ── #45 F1 (security): the once-per-session spawn markers are install state — gitignored ──
+// memory-synth-spawn.cjs claims each session with a persistent `.wrxn/continuity/.spawned-<id>` marker.
+// Like .synth.log, these are install runtime state (generated at runtime, never shipped): init must
+// gitignore them so a routine `git add -A` can never commit them, and they must not be payload entries.
+
+test('init gitignores the once-per-session spawn markers so they are never committed (#45 F1)', () => {
+  const target = tmp('wrxn-spawnmarker-gi-');
+  init({ pkgRoot: PKG_ROOT, target, profile: 'project' });
+
+  const gi = fs.readFileSync(path.join(target, '.gitignore'), 'utf8');
+  assert.match(gi, /^\.wrxn\/continuity\/\.spawned-\*$/m, 'the .spawned-* marker glob is gitignored after init');
+
+  // idempotent: a second init does not duplicate the line
+  init({ pkgRoot: PKG_ROOT, target, profile: 'project' });
+  const lines = fs.readFileSync(path.join(target, '.gitignore'), 'utf8').split('\n').filter((l) => l.trim() === '.wrxn/continuity/.spawned-*');
+  assert.equal(lines.length, 1, 'the spawn-marker ignore line appears exactly once');
+});
+
 // ── #13 / S2: the reward learning state is install STATE — gitignored, never shipped ──
 // session-start stamps a per-session start-HEAD baseline under .wrxn/baseline/ and the session-end
 // reward shell keeps the coalesced reward sidecar at .wrxn/reward.json. Both are runtime STATE: init
