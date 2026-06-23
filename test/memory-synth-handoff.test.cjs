@@ -373,10 +373,10 @@ test('runHandoff gives up after 3 bounded attempts on a persistent failure, pres
 // The retry only fires for a transient `ok:false`. A `gemini` engine with no API key must still fail
 // immediately to its own path (no key → no request) — it never reaches the invoker, retried or not.
 
-test('runHandoff: a gemini fallback with no API key is never invoked and is not retried (no key → no request)', async () => {
+test('runHandoff: a gemini primary with no API key is never invoked and is not retried (no key → no request)', async () => {
   const root = tmp('wrxn-handoff-nokey-');
   stageSession(root, REAL_SESSION);
-  // claude persistently fails; the gemini fallback has no key (no .env). Capture every engine reached.
+  // the gemini primary has no key (no .env); the claude fallback persistently fails. Capture every engine reached.
   const { invoke, calls } = flakyClaude(99, 'NEVER');
 
   const res = await synth.runHandoff({ root, invoke, sleep: noSleep });

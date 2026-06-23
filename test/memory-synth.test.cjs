@@ -24,17 +24,17 @@ function tmp(prefix) {
 
 // ── config parse + defaults ───────────────────────────────────────────────────
 // memory.config.json holds per-task {primary,fallback} of {engine,model}; defaults are
-// claude/claude-sonnet-4-6 primary, gemini/gemini-3.1-flash-lite fallback (PRD default tiering).
+// gemini/gemini-3.1-flash-lite primary, claude/claude-sonnet-4-6 fallback (the shipped default tiering).
 
 test('loadConfig returns the default tiering when no memory.config.json is present', () => {
   const root = tmp('wrxn-synth-cfg-');
   const cfg = synth.loadConfig(root);
   const handoff = synth.resolveTask(cfg, 'handoff');
-  assert.deepEqual(handoff.primary, { engine: 'claude', model: 'claude-sonnet-4-6' });
-  assert.deepEqual(handoff.fallback, { engine: 'gemini', model: 'gemini-3.1-flash-lite' });
+  assert.deepEqual(handoff.primary, { engine: 'gemini', model: 'gemini-3.1-flash-lite' });
+  assert.deepEqual(handoff.fallback, { engine: 'claude', model: 'claude-sonnet-4-6' });
   const dream = synth.resolveTask(cfg, 'dream');
-  assert.deepEqual(dream.primary, { engine: 'claude', model: 'claude-sonnet-4-6' });
-  assert.deepEqual(dream.fallback, { engine: 'gemini', model: 'gemini-3.1-flash-lite' });
+  assert.deepEqual(dream.primary, { engine: 'gemini', model: 'gemini-3.1-flash-lite' });
+  assert.deepEqual(dream.fallback, { engine: 'claude', model: 'claude-sonnet-4-6' });
 });
 
 test('loadConfig deep-merges a partial operator override over the defaults so every task still resolves both engines', () => {
@@ -43,20 +43,20 @@ test('loadConfig deep-merges a partial operator override over the defaults so ev
   // an operator overrides ONE field of ONE task — just the handoff primary model.
   fs.writeFileSync(
     path.join(root, '.wrxn', 'memory.config.json'),
-    JSON.stringify({ tasks: { handoff: { primary: { model: 'claude-opus-4-8' } } } }),
+    JSON.stringify({ tasks: { handoff: { primary: { model: 'gemini-3.1-pro' } } } }),
   );
 
   const cfg = synth.loadConfig(root);
 
   // the overridden field wins; the rest of that pair keeps its default (engine unchanged).
   const handoff = synth.resolveTask(cfg, 'handoff');
-  assert.deepEqual(handoff.primary, { engine: 'claude', model: 'claude-opus-4-8' }, 'override merges over the default primary');
-  assert.deepEqual(handoff.fallback, { engine: 'gemini', model: 'gemini-3.1-flash-lite' }, 'the un-touched fallback survives');
+  assert.deepEqual(handoff.primary, { engine: 'gemini', model: 'gemini-3.1-pro' }, 'override merges over the default primary');
+  assert.deepEqual(handoff.fallback, { engine: 'claude', model: 'claude-sonnet-4-6' }, 'the un-touched fallback survives');
 
   // a task the operator never mentioned is still fully resolved from the defaults.
   const dream = synth.resolveTask(cfg, 'dream');
-  assert.deepEqual(dream.primary, { engine: 'claude', model: 'claude-sonnet-4-6' });
-  assert.deepEqual(dream.fallback, { engine: 'gemini', model: 'gemini-3.1-flash-lite' });
+  assert.deepEqual(dream.primary, { engine: 'gemini', model: 'gemini-3.1-flash-lite' });
+  assert.deepEqual(dream.fallback, { engine: 'claude', model: 'claude-sonnet-4-6' });
 });
 
 // ── transcript-blob builder ─────────────────────────────────────────────────────
@@ -169,22 +169,22 @@ const DEFAULT_CFG = synth.DEFAULTS;
 const noSleep = () => {};
 
 test('synthesize falls back to the secondary engine when the primary fails, in order', async () => {
-  const { invoke, calls } = fakeInvoke({ claude: { ok: false }, gemini: { ok: true, text: 'FALLBACK HANDOFF' } });
+  const { invoke, calls } = fakeInvoke({ gemini: { ok: false }, claude: { ok: true, text: 'FALLBACK HANDOFF' } });
   const text = await synth.synthesize({ task: 'handoff', prompt: 'P', blob: 'B', config: DEFAULT_CFG, apiKey: 'KEY', invoke, sleep: noSleep });
   assert.equal(text, 'FALLBACK HANDOFF', 'the fallback engine text is returned');
-  // claude is exhausted (it is retried on a transient failure) BEFORE gemini is reached, and gemini wins.
+  // gemini is exhausted (it is retried on a transient failure) BEFORE claude is reached, and claude wins.
   const seq = calls.map((c) => c.engine);
-  const firstGemini = seq.indexOf('gemini');
-  assert.ok(firstGemini > 0, 'gemini (the fallback) is tried, and only after claude');
-  assert.ok(seq.slice(0, firstGemini).every((e) => e === 'claude'), 'every attempt before the fallback was the claude primary');
-  assert.equal(seq[seq.length - 1], 'gemini', 'the fallback engine is the last one tried');
+  const firstClaude = seq.indexOf('claude');
+  assert.ok(firstClaude > 0, 'claude (the fallback) is tried, and only after gemini');
+  assert.ok(seq.slice(0, firstClaude).every((e) => e === 'gemini'), 'every attempt before the fallback was the gemini primary');
+  assert.equal(seq[seq.length - 1], 'claude', 'the fallback engine is the last one tried');
 });
 
 test('synthesize short-circuits on a successful primary — the fallback is never attempted', async () => {
-  const { invoke, calls } = fakeInvoke({ claude: { ok: true, text: 'PRIMARY HANDOFF' }, gemini: { ok: true, text: 'FB' } });
+  const { invoke, calls } = fakeInvoke({ gemini: { ok: true, text: 'PRIMARY HANDOFF' }, claude: { ok: true, text: 'FB' } });
   const text = await synth.synthesize({ task: 'handoff', prompt: 'P', blob: 'B', config: DEFAULT_CFG, apiKey: 'KEY', invoke });
   assert.equal(text, 'PRIMARY HANDOFF');
-  assert.deepEqual(calls.map((c) => c.engine), ['claude'], 'no fallback call once the primary returns text');
+  assert.deepEqual(calls.map((c) => c.engine), ['gemini'], 'no fallback call once the primary returns text');
 });
 
 // ── graceful degradation: missing CLI / missing key / invoker error → null (never throws) ──
@@ -196,8 +196,8 @@ test('synthesize degrades to null when the CLI is unavailable AND there is no ke
     text = await synth.synthesize({ task: 'handoff', prompt: 'P', blob: 'B', config: DEFAULT_CFG, apiKey: undefined, invoke, sleep: noSleep });
   });
   assert.equal(text, null, 'no engine available → null, so the caller writes nothing');
-  // claude is exhausted (retried) but gemini is NEVER reached without a key (no key → no request).
-  assert.ok(calls.length >= 1 && calls.every((c) => c.engine === 'claude'), 'only the claude primary is ever invoked; gemini is never invoked without an API key');
+  // gemini (the keyless primary) is NEVER reached without a key (no key → no request); only the claude fallback is exhausted (retried).
+  assert.ok(calls.length >= 1 && calls.every((c) => c.engine === 'claude'), 'only the claude fallback is ever invoked; gemini (the keyless primary) is never invoked without an API key');
 });
 
 test('synthesize never throws when an engine invoker throws — it degrades to the next engine, then to null', async () => {
@@ -287,8 +287,8 @@ test('the seeded payload memory.config.json parses to the default tiering', () =
   fs.mkdirSync(path.join(root, '.wrxn'), { recursive: true });
   fs.copyFileSync(seeded, path.join(root, '.wrxn', 'memory.config.json'));
   const handoff = synth.resolveTask(synth.loadConfig(root), 'handoff');
-  assert.deepEqual(handoff.primary, { engine: 'claude', model: 'claude-sonnet-4-6' });
-  assert.deepEqual(handoff.fallback, { engine: 'gemini', model: 'gemini-3.1-flash-lite' });
+  assert.deepEqual(handoff.primary, { engine: 'gemini', model: 'gemini-3.1-flash-lite' });
+  assert.deepEqual(handoff.fallback, { engine: 'claude', model: 'claude-sonnet-4-6' });
 });
 
 test('the manifest registers memory-synth.cjs (managed) and memory.config.json (seeded, preserved on update)', () => {
@@ -304,4 +304,23 @@ test('the manifest registers memory-synth.cjs (managed) and memory.config.json (
   assert.ok(cfg, 'the config is registered');
   assert.equal(cfg.class, 'seeded', 'the config is seeded — an operator edit survives wrxn update');
   assert.equal(cfg.profile, 'project');
+});
+
+test('.env.example ships in the payload, documents GEMINI_API_KEY, and is loadEnv-parseable', () => {
+  const example = path.join(PKG_ROOT, 'payload', '.env.example');
+  assert.ok(fs.existsSync(example), '.env.example ships in the payload');
+  const body = fs.readFileSync(example, 'utf8');
+  assert.match(body, /^GEMINI_API_KEY=/m, 'it documents the GEMINI_API_KEY the gemini synth engine reads');
+  // it is parseable by the same loadEnv the synth uses to read the real .env (the config/secret split).
+  const root = tmp('wrxn-env-example-');
+  fs.copyFileSync(example, path.join(root, '.env'));
+  assert.ok('GEMINI_API_KEY' in synth.loadEnv(root), 'loadEnv parses the documented key (KEY=value, # comments ok)');
+});
+
+test('the manifest registers .env.example (managed, project) so init/update lay it', () => {
+  const manifest = loadManifest(path.join(PKG_ROOT, 'manifest.json'));
+  const entry = manifest.files.find((f) => f.path === '.env.example');
+  assert.ok(entry, '.env.example is registered in the manifest');
+  assert.equal(entry.class, 'managed', '.env.example is managed (refreshed on update)');
+  assert.equal(entry.profile, 'project');
 });
