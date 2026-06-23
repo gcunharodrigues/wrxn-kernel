@@ -64,6 +64,9 @@ function retain(records, { maxAgeDays = MAX_AGE_DAYS, maxRecords = MAX_RECORDS, 
   return kept;
 }
 
+// Monotonic disambiguator for the atomic-rewrite temp name — no wall clock needed in the IO shell.
+let tmpSeq = 0;
+
 // Prune one jsonl file. Returns true iff it was rewritten. CORRUPT-SAFE: if any non-empty line fails to
 // parse, return false and leave the file byte-intact (never truncate on parse failure). A re-serialized
 // survivor is byte-faithful to a compact jsonl line (JSON.stringify(JSON.parse(x)) preserves key order).
@@ -89,7 +92,17 @@ function pruneFile(file, opts) {
   const survivors = retain(records, opts);
   if (survivors.length === records.length) return false; // nothing dropped → coalesced no-op (no rewrite)
   const body = survivors.length ? survivors.map((r) => JSON.stringify(r)).join('\n') + '\n' : '';
-  fs.writeFileSync(file, body);
+  // ATOMIC REWRITE: write survivors to a sibling temp, then rename it OVER the original. A torn write
+  // (crash / ENOSPC) can only damage the temp — the live log is replaced in ONE atomic step, or not at
+  // all. On any failure the original survives byte-intact (fail-open) and the partial temp is removed.
+  const tmpFile = `${file}.${process.pid}.${tmpSeq++}.tmp`; // same dir ⇒ rename is atomic (one filesystem)
+  try {
+    fs.writeFileSync(tmpFile, body);
+    fs.renameSync(tmpFile, file);
+  } catch {
+    try { fs.unlinkSync(tmpFile); } catch { /* nothing to clean up */ }
+    return false; // rewrite failed → leave the original untouched
+  }
   return true;
 }
 
@@ -108,17 +121,31 @@ function prune(dir, opts) {
     // Resolve the clock HERE (the shell) — defaulting to Date.now() — then inject it into the pure core.
     const now = Number.isFinite(clockMs(o.now)) ? clockMs(o.now) : Date.now();
     const ropts = { maxAgeDays: o.maxAgeDays, maxRecords: o.maxRecords, now };
+    // SYMLINK-SAFE (dir): refuse to descend into anything that is not a REAL directory. lstat does NOT
+    // follow the link, so a symlinked log path (e.g. .wrxn/dream → /outside) is a no-op — never swept.
+    let dirStat;
+    try {
+      dirStat = fs.lstatSync(dir);
+    } catch {
+      return out; // missing / unreadable dir → no-op
+    }
+    if (!dirStat.isDirectory()) return out; // a symlink (or non-dir) at the log path → do not descend
     let names;
     try {
       names = fs.readdirSync(dir);
     } catch {
-      return out; // missing / unreadable dir → no-op
+      return out; // unreadable dir → no-op
     }
     for (const name of names) {
       if (!name.endsWith('.jsonl')) continue;
       try {
+        const file = path.join(dir, name);
+        // SYMLINK-SAFE (entry): lstat does NOT follow the link, so we process ONLY a regular file. A
+        // planted *.jsonl symlink (or a sub-dir / special file) is skipped — this destructive rewrite can
+        // never follow a link out of the log dir to trim a file outside it.
+        if (!fs.lstatSync(file).isFile()) continue;
         out.scanned++;
-        if (pruneFile(path.join(dir, name), ropts)) out.rewritten++;
+        if (pruneFile(file, ropts)) out.rewritten++;
       } catch {
         /* one bad file never aborts the sweep */
       }

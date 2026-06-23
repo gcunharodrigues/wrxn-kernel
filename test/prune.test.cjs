@@ -17,6 +17,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
+const crypto = require('crypto');
 
 const PKG_ROOT = path.join(__dirname, '..');
 const PRUNE = path.join(PKG_ROOT, 'payload', '.claude', 'hooks', 'prune.cjs');
@@ -37,6 +38,7 @@ function readLog(file) {
 }
 const DAY = 86400000;
 const iso = (ms) => new Date(ms).toISOString();
+const sha = (file) => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'); // content fingerprint
 
 // ── AC: trims a jsonl log oldest-first down to maxRecords ────────────────────────────
 
@@ -223,4 +225,93 @@ test('the session-end hook prunes every log dir (dream/, sync/, harvest/) end-to
   for (const [where, file] of Object.entries(files)) {
     assert.deepEqual(readLog(file).map((r) => r.n), ['fresh'], `${where}/ pruned to the fresh record only`);
   }
+});
+
+// ── AC: symlink-safe — a destructive rewrite never follows a symlink out of the log dir ──
+
+test('prune does NOT follow a *.jsonl symlink out of the log dir (the outside target is untouched)', (t) => {
+  const dir = tmp('wrxn-prune-symlink-file-');
+  const outDir = tmp('wrxn-prune-outside-file-');
+  const now = Date.parse('2026-06-22T00:00:00Z');
+  // An OUTSIDE log, over both bounds — it WOULD be trimmed if prune ever wrote through the link.
+  const outside = path.join(outDir, 'secret.jsonl');
+  const recs = [];
+  for (let i = 0; i < 6; i++) recs.push({ ts: iso(now - (6 - i) * 1000), op: 'stage', n: i });
+  writeLog(outDir, 'secret.jsonl', recs);
+  const before = sha(outside);
+  // Plant a *.jsonl SYMLINK inside the swept log dir, pointing at the outside file.
+  fs.mkdirSync(dir, { recursive: true });
+  const link = path.join(dir, 'evil.jsonl');
+  try {
+    fs.symlinkSync(outside, link);
+  } catch {
+    t.skip('symlinks not supported on this platform');
+    return;
+  }
+  const res = prune(dir, { maxRecords: 4, maxAgeDays: 9999, now });
+  assert.equal(sha(outside), before, 'the outside target is byte-for-byte untouched — the symlink was not followed');
+  assert.equal(res.rewritten, 0, 'the planted symlink is skipped, never rewritten');
+});
+
+test('prune does NOT descend into a symlinked log DIR (outside files are untouched)', (t) => {
+  const realOut = tmp('wrxn-prune-realdir-'); // a REAL dir of REAL logs, OUTSIDE the install
+  const now = Date.parse('2026-06-22T00:00:00Z');
+  const outFile = path.join(realOut, 'staged.jsonl');
+  const recs = [];
+  for (let i = 0; i < 6; i++) recs.push({ ts: iso(now - (6 - i) * 1000), op: 'stage', n: i });
+  writeLog(realOut, 'staged.jsonl', recs);
+  const before = sha(outFile);
+  // The swept log path is itself a SYMLINK to the outside dir.
+  const base = tmp('wrxn-prune-symdir-');
+  const linkDir = path.join(base, 'dream');
+  try {
+    fs.symlinkSync(realOut, linkDir, 'dir');
+  } catch {
+    t.skip('symlinks not supported on this platform');
+    return;
+  }
+  const res = prune(linkDir, { maxRecords: 4, maxAgeDays: 9999, now });
+  assert.equal(sha(outFile), before, 'a symlinked log dir is not descended — the outside files are untouched');
+  assert.equal(res.rewritten, 0, 'nothing is rewritten through a symlinked log dir');
+});
+
+// ── AC: atomic rewrite — a torn write (crash/ENOSPC) never damages the live log ──
+
+test('prune rewrite is atomic — a torn write leaves the original log byte-intact (temp+rename)', () => {
+  const dir = tmp('wrxn-prune-atomic-fail-');
+  const now = Date.parse('2026-06-22T00:00:00Z');
+  const recs = [];
+  for (let i = 0; i < 6; i++) recs.push({ ts: iso(now - (6 - i) * 1000), op: 'stage', n: i });
+  const file = path.join(dir, 'audit.jsonl');
+  writeLog(dir, 'audit.jsonl', recs); // over maxRecords → a rewrite WILL be attempted
+  const original = sha(file);
+  // Simulate a crash/ENOSPC PARTWAY through the write: truncate-then-throw — exactly the tear a direct
+  // writeFileSync(file) suffers. An atomic temp+rename writes the TEMP (not the live log), so the
+  // original is never touched, the rename never runs, and the partial temp is cleaned up.
+  const realWrite = fs.writeFileSync;
+  fs.writeFileSync = (p, data, ...rest) => {
+    realWrite.call(fs, p, String(data).slice(0, 8), ...rest); // partial (torn) write
+    throw new Error('simulated ENOSPC mid-write');
+  };
+  let res;
+  try {
+    assert.doesNotThrow(() => { res = prune(dir, { maxRecords: 2, maxAgeDays: 9999, now }); }, 'fail-open: a write fault never throws');
+  } finally {
+    fs.writeFileSync = realWrite;
+  }
+  assert.equal(sha(file), original, 'the live log is byte-intact after a torn write — atomic temp+rename, never an in-place truncate');
+  assert.equal(res.rewritten, 0, 'a failed rewrite is not counted as rewritten');
+  assert.deepEqual(fs.readdirSync(dir).sort(), ['audit.jsonl'], 'the partial temp is cleaned up — none left behind');
+});
+
+test('prune rewrite leaves no temp behind on success — the original is replaced via rename', () => {
+  const dir = tmp('wrxn-prune-atomic-ok-');
+  const now = Date.parse('2026-06-22T00:00:00Z');
+  const recs = [];
+  for (let i = 0; i < 6; i++) recs.push({ ts: iso(now - (6 - i) * 1000), op: 'stage', n: i });
+  writeLog(dir, 'audit.jsonl', recs);
+  const res = prune(dir, { maxRecords: 4, maxAgeDays: 9999, now });
+  assert.equal(res.rewritten, 1, 'the over-bound log is rewritten');
+  assert.deepEqual(readLog(path.join(dir, 'audit.jsonl')).map((r) => r.n), [2, 3, 4, 5], 'content is correct after the atomic rewrite');
+  assert.deepEqual(fs.readdirSync(dir).sort(), ['audit.jsonl'], 'no sibling temp file is left behind — the temp was renamed over the original');
 });
