@@ -89,6 +89,16 @@
       "profile": "project"
     },
     {
+      "path": ".claude/hooks/emit-event.cjs",
+      "class": "managed",
+      "profile": "project"
+    },
+    {
+      "path": ".claude/hooks/prune.cjs",
+      "class": "managed",
+      "profile": "project"
+    },
+    {
       "path": ".claude/hooks/reward.cjs",
       "class": "managed",
       "profile": "project"
@@ -490,6 +500,11 @@
     },
     {
       "path": ".wrxn/raw/.gitkeep",
+      "class": "state",
+      "profile": "project"
+    },
+    {
+      "path": ".wrxn/events/.gitkeep",
       "class": "state",
       "profile": "project"
     },

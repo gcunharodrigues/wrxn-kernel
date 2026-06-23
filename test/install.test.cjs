@@ -136,6 +136,26 @@ test('init gitignores the reward baseline dir and the reward sidecar so they are
   assert.equal(body.filter((l) => l.trim() === '.wrxn/reward.json').length, 1, 'reward-sidecar ignore appears once');
 });
 
+// ── #38 F1: the raw-prompt event sink is install STATE — gitignored, never staged ──
+// C2's emit-event hook appends verbatim (secret-redacted) prompt text to .wrxn/events/<sid>.jsonl —
+// the ONLY sink persisting raw prompt text. init must gitignore the dir (alongside the sibling state
+// sinks reinforce/surfaced/reward/baseline) so a routine `git add -A` can never commit captured
+// prompts into history. The shipped .gitkeep only makes init create the dir on disk; nothing inside
+// it is ever tracked.
+
+test('init gitignores the raw-prompt event sink so captured prompts are never committed (#38 F1)', () => {
+  const target = tmp('wrxn-events-gi-');
+  init({ pkgRoot: PKG_ROOT, target, profile: 'project' });
+
+  const gi = fs.readFileSync(path.join(target, '.gitignore'), 'utf8');
+  assert.match(gi, /^\.wrxn\/events\/$/m, 'the events dir is gitignored after init');
+
+  // idempotent: a second init does not duplicate the line
+  init({ pkgRoot: PKG_ROOT, target, profile: 'project' });
+  const lines = fs.readFileSync(path.join(target, '.gitignore'), 'utf8').split('\n').filter((l) => l.trim() === '.wrxn/events/');
+  assert.equal(lines.length, 1, 'the events ignore line appears exactly once');
+});
+
 test('the reward baseline + sidecar are NOT payload manifest entries (install state, never shipped)', () => {
   assert.ok(!PAYLOAD_PATHS.includes('.wrxn/reward.json'), 'the reward sidecar must never be a shipped payload file');
   assert.ok(

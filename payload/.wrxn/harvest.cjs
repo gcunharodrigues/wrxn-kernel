@@ -772,6 +772,105 @@ function currentSession() {
   return lineageScalar(process.env.CLAUDE_SESSION_ID);
 }
 
+// ── forward evidence stamp — the citation PRODUCER (C3 / #36, mirrors dream.cjs) ─
+// A merged survivor records the FACTS that make its citation resolvable: session (the consolidating
+// session id), commit (the real git HEAD at write time), symbols (the session's .touched set). The same
+// evidence-frontmatter contract recon-wrxn ②'s edge resolver reads. Replicated here (not imported) — each
+// install-only adapter is self-contained (node stdlib only), the same discipline as secretScan/stampLineage.
+
+// A bare nested scalar (session/commit) — strip CR/LF/colon so a value can never inject a key or YAML mapping.
+function evidenceScalar(value) {
+  return String(value == null ? '' : value).replace(/[\r\n:]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+// A symbol list item — also strip the inline-flow-list breakers ([ ] ,) so a path can never break the list shape.
+function symbolScalar(value) {
+  return String(value == null ? '' : value).replace(/[[\],\r\n:]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+// Drop any pre-existing `evidence:` mapping (key line + indented members) so a re-stamp has no duplicate block.
+function stripEvidence(lines) {
+  const out = [];
+  let inBlock = false;
+  for (const line of lines) {
+    if (/^evidence:/.test(line)) { inBlock = true; continue; }
+    if (inBlock && /^\s+\S/.test(line)) continue;
+    inBlock = false;
+    out.push(line);
+  }
+  return out;
+}
+
+// PURE in-place stamp (mirrors stampLineage): append an `evidence:` mapping to the frontmatter fence; the body
+// after the closing fence is preserved byte-for-byte. No fence → returned unchanged. FAIL-OPEN: an empty
+// commit/symbols field is OMITTED; session falls back to the 'unknown' sentinel so the key is always present.
+function stampEvidence(content, evidence) {
+  const text = String(content);
+  const m = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text);
+  if (!m) return text;
+  const ev = evidence || {};
+  const lines = stripEvidence(m[1].split(/\r?\n/));
+  lines.push('evidence:');
+  lines.push(`  session: ${evidenceScalar(ev.session) || 'unknown'}`);
+  const commit = evidenceScalar(ev.commit);
+  if (commit) lines.push(`  commit: ${commit}`);
+  const symbols = (Array.isArray(ev.symbols) ? ev.symbols : []).map(symbolScalar).filter(Boolean);
+  if (symbols.length) lines.push(`  symbols: [${symbols.join(', ')}]`);
+  return text.slice(0, m.index) + ['---', lines.join('\n'), '---'].join('\n') + text.slice(m.index + m[0].length);
+}
+
+// PURE resolver (deterministic given injected IO): gather the evidence facts. The git HEAD resolver + touched
+// set + session anchor are injected, so the core is unit-tested with no live repo. FAIL-OPEN: a resolveHead
+// that throws/returns nothing → commit null; a missing touched set → []. NEVER throws.
+function resolveEvidence({ session, resolveHead, touched } = {}) {
+  let commit = null;
+  try {
+    const head = typeof resolveHead === 'function' ? resolveHead() : null;
+    commit = head ? String(head) : null;
+  } catch {
+    commit = null; // no git binary / not a repo / detached → no commit (fail-open)
+  }
+  return { session: session == null ? '' : String(session), commit, symbols: Array.isArray(touched) ? touched : [] };
+}
+
+// Resolve the install repo's current git HEAD — the citation's `commit`. Rooted at the install. Fail-open:
+// no git / not a repo → null (mirrors dream.cjs / session-end-reward.cjs resolveGitHead).
+function resolveGitHead(root) {
+  try {
+    const out = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    const sha = String(out || '').trim();
+    return sha || null;
+  } catch {
+    return null;
+  }
+}
+
+// The session-id → filename transform — MUST match code-intel-push's safeId byte-for-byte (replicated, no import).
+function safeSessionId(sid) {
+  return String(sid || 'session').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'session';
+}
+
+// Read this session's edited paths from <root>/.wrxn/history/<safeId>.touched — the citation's `symbols` set
+// (REUSE the list code-intel-push maintains). Deduped, order preserved. FAIL-OPEN: absent/unreadable → [].
+function readTouched(root, sessionId) {
+  if (!root) return [];
+  let raw;
+  try {
+    raw = fs.readFileSync(path.join(root, '.wrxn', 'history', `${safeSessionId(sessionId)}.touched`), 'utf8');
+  } catch {
+    return [];
+  }
+  const seen = new Set();
+  const out = [];
+  for (const line of raw.split('\n')) {
+    const p = line.trim();
+    if (!p || seen.has(p)) continue;
+    seen.add(p);
+    out.push(p);
+  }
+  return out;
+}
+
 // ── the wiki delete bridge (dream.cjs indirection contract) ──────────────────────
 function wikiAdapter() {
   return path.join(__dirname, 'wiki.cjs'); // sibling in the same install .wrxn/ dir
@@ -874,7 +973,7 @@ function runStage() {
 // proposal cannot write or delete (AC2). Then — and only then — WRITE THE SURVIVOR FIRST (knowledge
 // preserved), THEN delete each absorbed (AC4 survivor-before-delete). Atomic on validation: if ANY target
 // is unsafe the whole merge is refused (no partial delete). Returns { ok, ... } | { ok:false, reason }.
-function commitOne(root, rec, lineage) {
+function commitOne(root, rec, lineage, evidence) {
   const description = rec.description ? String(rec.description) : '';
   const sec = secretScan(`${description}\n${rec.body}`); // re-scan at the write boundary
   if (sec) return { ok: false, reason: sec };
@@ -913,8 +1012,11 @@ function commitOne(root, rec, lineage) {
     synth_run: (lineage && lineage.synth_run) || 'unknown',
     proposal_id: rec.slug,
   });
+  // C3 (#36): stamp the forward citation evidence (session/commit/symbols) at compose time — beside lineage,
+  // before the write. The body is preserved byte-for-byte (no churn); fail-open omits any unresolved field.
+  const withEvidence = stampEvidence(stamped, evidence);
   fs.mkdirSync(path.dirname(survAbs), { recursive: true });
-  fs.writeFileSync(survAbs, stamped);
+  fs.writeFileSync(survAbs, withEvidence);
 
   // THEN delete each absorbed — ONLY the staged cluster members (no free-form delete path) (AC4).
   const deleted = [];
@@ -945,11 +1047,13 @@ function runCommit() {
   // synth_run is byte-identical to the run id in the audit log (S3 #22 provenance binding, dream parity).
   const ts = new Date().toISOString();
   const lineage = { origin_session: currentSession(), synth_run: lineageScalar(ts) };
+  // C3 (#36): the forward citation FACTS, resolved ONCE per run from ground truth (session/git HEAD/.touched).
+  const evidence = resolveEvidence({ session: lineage.origin_session, resolveHead: () => resolveGitHead(root), touched: readTouched(root, lineage.origin_session) });
   for (const ref of approved) {
     const key = String(ref);
     const rec = staged.get(key);
     if (!rec) { skipped.push({ survivor: key, reason: 'not_staged' }); continue; }
-    const res = commitOne(root, rec, lineage);
+    const res = commitOne(root, rec, lineage, evidence);
     if (res.ok) merged.push({ survivor: res.survivor, merged_from: res.merged_from, deleted: res.deleted, deleteFailed: res.deleteFailed });
     else skipped.push({ survivor: key, reason: res.reason });
   }
@@ -1283,6 +1387,9 @@ module.exports = {
   descriptionProblem,
   composeSurvivor,
   isKebab,
+  // evidence stamp (C3 / #36) — pure citation primitives
+  stampEvidence,
+  resolveEvidence,
   // decay (harvest-04) — pure gate + annotation primitives
   reinforcedSet,
   dayStamp,

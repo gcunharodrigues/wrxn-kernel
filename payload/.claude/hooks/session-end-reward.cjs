@@ -28,6 +28,7 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 const { coalesceSidecar } = require('./sidecar.cjs');
 const { updateReward } = require('./reward.cjs');
+const { prune, pruneFiles, LOG_DIRS } = require('./prune.cjs');
 
 const BASELINE_DIR_REL = ['.wrxn', 'baseline'];
 const SURFACED_REL = ['.wrxn', 'surfaced.json'];
@@ -229,6 +230,19 @@ function main() {
     payload = {};
   }
   const root = findInstallRoot(payload && payload.cwd);
+  // Rolling retention (C1 / #34): bound the append-only intel logs by age + count at session end, BEFORE
+  // (and independent of) the reward attribution — which returns early in the common case. prune is itself
+  // fail-open; the extra guard keeps a retention fault from ever blocking a session closing.
+  if (root) {
+    try {
+      for (const rel of LOG_DIRS) prune(path.join(root, rel));
+      // S2 (#35): the event source writes one file per session, so after the within-file pass also GC
+      // whole STALE / drained event files (the within-file prune can bound records but never delete a file).
+      pruneFiles(path.join(root, '.wrxn', 'events'));
+    } catch {
+      /* retention is best-effort — never block shutdown */
+    }
+  }
   let out = {};
   try {
     if (root) out = run({ payload, root });

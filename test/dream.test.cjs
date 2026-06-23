@@ -15,7 +15,7 @@ const { execFileSync } = require('child_process');
 const PKG_ROOT = path.join(__dirname, '..');
 const { init } = require('../lib/install.cjs');
 const { loadManifest } = require('../lib/manifest.cjs');
-const { stampImportance, stampLineage, sha256, resolveRevert } = require('../payload/.wrxn/dream.cjs'); // pure stamp + revert seams
+const { stampImportance, stampLineage, stampEvidence, resolveEvidence, sha256, resolveRevert } = require('../payload/.wrxn/dream.cjs'); // pure stamp + revert seams
 
 const DREAM = '.wrxn/dream.cjs';
 const WIKI = '.wrxn/wiki.cjs';
@@ -970,4 +970,132 @@ test('AC7 (pure): resolveRevert classifies missing / hand-edited / reversible de
   assert.deepEqual(plan.missing, [{ slug: 'gone', tier: 'tierA' }]);
   // an unknown run id → unknown_run, nothing planned (only run-1/run-2 exist)
   assert.equal(resolveRevert(audit, 'run-404', read).unknown_run, true);
+});
+
+// ── C3 (#36): forward evidence stamp — evidence:{session,commit,symbols} ─────────
+// dream (and harvest) stamp an `evidence:` frontmatter MAPPING computed from FACTS — the session anchor,
+// the real git HEAD, the session's `.touched` symbol set — the citation contract recon-wrxn ②'s edge
+// resolver reads to draw EVIDENCED_BY / DOCUMENTED_BY. Machine-written frontmatter only: the prose body is
+// never touched (consistent with importance/lineage). Fail-open: an unresolvable field is omitted (commit/
+// symbols) or a sentinel (session), and the page still writes. The stamp core is pure with git/touched/
+// session injected — tested here with no live repo.
+
+test('C3 (pure): stampEvidence writes an evidence: mapping with session/commit/symbols; the body is untouched', () => {
+  const page = '---\nname: x\ndescription: X\ntier: concepts\nsource: wiki-cli-write-page\n---\n\n# X\n\nbody one.\nbody two.\n';
+  const out = stampEvidence(page, { session: 'sid-1', commit: 'abc1234', symbols: ['a.js', 'b.js'] });
+  assert.match(out, /^evidence:$/m, 'an evidence: mapping key is written');
+  assert.match(out, /^  session: sid-1$/m, 'session nested under evidence');
+  assert.match(out, /^  commit: abc1234$/m, 'commit nested under evidence');
+  assert.match(out, /^  symbols: \[a\.js, b\.js\]$/m, 'symbols nested under evidence as an inline list');
+  assert.ok(out.includes('# X\n\nbody one.\nbody two.'), 'the prose body is byte-for-byte untouched (no churn)');
+});
+
+test('C3 (pure): stampEvidence is shape-safe (no key injection) and re-stamps in place (no duplicate block)', () => {
+  const page = '---\nname: x\ndescription: X\ntier: concepts\n---\n\n# X\n\nbody.\n';
+  // injection attempt: a CR/LF or colon in a value cannot smuggle an extra frontmatter key or nested member
+  const evil = stampEvidence(page, { session: 'sid\nimportance: 9.9', commit: 'a:b', symbols: ['ok.js', 'a]b', 'c,d'] });
+  assert.doesNotMatch(evil, /^importance: 9\.9$/m, 'a newline-injected top-level key is neutralised');
+  assert.equal((evil.match(/^  session:/gm) || []).length, 1, 'session is exactly one nested line (no injected newline)');
+  assert.match(evil, /^  commit: a b$/m, 'a colon in commit is collapsed to a space — one bare scalar');
+  assert.match(evil, /^  symbols: \[ok\.js, a b, c d\]$/m, 'list-breaking chars in symbols are sanitised');
+  // re-stamp updates in place: exactly ONE evidence: block carrying the new values
+  const once = stampEvidence(page, { session: 'sid-1', commit: 'aaa', symbols: ['a.js'] });
+  const twice = stampEvidence(once, { session: 'sid-2', commit: 'bbb', symbols: ['b.js'] });
+  assert.equal((twice.match(/^evidence:$/gm) || []).length, 1, 'no duplicate evidence: block on re-stamp');
+  assert.match(twice, /^  session: sid-2$/m, 'session updated in place');
+  assert.match(twice, /^  commit: bbb$/m, 'commit updated in place');
+  assert.doesNotMatch(twice, /^  commit: aaa$/m, 'the prior commit value is gone');
+  assert.ok(twice.includes('# X\n\nbody.'), 'the body is still untouched after re-stamp');
+});
+
+test('C3 (pure): stampEvidence fails open — an unresolvable commit/symbols is omitted; session falls back to a sentinel', () => {
+  const page = '---\nname: x\ndescription: X\ntier: concepts\n---\n\n# X\n\nbody.\n';
+  // no git HEAD (commit null) + empty touched (symbols []) → those keys are omitted; the page still writes
+  const out = stampEvidence(page, { session: 'sid-1', commit: null, symbols: [] });
+  assert.match(out, /^evidence:$/m, 'the evidence block still writes (fail-open)');
+  assert.match(out, /^  session: sid-1$/m, 'session is present');
+  assert.doesNotMatch(out, /^  commit:/m, 'an unresolvable commit is omitted (no commit: key)');
+  assert.doesNotMatch(out, /^  symbols:/m, 'an empty touched set omits the symbols: key');
+  // a missing session falls back to the sentinel so the key is always present + parseable
+  const noSession = stampEvidence(page, { commit: 'abc', symbols: ['a.js'] });
+  assert.match(noSession, /^  session: unknown$/m, 'session falls back to the unknown sentinel');
+});
+
+test('C3 (pure): resolveEvidence gathers session/commit/symbols from injected IO and fails open (no live repo)', () => {
+  // happy path — injected HEAD + touched, no real repo needed
+  const ev = resolveEvidence({ session: 'sid-1', resolveHead: () => 'cafe1234', touched: ['a.js', 'b.js'] });
+  assert.equal(ev.session, 'sid-1');
+  assert.equal(ev.commit, 'cafe1234', 'commit is the injected git HEAD');
+  assert.deepEqual(ev.symbols, ['a.js', 'b.js'], 'symbols are the injected touched set');
+  // fail-open: a git binary that throws → commit null (omitted downstream); never throws
+  let failed;
+  assert.doesNotThrow(() => {
+    failed = resolveEvidence({ session: 'sid-2', resolveHead: () => { throw new Error('not a git repo'); }, touched: [] });
+  });
+  assert.equal(failed.commit, null, 'an unresolvable HEAD yields commit null (fail-open)');
+  assert.deepEqual(failed.symbols, [], 'an empty touched set yields no symbols');
+  // a HEAD resolver returning null/empty → commit null
+  assert.equal(resolveEvidence({ session: 's', resolveHead: () => null, touched: [] }).commit, null);
+});
+
+// Init a real git repo in the install with one commit; return its HEAD (the integration exercises the real
+// git path, mirroring session-start's "REAL git HEAD over a real repo" check).
+function gitInit(target) {
+  execFileSync('git', ['init', '-q'], { cwd: target });
+  execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'seed'], { cwd: target });
+  return execFileSync('git', ['rev-parse', 'HEAD'], { cwd: target, encoding: 'utf8' }).trim();
+}
+
+// Parse the nested `evidence:` mapping off a page (the test frontmatter() helper only reads flat keys).
+function evidenceOf(text) {
+  const lines = String(text).split(/\r?\n/);
+  const i = lines.findIndex((l) => /^evidence:/.test(l));
+  if (i < 0) return null;
+  const out = {};
+  for (let j = i + 1; j < lines.length; j++) {
+    const kv = /^  ([a-z]+):\s*(.*)$/.exec(lines[j]);
+    if (!kv) break;
+    out[kv[1]] = kv[2].trim();
+  }
+  return out;
+}
+
+test('C3 AC1/AC2: a dream-committed page carries evidence{session,commit,symbols} from real facts (git HEAD + .touched + session)', () => {
+  const t = freshInstall('dream-evidence-');
+  const head = gitInit(t);
+  // the session's edited set — the .touched list code-intel-push maintains (REUSED, no new persistence path)
+  const histDir = path.join(t, '.wrxn', 'history');
+  fs.mkdirSync(histDir, { recursive: true });
+  fs.writeFileSync(path.join(histDir, 'sid-evi-1.touched'), 'payload/.wrxn/dream.cjs\nsrc/foo.js\n');
+  const body = '# Evi concept\n\nthe body that must not churn.';
+  const p = validProposal({ kind: 'concept', tier: 'concepts', slug: 'evi-concept', title: 'Evi concept', body });
+  stage(t, [p]);
+  execFileSync('node', [path.join(t, DREAM), 'commit', writeJson(t, 'approved.json', ['evi-concept']), '--root', t],
+    { encoding: 'utf8', env: Object.assign({}, process.env, { CLAUDE_SESSION_ID: 'sid-evi-1' }) });
+  const txt = readPage(t, 'concepts', 'evi-concept');
+  const ev = evidenceOf(txt);
+  assert.ok(ev, 'the committed page carries an evidence: block');
+  assert.equal(ev.session, 'sid-evi-1', 'session is the quote-verified source anchor (the consolidating session id)');
+  assert.equal(ev.commit, head, 'commit is the real git HEAD at write time');
+  assert.equal(ev.symbols, '[payload/.wrxn/dream.cjs, src/foo.js]', 'symbols is the session .touched set');
+  // AC4 no churn: the prose body is verbatim + the evidence keys never leak past the closing fence
+  assert.ok(txt.includes(body), 'the prose body is byte-for-byte present (no churn)');
+  const afterFence = txt.slice(txt.indexOf('\n---', 3) + 4);
+  assert.ok(!afterFence.includes('evidence:'), 'the evidence block is frontmatter-only, never in the body');
+});
+
+test('C3 AC5: with no git repo and no .touched, a dream commit still writes the page — commit/symbols omitted, session present (fail-open, never throws)', () => {
+  const t = freshInstall('dream-evidence-failopen-'); // NOT a git repo; no .wrxn/history
+  const p = validProposal({ kind: 'concept', tier: 'concepts', slug: 'fo-concept', title: 'FO', body: '# FO\n\nbody.' });
+  stage(t, [p]);
+  assert.doesNotThrow(() => {
+    execFileSync('node', [path.join(t, DREAM), 'commit', writeJson(t, 'approved.json', ['fo-concept']), '--root', t],
+      { encoding: 'utf8', env: Object.assign({}, process.env, { CLAUDE_SESSION_ID: 'sid-fo' }) });
+  }, 'an unresolvable git HEAD / empty touched never throws');
+  assert.ok(fs.existsSync(path.join(t, '.wrxn', 'wiki', 'concepts', 'fo-concept.md')), 'the page still writes');
+  const ev = evidenceOf(readPage(t, 'concepts', 'fo-concept'));
+  assert.ok(ev, 'the evidence block is present');
+  assert.equal(ev.session, 'sid-fo', 'session is present');
+  assert.equal(ev.commit, undefined, 'commit is omitted when there is no git HEAD');
+  assert.equal(ev.symbols, undefined, 'symbols is omitted when .touched is empty/absent');
 });
