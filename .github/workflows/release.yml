@@ -16,9 +16,11 @@ name: release
 #     placeholder" model and do NOT commit a bump back to `main` through the gate (that commit would
 #     have to re-pass the branch ruleset — the chicken/egg this avoids).
 #   * The developer bumps package.json.version IN THE PR (like gate-02 → 0.11.0).
-#   * On merge to `main`: compute the release decision from the merged commits; when release==true AND
-#     package.json.version is not already on npm, publish the CURRENT package.json.version via OIDC +
-#     provenance and push the `v<version>` git tag (tags are not blocked by the branch ruleset).
+#   * On merge to `main`: compute the type decision from the merged commits AND probe whether
+#     package.json.version is already on npm. Publish (publish = typeRelease OR version-not-on-npm —
+#     lib/release.cjs `decidePublish`, #43) the CURRENT package.json.version via OIDC + provenance and
+#     push the `v<version>` git tag (tags are not blocked by the branch ruleset). The OR means a
+#     version that landed via a non-release commit (e.g. chore(release): 0.14.0) still reaches npm.
 #     No commit-back-to-main. The npm-already-published guard makes re-runs idempotent.
 #
 # OIDC: tokenless — the GitHub Actions OIDC identity authenticates against the trusted-publisher
@@ -61,19 +63,34 @@ jobs:
         id: decide
         run: node bin/wrxn.cjs release-check --range "${{ github.event.before }}..${{ github.sha }}"
 
+      # #43: lift the version-vs-npm guard ABOVE the type gate. A read-only public `npm view` probe (no
+      # auth) reports whether package.json.version is already published. Combined with the type decision
+      # below (publish = typeRelease || !versionOnNpm — lib/release.cjs `decidePublish`, unit-tested),
+      # a version that landed on `main` via a non-release commit (e.g. chore(release): 0.14.0) still
+      # publishes. The default runner npm handles read-only `npm view`; no `npm ci` needed.
+      - name: probe whether this version is already on npm
+        id: gate
+        run: |
+          VER=$(node -p "require('./package.json').version")
+          PKG=$(node -p "require('./package.json').name")
+          ON_NPM=$(npm view "$PKG@$VER" version 2>/dev/null || true)
+          if [ -n "$ON_NPM" ]; then VERSION_ON_NPM=true; else VERSION_ON_NPM=false; fi
+          echo "version_on_npm=$VERSION_ON_NPM" >> "$GITHUB_OUTPUT"
+          echo "$PKG@$VER on npm: $VERSION_ON_NPM (type-release: ${{ steps.decide.outputs.release }})"
+
       - name: upgrade npm (OIDC trusted publishing needs npm >= 11.5.1)
-        if: steps.decide.outputs.release == 'true'
+        if: steps.decide.outputs.release == 'true' || steps.gate.outputs.version_on_npm == 'false'
         run: npm install -g npm@latest
       - name: install dependencies
-        if: steps.decide.outputs.release == 'true'
+        if: steps.decide.outputs.release == 'true' || steps.gate.outputs.version_on_npm == 'false'
         run: npm ci
       - name: test (pre-publish backstop)
-        if: steps.decide.outputs.release == 'true'
+        if: steps.decide.outputs.release == 'true' || steps.gate.outputs.version_on_npm == 'false'
         run: npm test
 
       - name: publish to npm (OIDC + provenance) when release-worthy and unpublished
         id: publish
-        if: steps.decide.outputs.release == 'true'
+        if: steps.decide.outputs.release == 'true' || steps.gate.outputs.version_on_npm == 'false'
         run: |
           VER=$(node -p "require('./package.json').version")
           PKG=$(node -p "require('./package.json').name")
