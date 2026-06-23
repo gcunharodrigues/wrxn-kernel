@@ -25,12 +25,13 @@ const https = require('https');
 const { spawnSync } = require('child_process');
 
 // ── default tiering (PRD) ──────────────────────────────────────────────────────
-// handoff + dream default to claude/claude-sonnet-4-6, falling back to gemini/gemini-3.1-flash-lite.
+// handoff + dream default to gemini/gemini-3.1-flash-lite, falling back to claude/claude-sonnet-4-6.
 // The seeded memory.config.json is this object serialized; an operator edits it and `wrxn update`
-// preserves it (seeded class).
+// preserves it (seeded class). Claude stays the fallback so a keyless fresh install still writes a
+// baton via the operator's CLI auth (no GEMINI_API_KEY → gemini gated → claude carries it).
 const DEFAULT_TASK = {
-  primary: { engine: 'claude', model: 'claude-sonnet-4-6' },
-  fallback: { engine: 'gemini', model: 'gemini-3.1-flash-lite' },
+  primary: { engine: 'gemini', model: 'gemini-3.1-flash-lite' },
+  fallback: { engine: 'claude', model: 'claude-sonnet-4-6' },
 };
 const DEFAULTS = {
   tasks: {

@@ -1,12 +1,12 @@
 {
   "tasks": {
     "handoff": {
-      "primary": { "engine": "claude", "model": "claude-sonnet-4-6" },
-      "fallback": { "engine": "gemini", "model": "gemini-3.1-flash-lite" }
+      "primary": { "engine": "gemini", "model": "gemini-3.1-flash-lite" },
+      "fallback": { "engine": "claude", "model": "claude-sonnet-4-6" }
     },
     "dream": {
-      "primary": { "engine": "claude", "model": "claude-sonnet-4-6" },
-      "fallback": { "engine": "gemini", "model": "gemini-3.1-flash-lite" }
+      "primary": { "engine": "gemini", "model": "gemini-3.1-flash-lite" },
+      "fallback": { "engine": "claude", "model": "claude-sonnet-4-6" }
     }
   }
 }
