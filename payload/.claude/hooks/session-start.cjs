@@ -201,6 +201,73 @@ function holdForHandoff({ root, capMs = HOLD_CAP_MS, now = Date.now, sleep } = {
   }
 }
 
+// ── baton-staleness guard (#51) ─────────────────────────────────────────────────
+// The handoff baton is surfaced as the resume point with no health check, so a baton frozen by a failed
+// SessionEnd synth (no-engine / error) is shown as current — silently (real incident 2026-06-22→23: the
+// baton froze ~20h while .synth.log logged no-engine). This guard reads the synth log + the baton mtime
+// and, when the latest synth attempt failed and no successful write has refreshed the baton since, surfaces
+// a visible warning. The DECISION is pure (no IO, no clock — the holdDecision idiom); the hook does the IO
+// and formats the age where it holds the clock. NO polling/sleeping — one file read + one stat.
+
+const SYNTH_LOG_REL = ['.wrxn', 'continuity', '.synth.log'];
+
+// A synth row is a FAILURE iff its outcome is `no-engine` or an `error…` string (`wrote`/`trivial` = healthy).
+function isFailure(outcome) {
+  const o = String(outcome || '');
+  return o === 'no-engine' || /^error/.test(o);
+}
+
+// Parse the tab-separated synth log into chronological rows { timestampMs, outcome }, dropping any line we
+// cannot resolve (malformed / unparseable timestamp) — "newest-resolvable last". PURE + total, never throws.
+function parseSynthLog(text) {
+  const rows = [];
+  for (const line of String(text || '').split('\n')) {
+    if (!line.trim()) continue;
+    const f = line.split('\t');
+    if (f.length < 6) continue; // not a full outcome row → skip (fail-open)
+    const ts = Date.parse(f[0]);
+    if (!Number.isFinite(ts)) continue; // unresolvable timestamp → drop
+    rows.push({ timestampMs: ts, outcome: f.slice(5).join('\t').trim() });
+  }
+  return rows;
+}
+
+// Human age for the warning line (computed where the clock is, so batonStaleness stays clock-free). PURE.
+function formatAge(ms) {
+  const m = Math.max(0, Math.round(Number(ms) / 60000));
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h`;
+  const d = Math.floor(h / 24);
+  const rem = h % 24;
+  return rem ? `${d}d ${rem}h` : `${d}d`;
+}
+
+/**
+ * Pure baton-staleness decision (#51). Given the baton's last-write time and the synth-log rows
+ * (chronological, newest-resolvable last), return the FAILING outcome to name in the warning, or null when
+ * the baton is healthy/fresh. Warn IFF the newest row failed (`no-engine`|`error…`) AND the baton predates
+ * that newest row AND no `wrote` row carries a timestamp ≥ the baton's mtime. A healthy newest row, a baton
+ * at/after the newest row, or any `wrote` at/after the baton → fresh (null). The wrote-≥-baton clause is the
+ * double-spawn guard: a SessionEnd synth that logs `wrote` then a spurious `no-engine` ~2s later must not cry
+ * wolf — the `wrote` row's timestamp ≥ the baton mtime it just wrote, so the warning is suppressed (#45).
+ * PURE + total: no IO, no clock, never throws.
+ * @param {{ batonMtimeMs:number, rows:Array<{timestampMs:number, outcome:string}> }} [input]
+ * @returns {string|null} the failing outcome to name, or null when healthy
+ */
+function batonStaleness({ batonMtimeMs, rows } = {}) {
+  if (!Array.isArray(rows) || rows.length === 0) return null; // no rows → nothing to judge
+  if (typeof batonMtimeMs !== 'number' || !Number.isFinite(batonMtimeMs)) return null; // no usable mtime
+  const newest = rows[rows.length - 1];
+  if (!newest || !isFailure(newest.outcome)) return null; // latest run healthy → fresh
+  if (Number.isFinite(newest.timestampMs) && newest.timestampMs <= batonMtimeMs) return null; // baton ≥ newest → fresh
+  const refreshed = rows.some(
+    (r) => r && r.outcome === 'wrote' && Number.isFinite(r.timestampMs) && r.timestampMs >= batonMtimeMs,
+  );
+  if (refreshed) return null; // a successful write at/after the baton → the baton IS that fresh write
+  return newest.outcome; // stale → name the failing outcome
+}
+
 function main() {
   let consumed = '';
   try {
@@ -241,6 +308,23 @@ function main() {
   const baton = readBaton(root);
   if (baton && baton.trim()) {
     parts.push('', 'Resume — deliberate handoff baton (.wrxn/continuity/latest.md):', baton.trim());
+    // #51: warn if the latest SessionEnd synth failed and no successful write has refreshed the baton since
+    // — a frozen baton must not be surfaced as current silently. Fail-open: any read/stat/parse fault → no
+    // warning, never a throw. Pure file reads + a stat only (no polling/sleeping beyond the hold cap above).
+    try {
+      const rows = parseSynthLog(readFileOr(path.join(root, ...SYNTH_LOG_REL), ''));
+      const batonMtimeMs = fs.statSync(path.join(root, '.wrxn', 'continuity', 'latest.md')).mtimeMs;
+      const failing = batonStaleness({ batonMtimeMs, rows });
+      if (failing) {
+        const age = formatAge(Date.now() - batonMtimeMs);
+        parts.push(
+          '',
+          `WARNING — stale handoff baton: the latest memory-synth run failed ("${failing}") and the baton has not been refreshed for ${age}. It may not reflect the last session — see .wrxn/continuity/.synth.log.`,
+        );
+      }
+    } catch {
+      /* fail-open: a staleness-check fault must never block orientation (#51 AC3) */
+    }
   } else {
     parts.push('', 'Resume — no prior handoff.');
   }
@@ -261,4 +345,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { holdDecision, holdForHandoff, HOLD_CAP_MS, stampStartHead, resolveGitHead, BASELINE_DIR_REL };
+module.exports = { holdDecision, holdForHandoff, HOLD_CAP_MS, stampStartHead, resolveGitHead, BASELINE_DIR_REL, batonStaleness };
