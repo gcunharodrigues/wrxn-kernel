@@ -40,6 +40,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 
 // kind → tier is the contract; the tier must agree with the kind. `rule → _rules` (dream-03) joins the
@@ -128,6 +129,16 @@ function wikiWritePage(root, tier, slug, description, body) {
   return JSON.parse(execFileSync('node', args, { encoding: 'utf8' }));
 }
 
+// Delete a page VIA the wiki adapter's delete-by-reference path (the indirection contract — dream never
+// unlinks a .md directly; --revert reverses this run's pages through it). wiki.cjs confines the delete to
+// the wiki subtree (tier allowlist + kebab slug); the audit-recorded tier/slug are dream-written, but the
+// flag-injection guard is the defense-in-depth backstop at the exec boundary (harvest parity).
+function wikiDeletePage(root, tier, slug) {
+  guardArgv([String(tier), String(slug)]);
+  const args = [wikiAdapter(), 'delete-page', String(tier), String(slug), '--root', root];
+  return JSON.parse(execFileSync('node', args, { encoding: 'utf8' }));
+}
+
 function normalizeTitle(t) {
   return String(t == null ? '' : t).toLowerCase().replace(/\s+/g, ' ').trim();
 }
@@ -167,6 +178,78 @@ function stampImportance(content, score) {
 function stampPageImportance(root, tier, slug, score) {
   const file = path.join(root, '.wrxn', 'wiki', tier, `${slug}.md`);
   fs.writeFileSync(file, stampImportance(fs.readFileSync(file, 'utf8'), score));
+}
+
+// ── lineage stamp — the provenance PRODUCER (S3 / #22) ─────────────────────────
+// Every committed page records WHO wrote it: origin_session (the session id), synth_run (the per-run id —
+// the SAME value that keys this run's audit-log commit event, so --revert can resolve "this run's pages"),
+// proposal_id (the staged proposal's stable id = its slug). Machine-written frontmatter only — the prose
+// body is preserved byte-for-byte, like importance: (no churn). This is the seam sub-epic ② reuses for
+// evidence citations (J = who wrote it). Values are sanitised to a single bare frontmatter scalar: a
+// newline would inject an arbitrary key, a colon creates YAML ambiguity — both are collapsed to a space
+// (same write-channel discipline as harvest's annotationValueProblem / importance's shape-safety).
+const LINEAGE_KEYS = ['origin_session', 'synth_run', 'proposal_id'];
+
+// One bare scalar — strip CR/LF/colon to a space so a hostile value can never inject a frontmatter key or
+// YAML mapping (mirrors stampImportance's shape-safety). Empty/undefined → 'unknown' so the key is always
+// present and parseable (a missing value must never silently drop a lineage key).
+function lineageScalar(value) {
+  const s = String(value == null ? '' : value).replace(/[\r\n:]+/g, ' ').trim();
+  return s || 'unknown';
+}
+
+// PURE in-place stamp (mirrors stampImportance): set each lineage key when present (no duplicate key), else
+// append it; the body after the closing fence is preserved byte-for-byte. A page with no frontmatter fence
+// is returned unchanged (defensive — wiki pages always carry one).
+function stampLineage(content, lineage) {
+  const text = String(content);
+  const m = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text);
+  if (!m) return text;
+  const lines = m[1].split(/\r?\n/);
+  for (const key of LINEAGE_KEYS) {
+    const value = lineageScalar(lineage && lineage[key]);
+    let found = false;
+    for (let i = 0; i < lines.length; i++) {
+      if (new RegExp(`^${key}:\\s*`).test(lines[i])) { lines[i] = `${key}: ${value}`; found = true; break; }
+    }
+    if (!found) lines.push(`${key}: ${value}`);
+  }
+  // splice ONLY the frontmatter fence back; the body after the closing --- is byte-for-byte preserved.
+  return text.slice(0, m.index) + ['---', lines.join('\n'), '---'].join('\n') + text.slice(m.index + m[0].length);
+}
+
+// Stamp the just-written wiki page's lineage in place (read → stampLineage → write). Same page reach as
+// stampPageImportance — the stamp never re-routes the write.
+function stampPageLineage(root, tier, slug, lineage) {
+  const file = path.join(root, '.wrxn', 'wiki', tier, `${slug}.md`);
+  fs.writeFileSync(file, stampLineage(fs.readFileSync(file, 'utf8'), lineage));
+}
+
+// The current session id for a CLI-invoked adapter (no hook event payload exists here). The whole codebase
+// keys provenance off the session id; hooks read event.session_id, the synth path reads the .pending stash,
+// and Claude Code exports it to the environment — so a hand-run adapter resolves it from CLAUDE_SESSION_ID.
+// Absent ⇒ 'unknown' (fail-open: a missing session id must never break consolidation).
+function currentSession() {
+  return lineageScalar(process.env.CLAUDE_SESSION_ID);
+}
+
+// The per-run id, derived deterministically from the run's ISO timestamp (the SAME ts that keys this run's
+// audit-log commit event). No new clock read and no random/uuid — the run id IS the audit timestamp, which
+// is exactly what binds a stamped page to its audit entry for --revert. Colons stripped so it is a clean
+// frontmatter scalar (an ISO ts carries `:` in the time).
+function runIdFromTs(ts) {
+  return lineageScalar(ts);
+}
+
+// Read a committed page's full on-disk content (frontmatter + body). Reached by tier+slug under .wrxn/wiki/.
+function pageContent(root, tier, slug) {
+  return fs.readFileSync(path.join(root, '.wrxn', 'wiki', tier, `${slug}.md`), 'utf8');
+}
+
+// sha256 of a page's exact bytes — the integrity fingerprint --revert recomputes to detect a hand-edit
+// (mirrors harvest's mergeHash/decayHash sha256 discipline).
+function sha256(text) {
+  return crypto.createHash('sha256').update(String(text)).digest('hex');
 }
 
 // ── anti-superstition negative filters ────────────────────────────────────────
@@ -504,6 +587,11 @@ function runCommit() {
   const io = makeIo(root);
   const source = readSource(); // null ⇒ legacy re-gate; string ⇒ re-verify every quote at the write boundary
   const staged = readStaged(root);
+  // One ts per run: it keys this run's audit event AND derives synth_run, so a stamped page's synth_run is
+  // byte-identical to the run id recorded in the audit log — the bind that lets --revert resolve this run.
+  const ts = new Date().toISOString();
+  const runId = runIdFromTs(ts);
+  const session = currentSession();
   const written = [];
   const skipped = [];
   for (const slug of approved) {
@@ -521,7 +609,11 @@ function runCommit() {
     try {
       const r = wikiWritePage(root, p.tier, p.slug, p.title, p.body);
       stampPageImportance(root, p.tier, p.slug, p.confidence); // persist dream's score as importance: (harvest-10)
-      written.push({ slug: p.slug, tier: p.tier, file: r.written });
+      stampPageLineage(root, p.tier, p.slug, { origin_session: session, synth_run: runId, proposal_id: p.slug }); // S3 provenance
+      // capture the content hash of EXACTLY what this run wrote (after both stamps) so --revert can detect a
+      // page hand-edited since (current hash ≠ this) and refuse to clobber it.
+      const hash = sha256(pageContent(root, p.tier, p.slug));
+      written.push({ slug: p.slug, tier: p.tier, file: r.written, hash });
     } catch (err) {
       // wiki.cjs write-page does process.exit(2) on an existing page — catch the non-zero exit so a
       // TOCTOU collision (or any single write failure) is recorded and the rest of the batch STILL writes.
@@ -530,8 +622,108 @@ function runCommit() {
       skipped.push({ slug: key, reason });
     }
   }
-  appendLine(path.join(dreamDir(root), AUDIT_FILE), { ts: new Date().toISOString(), op: 'commit', written: written.map((w) => w.slug), skipped });
-  return print({ written, skipped });
+  // the audit commit event records this run's id + each written page's tier/slug/hash — the cross-check
+  // ledger --revert reads to reverse exactly this run's pages and detect hand-edits (#22).
+  appendLine(path.join(dreamDir(root), AUDIT_FILE), {
+    ts, op: 'commit', synth_run: runId, origin_session: session,
+    written: written.map((w) => w.slug),
+    pages: written.map((w) => ({ slug: w.slug, tier: w.tier, hash: w.hash })),
+    skipped,
+  });
+  return print({ written, skipped, synth_run: runId });
+}
+
+// ── revert (S3 / #22) — pull a bad consolidation batch back out ────────────────
+// Resolve EXACTLY the pages a given synth_run wrote (the audit commit event is the source of truth — we
+// never trust the on-disk synth_run stamp alone) and reverse them. SAFETY: a page hand-edited since the run
+// wrote it (its current sha256 no longer matches the hash the audit recorded at commit) is REFUSED and
+// reported, never clobbered; an unknown run id (no matching audit commit event) is REFUSED and reported.
+
+// Read the append-only audit log into an array of parsed records (malformed lines skipped; absent → []).
+function readAudit(root) {
+  let txt;
+  try {
+    txt = fs.readFileSync(path.join(root, ...DREAM_DIR, AUDIT_FILE), 'utf8');
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const line of txt.split('\n')) {
+    const s = line.trim();
+    if (!s) continue;
+    try { out.push(JSON.parse(s)); } catch { /* skip a malformed audit line */ }
+  }
+  return out;
+}
+
+// The pages this run committed, per the audit log (the cross-check ledger). Gathers every `commit` event
+// whose synth_run matches, de-duplicating by tier/slug (a slug can't be committed twice in additive dream,
+// but be defensive). Returns [] when no commit event matches the run id → the caller reports unknown_run.
+function runPagesFromAudit(audit, runId) {
+  const seen = new Set();
+  const pages = [];
+  for (const rec of audit) {
+    if (!rec || rec.op !== 'commit' || rec.synth_run !== runId) continue;
+    for (const pg of Array.isArray(rec.pages) ? rec.pages : []) {
+      if (!pg || !pg.slug || !pg.tier) continue;
+      const key = `${pg.tier}/${pg.slug}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      pages.push({ slug: String(pg.slug), tier: String(pg.tier), hash: String(pg.hash || '') });
+    }
+  }
+  return pages;
+}
+
+// PURE revert planner (deterministic given the audit + a content reader). Classifies each audit page of the
+// run: missing (already gone — nothing to reverse), edited (current hash ≠ audit hash — REFUSE), or
+// reversible (hash matches → safe to delete). `readContent(tier, slug)` returns the page text or null when
+// absent. Unknown run (no audit pages) → { unknown_run:true }. v1 is delete-only: dream commit is purely
+// additive (it dedup-SKIPS a pre-existing slug, never overwrites — proven by the AC2-backward-safe test), so
+// a reverted page had no prior version to restore; reversing == removing the page the run created.
+function resolveRevert(audit, runId, readContent) {
+  const pages = runPagesFromAudit(audit, runId);
+  if (pages.length === 0) return { unknown_run: true, reversible: [], edited: [], missing: [] };
+  const reversible = [];
+  const edited = [];
+  const missing = [];
+  for (const pg of pages) {
+    const content = readContent(pg.tier, pg.slug);
+    if (content == null) { missing.push({ slug: pg.slug, tier: pg.tier }); continue; }
+    if (sha256(content) !== pg.hash) { edited.push({ slug: pg.slug, tier: pg.tier }); continue; } // hand-edited → refuse
+    reversible.push({ slug: pg.slug, tier: pg.tier });
+  }
+  return { unknown_run: false, reversible, edited, missing };
+}
+
+function runRevert() {
+  const runId = positionalFile(); // the run id is the lone positional after `revert`
+  const root = installRoot();
+  const audit = readAudit(root);
+  const plan = resolveRevert(audit, runId, (tier, slug) => {
+    try { return pageContent(root, tier, slug); } catch { return null; }
+  });
+  if (plan.unknown_run) {
+    print({ run: runId, reverted: [], refused: [], missing: [], reason: 'unknown_run' });
+    process.exit(2); // an unknown run id is refused (and reported) — not a silent no-op success
+  }
+  const reverted = [];
+  const failed = [];
+  for (const pg of plan.reversible) {
+    try {
+      wikiDeletePage(root, pg.tier, pg.slug);
+      reverted.push(pg.slug);
+    } catch (e) {
+      // a delete that fails (vanished page / wiki refusal) is recorded — never aborts the rest of the batch.
+      failed.push({ slug: pg.slug, reason: String((e && e.message) || 'delete_failed').split('\n')[0] });
+    }
+  }
+  const refused = plan.edited.map((p) => ({ slug: p.slug, reason: 'hand_edited' })); // hand-edited pages are NOT clobbered
+  appendLine(path.join(dreamDir(root), AUDIT_FILE), {
+    ts: new Date().toISOString(), op: 'revert', synth_run: runId,
+    reverted, refused, missing: plan.missing.map((p) => p.slug), failed,
+  });
+  return print({ run: runId, reverted, refused, missing: plan.missing.map((p) => p.slug), failed });
 }
 
 function main() {
@@ -543,8 +735,10 @@ function main() {
       return runStage();
     case 'commit':
       return runCommit();
+    case 'revert':
+      return runRevert();
     default:
-      process.stdout.write('Usage: node .wrxn/dream.cjs <check|stage|commit> <file.json> [--root <dir>]\n');
+      process.stdout.write('Usage: node .wrxn/dream.cjs <check|stage|commit> <file.json> | revert <run_id> [--root <dir>]\n');
       process.exit(cmd ? 2 : 0);
   }
 }
@@ -553,4 +747,4 @@ if (require.main === module) {
   main();
 }
 
-module.exports = { stampImportance };
+module.exports = { stampImportance, stampLineage, lineageScalar, sha256, resolveRevert, runPagesFromAudit };

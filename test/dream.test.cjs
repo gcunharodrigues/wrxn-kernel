@@ -15,7 +15,7 @@ const { execFileSync } = require('child_process');
 const PKG_ROOT = path.join(__dirname, '..');
 const { init } = require('../lib/install.cjs');
 const { loadManifest } = require('../lib/manifest.cjs');
-const { stampImportance } = require('../payload/.wrxn/dream.cjs'); // the pure decay-weight stamp (harvest-10)
+const { stampImportance, stampLineage, sha256, resolveRevert } = require('../payload/.wrxn/dream.cjs'); // pure stamp + revert seams
 
 const DREAM = '.wrxn/dream.cjs';
 const WIKI = '.wrxn/wiki.cjs';
@@ -807,4 +807,167 @@ test('check --source precedence (NB-3): the confidence floor is checked BEFORE q
   // low confidence AND a substantive-but-absent quote: confidence is gated first → confidence_below_threshold
   const p = validProposal({ confidence: 0.5, evidence: [{ quote: 'a substantive quote absent from the transcript' }] });
   assert.equal(checkOneSource(t, p, 'a transcript that does not contain that phrase at all').reason, 'confidence_below_threshold');
+});
+
+// ── S3 (#22): artifact lineage stamp + dream --revert ─────────────────────────
+// Every page dream commits is stamped with three lineage frontmatter keys — origin_session, synth_run,
+// proposal_id — through the SAME post-write stamp seam that writes importance:. They are machine-written
+// metadata that never touch the prose body. A new `dream --revert <run_id>` reverses exactly the pages a
+// given synth_run wrote, cross-checked against the audit log, refusing a page hand-edited since.
+
+// Parse a page's frontmatter into a flat key→value map (last key wins; values trimmed).
+function frontmatter(text) {
+  const m = /^---\r?\n([\s\S]*?)\r?\n---/.exec(String(text));
+  if (!m) return {};
+  const out = {};
+  for (const line of m[1].split(/\r?\n/)) {
+    const kv = /^([A-Za-z0-9_]+):\s*(.*)$/.exec(line);
+    if (kv) out[kv[1]] = kv[2].trim();
+  }
+  return out;
+}
+
+function readPage(target, tier, slug) {
+  return fs.readFileSync(path.join(target, '.wrxn', 'wiki', tier, `${slug}.md`), 'utf8');
+}
+
+test('AC1: a dream-committed page carries origin_session, synth_run and proposal_id frontmatter', () => {
+  const t = freshInstall('dream-lineage-');
+  const p = validProposal({ kind: 'concept', tier: 'concepts', slug: 'lin-concept', title: 'Lin concept', body: '# Lin concept\n\nbody.' });
+  stage(t, [p]);
+  commit(t, ['lin-concept']);
+  const fm = frontmatter(readPage(t, 'concepts', 'lin-concept'));
+  assert.ok(fm.origin_session, 'origin_session is stamped');
+  assert.ok(fm.synth_run, 'synth_run is stamped');
+  assert.equal(fm.proposal_id, 'lin-concept', 'proposal_id is the committed slug');
+});
+
+test('AC1: origin_session is sourced from CLAUDE_SESSION_ID at the write boundary', () => {
+  const t = freshInstall('dream-lineage-session-');
+  const p = validProposal({ kind: 'concept', tier: 'concepts', slug: 'sess-concept', title: 'Sess', body: '# Sess\n\nbody.' });
+  stage(t, [p]);
+  // commit with CLAUDE_SESSION_ID set in the child env — the stamp must capture it
+  execFileSync('node', [path.join(t, DREAM), 'commit', writeJson(t, 'approved.json', ['sess-concept']), '--root', t],
+    { encoding: 'utf8', env: Object.assign({}, process.env, { CLAUDE_SESSION_ID: 'sid-2026-xyz' }) });
+  assert.equal(frontmatter(readPage(t, 'concepts', 'sess-concept')).origin_session, 'sid-2026-xyz');
+});
+
+test('AC1 (no churn): the lineage stamp leaves the committed page body + single H1 unchanged', () => {
+  const t = freshInstall('dream-lineage-body-');
+  const body = '# Cache design\n\nThe cache sits in front of the store.\nSecond paragraph stays put.';
+  const p = validProposal({ kind: 'concept', tier: 'concepts', slug: 'lin-cache', title: 'Cache design', body });
+  stage(t, [p]);
+  commit(t, ['lin-cache']);
+  const txt = readPage(t, 'concepts', 'lin-cache');
+  assert.ok(txt.includes(body), 'the proposal body is present verbatim after the lineage stamp (no churn)');
+  assert.equal((txt.match(/^# .*/gm) || []).length, 1, 'still exactly one H1');
+  // lineage keys live in the frontmatter only — never in the body region after the closing fence
+  const afterFence = txt.slice(txt.indexOf('\n---', 3) + 4);
+  for (const k of ['origin_session:', 'synth_run:', 'proposal_id:']) {
+    assert.ok(!afterFence.includes(k), `${k} is not written into the prose body`);
+  }
+});
+
+// dream --revert <run_id>
+function revert(target, runId) {
+  return JSON.parse(dream(target, ['revert', runId]));
+}
+
+test('AC4: --revert <run> reverses exactly the pages that run committed (cross-checked with the audit log)', () => {
+  const t = freshInstall('dream-revert-');
+  // run A commits two pages
+  stage(t, [
+    validProposal({ kind: 'concept', tier: 'concepts', slug: 'run-a-one', title: 'A1', body: '# A1\n\nbody.' }),
+    validProposal({ kind: 'concept', tier: 'concepts', slug: 'run-a-two', title: 'A2', body: '# A2\n\nbody.' }),
+  ]);
+  const a = commit(t, ['run-a-one', 'run-a-two']);
+  // run B commits a third page (a DISTINCT run id — its own commit invocation)
+  stage(t, [validProposal({ kind: 'concept', tier: 'concepts', slug: 'run-b-one', title: 'B1', body: '# B1\n\nbody.' })]);
+  commit(t, ['run-b-one']);
+  assert.notEqual(a.synth_run, undefined, 'commit returns the run id');
+
+  const out = revert(t, a.synth_run);
+  assert.deepEqual(out.reverted.sort(), ['run-a-one', 'run-a-two'], 'exactly run A pages reverted');
+  // run A pages are gone; run B page survives (only this run is reversed)
+  assert.ok(!fs.existsSync(path.join(t, '.wrxn', 'wiki', 'concepts', 'run-a-one.md')));
+  assert.ok(!fs.existsSync(path.join(t, '.wrxn', 'wiki', 'concepts', 'run-a-two.md')));
+  assert.ok(fs.existsSync(path.join(t, '.wrxn', 'wiki', 'concepts', 'run-b-one.md')), 'run B page untouched');
+});
+
+test('AC5: a page hand-edited since its run wrote it is REFUSED and reported, not clobbered', () => {
+  const t = freshInstall('dream-revert-edited-');
+  stage(t, [
+    validProposal({ kind: 'concept', tier: 'concepts', slug: 'edited-one', title: 'E1', body: '# E1\n\nbody.' }),
+    validProposal({ kind: 'concept', tier: 'concepts', slug: 'clean-two', title: 'C2', body: '# C2\n\nbody.' }),
+  ]);
+  const a = commit(t, ['edited-one', 'clean-two']);
+  // hand-edit one page after the run wrote it (content no longer matches the audit hash)
+  const editedPath = path.join(t, '.wrxn', 'wiki', 'concepts', 'edited-one.md');
+  fs.appendFileSync(editedPath, '\nhand-edited line the operator added later.\n');
+  const before = fs.readFileSync(editedPath, 'utf8');
+
+  const out = revert(t, a.synth_run);
+  assert.deepEqual(out.refused, [{ slug: 'edited-one', reason: 'hand_edited' }], 'the hand-edited page is refused + reported');
+  assert.equal(fs.readFileSync(editedPath, 'utf8'), before, 'the hand-edited page is NOT clobbered (byte-for-byte intact)');
+  assert.deepEqual(out.reverted, ['clean-two'], 'the unedited sibling is still reversed');
+  assert.ok(!fs.existsSync(path.join(t, '.wrxn', 'wiki', 'concepts', 'clean-two.md')));
+});
+
+test('AC6: an unknown run id is REFUSED and reported (exit 2), nothing deleted', () => {
+  const t = freshInstall('dream-revert-unknown-');
+  stage(t, [validProposal({ kind: 'concept', tier: 'concepts', slug: 'keep-me', title: 'K', body: '# K\n\nbody.' })]);
+  commit(t, ['keep-me']);
+  let err;
+  try {
+    dream(t, ['revert', 'no-such-run-id-12345']);
+  } catch (e) { err = e; }
+  assert.ok(err, 'revert of an unknown run exits non-zero');
+  assert.equal(err.status, 2);
+  const out = JSON.parse(String(err.stdout || ''));
+  assert.equal(out.reason, 'unknown_run');
+  assert.deepEqual(out.reverted, []);
+  assert.ok(fs.existsSync(path.join(t, '.wrxn', 'wiki', 'concepts', 'keep-me.md')), 'no real page was touched');
+});
+
+test('AC7 (pure): stampLineage sets all three keys, is shape-safe, and is deterministic', () => {
+  const page = '---\nname: x\ndescription: X\ntier: concepts\nsource: wiki-cli-write-page\n---\n\n# X\n\nbody one.\nbody two.\n';
+  const out = stampLineage(page, { origin_session: 'sid-1', synth_run: '2026-06-22T10:30:00.5Z', proposal_id: 'x' });
+  assert.match(out, /^origin_session: sid-1$/m);
+  assert.match(out, /^proposal_id: x$/m);
+  // a colon in the run id (ISO time) is stripped to a space → still ONE bare scalar, no YAML mapping
+  assert.equal((out.match(/^synth_run:/gm) || []).length, 1, 'exactly one synth_run line');
+  assert.ok(out.includes('# X\n\nbody one.\nbody two.'), 'the body is untouched');
+  assert.equal(stampLineage(page, { origin_session: 'sid-1', synth_run: 'r', proposal_id: 'x' }),
+    stampLineage(page, { origin_session: 'sid-1', synth_run: 'r', proposal_id: 'x' }), 'deterministic — same input, same output');
+  // injection attempt: a newline in a value cannot smuggle an extra frontmatter key
+  const evil = stampLineage(page, { origin_session: 'sid\nimportance: 9.9', synth_run: 'r', proposal_id: 'x' });
+  assert.doesNotMatch(evil, /^importance: 9\.9$/m, 'a newline-injected key is neutralised');
+  // re-stamp updates in place (no duplicate keys)
+  const twice = stampLineage(out, { origin_session: 'sid-2', synth_run: 'r2', proposal_id: 'x' });
+  assert.equal((twice.match(/^origin_session:/gm) || []).length, 1, 'no duplicate origin_session on re-stamp');
+  assert.match(twice, /^origin_session: sid-2$/m, 'updated in place');
+});
+
+test('AC7 (pure): resolveRevert classifies missing / hand-edited / reversible deterministically', () => {
+  const content = { tierA: { good: 'PAGE-GOOD-CONTENT', edited: 'PAGE-EDITED-ORIGINAL' } };
+  const audit = [
+    { op: 'stage' }, // ignored — not a commit event
+    { op: 'commit', synth_run: 'run-1', pages: [
+      { slug: 'good', tier: 'tierA', hash: sha256('PAGE-GOOD-CONTENT') },     // matches → reversible
+      { slug: 'edited', tier: 'tierA', hash: sha256('PAGE-EDITED-ORIGINAL') }, // disk differs → edited
+      { slug: 'gone', tier: 'tierA', hash: sha256('whatever') },               // not on disk → missing
+    ] },
+    { op: 'commit', synth_run: 'run-2', pages: [{ slug: 'other', tier: 'tierA', hash: 'h' }] },
+  ];
+  const read = (tier, slug) => {
+    if (slug === 'edited') return 'PAGE-EDITED-AFTER-HAND-EDIT'; // hash will not match the audit
+    return (content[tier] && content[tier][slug]) || null;
+  };
+  const plan = resolveRevert(audit, 'run-1', read);
+  assert.equal(plan.unknown_run, false);
+  assert.deepEqual(plan.reversible, [{ slug: 'good', tier: 'tierA' }]);
+  assert.deepEqual(plan.edited, [{ slug: 'edited', tier: 'tierA' }]);
+  assert.deepEqual(plan.missing, [{ slug: 'gone', tier: 'tierA' }]);
+  // an unknown run id → unknown_run, nothing planned (only run-1/run-2 exist)
+  assert.equal(resolveRevert(audit, 'run-404', read).unknown_run, true);
 });

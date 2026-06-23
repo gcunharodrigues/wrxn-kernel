@@ -127,6 +127,102 @@ test('wiki-lint is silent when every page is well-formed', () => {
   assert.deepEqual(env, {}, 'all pages valid → no flag');
 });
 
+// ── AC: wiki-lint flags a dead [[wikilink]] (S2 #21) ──────────────────────────
+
+test('wiki-lint flags a [[wikilink]] whose target page does not exist', () => {
+  const target = freshInstall('wrxn-lint-deadlink-');
+  writePage(target, 'concepts', 'src-page', 'see [[ghost-page]] for more');
+  const env = runHook(LINT, { session_id: 'sid-dead', reason: 'clear' }, target);
+  const c = ctx(env);
+  assert.ok(c, 'a dead wikilink injects a report');
+  assert.match(c, /ghost-page/, 'names the dead link target');
+  assert.match(c, /src-page/, 'names the page that holds the dead link');
+});
+
+test('wiki-lint is silent on a [[wikilink]] whose target page exists', () => {
+  const target = freshInstall('wrxn-lint-livelink-');
+  writePage(target, 'concepts', 'src-page', 'see [[target-page]] for more');
+  writePage(target, 'gotchas', 'target-page', 'the destination');
+  const env = runHook(LINT, { session_id: 'sid-live', reason: 'clear' }, target);
+  assert.deepEqual(env, {}, 'a resolvable wikilink → no flag');
+});
+
+// ── AC: wiki-lint flags duplicate page titles (S2 #21) ────────────────────────
+
+test('wiki-lint flags two pages that share the same title', () => {
+  const target = freshInstall('wrxn-lint-dup-');
+  // Two pages with the same name: identity slug — left unmerged. writePage uses the slug as the
+  // filename, so to collide the name across files we write the second page by hand.
+  writePage(target, 'concepts', 'first-copy', 'well formed');
+  const dir = path.join(target, '.wrxn', 'wiki', 'gotchas');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, 'second-copy.md'),
+    ['---', 'name: first-copy', 'description: dup notes', 'tier: gotchas', '---', '', 'body', ''].join('\n')
+  );
+  const env = runHook(LINT, { session_id: 'sid-dup', reason: 'clear' }, target);
+  const c = ctx(env);
+  assert.ok(c, 'a duplicate title injects a report');
+  assert.match(c, /duplicate/i, 'labels the finding as a duplicate');
+  assert.match(c, /first-copy/, 'names the shared title');
+});
+
+test('wiki-lint is report-only — it never edits a page while flagging issues', () => {
+  const target = freshInstall('wrxn-lint-reportonly-');
+  writePage(target, 'concepts', 'has-dead-link', 'points at [[nowhere]]');
+  const dir = path.join(target, '.wrxn', 'wiki', 'concepts');
+  const file = path.join(dir, 'has-dead-link.md');
+  const before = fs.readFileSync(file, 'utf8');
+  const env = runHook(LINT, { session_id: 'sid-ro', reason: 'clear' }, target);
+  assert.ok(ctx(env), 'the dead link is flagged');
+  assert.equal(fs.readFileSync(file, 'utf8'), before, 'the page on disk is byte-identical (report-only)');
+});
+
+// ── AC: wikilink extraction is not ReDoS-able (S2 finding #29) ─────────────────
+// The old extractor `/\[\[([^\]]+)\]\]/g` backtracks O(n²) on runs of `[` — a 50KB `[`-heavy body
+// took ~2.1s standalone, hanging the session-Stop hook. The bounded class `[^\]\[]+` keeps it linear.
+// Driven through the real seam (the spawned hook over a page on disk) with a generous wall-clock bound
+// the pre-fix quadratic would blow but the fixed pattern clears with room to spare.
+
+test('wiki-lint scans a bracket-heavy page promptly — no quadratic backtracking (#29)', () => {
+  const target = freshInstall('wrxn-lint-redos-');
+  // Tens of KB of `[` — every `[[` start position made the greedy class re-consume the whole run.
+  writePage(target, 'concepts', 'pathological', '['.repeat(50000));
+  const start = Date.now();
+  const env = runHook(LINT, { session_id: 'sid-redos', reason: 'clear' }, target);
+  const elapsedMs = Date.now() - start;
+  // Generous bound (CI-safe) yet far below the ~2.1s the old pattern needed; includes process spawn.
+  assert.ok(
+    elapsedMs < 1000,
+    `lint over a [-heavy body must return promptly (was ${elapsedMs}ms) — the old regex took ~2.1s`
+  );
+  // A `[`-only run contains no closeable `]]`, so it yields no wikilinks → nothing to flag → silent.
+  assert.deepEqual(env, {}, 'a bracket run has no resolvable wikilink target → no flag');
+});
+
+test('wiki-lint still extracts slug / |alias / #anchor and survives malformed bracket runs (#29)', () => {
+  const target = freshInstall('wrxn-lint-bounded-');
+  // One dead link per stripped form, plus a malformed `[[[[` run that must not crash or false-flag.
+  writePage(
+    target,
+    'concepts',
+    'forms',
+    'bare [[ghost-bare]], aliased [[ghost-alias|shown]], anchored [[ghost-anchor#sec]], junk [[[['
+  );
+  // A live link whose target exists must stay silent (proves the bare-slug match still resolves).
+  writePage(target, 'gotchas', 'real-target', 'destination');
+  writePage(target, 'concepts', 'live', 'see [[real-target]]');
+
+  const env = runHook(LINT, { session_id: 'sid-bounded', reason: 'clear' }, target);
+  const c = ctx(env);
+  assert.ok(c, 'the three dead links inject a report');
+  assert.match(c, /ghost-bare/, 'plain [[slug]] still extracted');
+  assert.match(c, /ghost-alias/, '[[slug|alias]] still stripped to the bare slug');
+  assert.match(c, /ghost-anchor/, '[[slug#anchor]] still stripped to the bare slug');
+  assert.ok(!/shown/.test(c) && !/sec/.test(c), 'the alias/anchor are dropped, not treated as the target');
+  assert.ok(!/real-target/.test(c), 'a wikilink whose target page exists is not flagged');
+});
+
 // ── fail-open: no install root resolvable → {} for every hook ──────────────────
 
 test('every intelligence hook fails open with no install root', () => {

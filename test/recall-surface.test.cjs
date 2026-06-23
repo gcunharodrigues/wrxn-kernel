@@ -926,3 +926,513 @@ test('the hook imports nothing outside the node standard library or its co-locat
     assert.ok(builtins.has(name), `${m} must be a node builtin — no kernel-lib or recon import allowed`);
   }
 });
+
+// ── S1 recall-exclusion teeth (#20): drop stale / superseded pages BEFORE ranking/top-N ──────────────
+// Curation flags retired pages in their FRONTMATTER (harvest stamps `stale:` / `superseded_by:`). A recon
+// FindHit carries NO frontmatter, so the exclusion reads each candidate page's frontmatter from disk via
+// an INJECTED reader (DI, mirroring the injected clock / reward lookup) — the core stays a pure black box.
+// decideRecall / qualifyingHits gain an optional `exclude` predicate (true ⇒ drop). Absent ⇒ no exclusion
+// ⇒ output byte-identical to today (the no-op). The predicate is built from a pure supersession resolver
+// over a { path → frontmatter } view that fails SAFE on a cycle / dangling successor (exclude, never throw).
+
+// A reward-neutral, gate-clearing prose hit at a given wiki path (for ordering/exclusion assertions).
+function pageHit(file, over) {
+  return hit(Object.assign({ file, name: file, type: 'Page', sources: ['bm25', 'semantic'], semanticScore: 0.7, score: 0.5 }, over));
+}
+
+test('decideRecall (exclude): a stale page is dropped before top-N — a live page it would have displaced surfaces', () => {
+  // TOP_N is 3. Four qualifying prose hits in door order; the FIRST three include a stale page that, if it
+  // kept its slot, would push the fourth (live) page out of the top-N. Excluding it BEFORE the cut lets the
+  // live page surface in its place.
+  const hits = [
+    pageHit('.wrxn/wiki/concepts/a.md'),
+    pageHit('.wrxn/wiki/concepts/stale.md'),
+    pageHit('.wrxn/wiki/concepts/c.md'),
+    pageHit('.wrxn/wiki/concepts/live.md'),
+  ];
+  const exclude = (h) => h.file === '.wrxn/wiki/concepts/stale.md';
+  const block = recall.decideRecall(hits, null, exclude);
+  assert.ok(block, 'the remaining qualifying pages still surface');
+  assert.ok(!/concepts\/stale|\bstale\b/.test(block), 'the stale page never occupies a top-N slot');
+  assert.match(block, /live/, 'the live page it would have displaced now surfaces in its place');
+});
+
+// ── buildExclusion — the PURE supersession resolver over a { path → frontmatter } view ───────────────
+// Builds the exclude predicate from a frontmatter view. A page is retired (excluded) when its frontmatter
+// sets a truthy `stale:` OR carries a `superseded_by:` pointer (it is not its own live head). The walk
+// resolves transitively to the live head and fails SAFE on a cycle / dangling successor (exclude, never
+// throw). The view is keyed by the SAME path the hit carries (hit.file), so the predicate reads off the hit.
+
+test('buildExclusion: a page with truthy stale: frontmatter is excluded', () => {
+  const view = { '.wrxn/wiki/concepts/a.md': { stale: 'concepts/gone-source.md' } };
+  const exclude = recall.buildExclusion(view);
+  assert.equal(exclude(pageHit('.wrxn/wiki/concepts/a.md')), true, 'a stale page is excluded');
+  assert.equal(exclude(pageHit('.wrxn/wiki/concepts/unflagged.md')), false, 'an unflagged page is kept');
+});
+
+test('buildExclusion: a page carrying superseded_by: is excluded', () => {
+  const view = {
+    '.wrxn/wiki/concepts/old.md': { superseded_by: '.wrxn/wiki/concepts/new.md' },
+    '.wrxn/wiki/concepts/new.md': {},
+  };
+  const exclude = recall.buildExclusion(view);
+  assert.equal(exclude(pageHit('.wrxn/wiki/concepts/old.md')), true, 'the superseded page is excluded');
+  assert.equal(exclude(pageHit('.wrxn/wiki/concepts/new.md')), false, 'the live replacement (head) is kept');
+});
+
+test('buildExclusion: supersession resolves transitively — A→B→C surfaces C, excludes A and B', () => {
+  const A = '.wrxn/wiki/concepts/a.md', B = '.wrxn/wiki/concepts/b.md', C = '.wrxn/wiki/concepts/c.md';
+  const view = {
+    [A]: { superseded_by: B },
+    [B]: { superseded_by: C },
+    [C]: {}, // the live head
+  };
+  const exclude = recall.buildExclusion(view);
+  assert.equal(exclude(pageHit(A)), true, 'A (head of the chain) is excluded');
+  assert.equal(exclude(pageHit(B)), true, 'B (mid-chain) is excluded');
+  assert.equal(exclude(pageHit(C)), false, 'C (the live head) surfaces');
+  assert.equal(recall.resolveHead(A, view), C, 'A resolves transitively to the live head C');
+});
+
+test('buildExclusion: a supersession CYCLE fails safe — both pages excluded, no throw / no hang', () => {
+  const A = '.wrxn/wiki/concepts/a.md', B = '.wrxn/wiki/concepts/b.md';
+  const view = { [A]: { superseded_by: B }, [B]: { superseded_by: A } }; // A→B→A
+  let exclude;
+  assert.doesNotThrow(() => { exclude = recall.buildExclusion(view); }, 'building over a cyclic view never throws');
+  assert.doesNotThrow(() => {
+    assert.equal(exclude(pageHit(A)), true, 'a cycle member is excluded (fail safe)');
+    assert.equal(exclude(pageHit(B)), true, 'the other cycle member is excluded (fail safe)');
+  }, 'evaluating the predicate over a cycle terminates and never throws');
+  assert.equal(recall.resolveHead(A, view), null, 'a cyclic chain has no live head (null sentinel)');
+});
+
+test('buildExclusion: a DANGLING successor fails safe — the page is excluded, no throw', () => {
+  const old = '.wrxn/wiki/concepts/old.md';
+  const view = { [old]: { superseded_by: '.wrxn/wiki/concepts/does-not-exist.md' } }; // successor absent
+  const exclude = recall.buildExclusion(view);
+  assert.equal(exclude(pageHit(old)), true, 'a page whose successor is missing is excluded (fail safe)');
+  assert.equal(recall.resolveHead(old, view), null, 'a dangling chain resolves to no head (null)');
+});
+
+test('buildExclusion: a self-superseding page (A→A) fails safe — excluded, no hang', () => {
+  const A = '.wrxn/wiki/concepts/a.md';
+  const view = { [A]: { superseded_by: A } }; // degenerate 1-cycle
+  const exclude = recall.buildExclusion(view);
+  assert.equal(recall.resolveHead(A, view), null, 'a self-pointer is a cycle → no head');
+  assert.equal(exclude(pageHit(A)), true, 'the self-superseding page is excluded (fail safe)');
+});
+
+test('buildExclusion: TOTAL — a garbage view / nullish hit never throws and never excludes', () => {
+  for (const bad of [null, undefined, 42, 'x', []]) {
+    const exclude = recall.buildExclusion(bad);
+    assert.equal(typeof exclude, 'function', 'always returns a predicate');
+    assert.equal(exclude(pageHit('.wrxn/wiki/concepts/a.md')), false, 'a non-object view never excludes (fail-open)');
+  }
+  const exclude = recall.buildExclusion({ '.wrxn/wiki/concepts/a.md': { stale: 'x' } });
+  for (const badHit of [null, undefined, {}, { file: 42 }, { file: '' }]) {
+    assert.equal(exclude(badHit), false, 'a hit with no usable path is kept, never throws');
+  }
+});
+
+// ── #25: parseRetirement interprets the YAML scalar — `stale: false` means NOT stale ─────────────────
+// parseRetirement is a raw-text line scanner, not a full YAML parser, so it captured the scalar as a
+// STRING. `stale: false` then yielded the string 'false', which is truthy in JS → buildExclusion's
+// `if (fm.stale)` wrongly excluded a page the author explicitly marked not-stale. A YAML-falsy scalar
+// (false / no / null / ~ / 0 / empty) means NOT stale → the key must be dropped; only a truthy flag
+// excludes. (Harvest itself only ever writes `stale: <source-path>` (truthy) or omits the key, so this
+// only bites a human who hand-writes `stale: false` to un-flag — but the contract must honour them.)
+test('parseRetirement: a YAML-falsy stale scalar is dropped — `stale: false` / `no` / `0` is NOT stale', () => {
+  for (const falsy of ['false', 'False', 'FALSE', 'no', 'No', 'null', '~', '0']) {
+    const fm = recall.parseRetirement(`---\nstale: ${falsy}\n---\n\n# p\n`);
+    assert.equal(fm.stale, undefined, `stale: ${falsy} is YAML-falsy → key dropped (NOT stale)`);
+  }
+});
+
+test('parseRetirement: a truthy stale scalar is still captured — `stale: true` / `yes` / a source path', () => {
+  assert.equal(recall.parseRetirement('---\nstale: true\n---\n').stale, 'true', '`true` is captured');
+  assert.equal(recall.parseRetirement('---\nstale: yes\n---\n').stale, 'yes', '`yes` is captured');
+  assert.equal(
+    recall.parseRetirement('---\nstale: concepts/gone-source.md\n---\n').stale,
+    'concepts/gone-source.md',
+    'the harvest-written source path (the real-world case) is captured unchanged'
+  );
+});
+
+test('buildExclusion (#25): a page explicitly marked `stale: false` is NOT excluded (kept)', () => {
+  // The headline bug repro: a human un-flags a page with `stale: false`. The string 'false' is truthy
+  // in JS, so the pre-fix reader excluded it — contradicting YAML semantics and the AC word "truthy".
+  const view = { '.wrxn/wiki/concepts/not-stale.md': recall.parseRetirement('---\nstale: false\n---\n') };
+  const exclude = recall.buildExclusion(view);
+  assert.equal(exclude(pageHit('.wrxn/wiki/concepts/not-stale.md')), false, 'a `stale: false` page is kept, not excluded');
+});
+
+test('recallFromDoor (#25): a page flagged `stale: false` on disk surfaces — falsy means not-stale, end-to-end', async () => {
+  const root = installRoot('wrxn-recall-e2e-stalefalse-');
+  writeEndpoint(root, { pid: process.pid, port: 65054 });
+  writeWikiPage(root, '.wrxn/wiki/concepts/keepme.md', { stale: 'false' });
+  const block = await recall.recallFromDoor(root, 'a prompt long enough to query the door', {
+    transport: proseDoor(['.wrxn/wiki/concepts/keepme.md']),
+  });
+  assert.ok(block, 'a `stale: false` page is NOT retired → recall still surfaces');
+  assert.match(block, /keepme/, 'the explicitly-not-stale page surfaces (falsy honoured end-to-end)');
+});
+
+test('decideRecall: exclusion runs BEFORE the reward re-rank — an excluded top-reward page never surfaces', () => {
+  // The excluded page has the highest reward factor; if exclusion ran AFTER the re-rank it would win a
+  // slot. Excluding it first means it is gone before reward (or the gate, or the cut) is ever consulted.
+  const hits = [
+    pageHit('.wrxn/wiki/concepts/keep.md'),
+    pageHit('.wrxn/wiki/concepts/retired.md'),
+  ];
+  const lookup = { 'concepts/retired.md': 1.9, 'concepts/keep.md': 0.3 }; // retired would dominate the re-rank
+  const exclude = (h) => h.file === '.wrxn/wiki/concepts/retired.md';
+  const block = recall.decideRecall(hits, lookup, exclude);
+  assert.ok(block, 'the kept page still surfaces');
+  assert.ok(!/retired/.test(block), 'the excluded page never surfaces even though it had the top reward factor');
+  assert.match(block, /keep/, 'only the live page remains');
+});
+
+test('decideRecall: an excluded page that clears the gate strongly is still dropped (exclusion precedes the gate)', () => {
+  // A lone strongly-qualifying prose hit — but it is retired. Exclusion before the gate ⇒ Abstain (null),
+  // proving the excluded page is removed before the qualify check would have admitted it.
+  const strong = pageHit('.wrxn/wiki/concepts/retired.md', { sources: ['bm25', 'semantic'], semanticScore: 0.95 });
+  const exclude = (h) => h.file === '.wrxn/wiki/concepts/retired.md';
+  assert.equal(recall.decideRecall([strong], null, exclude), null, 'a strong-but-retired sole hit yields Abstain');
+});
+
+// ── the end-to-end exclusion wiring through recallFromDoor (reads page frontmatter from disk) ─────────
+// The IO shell reads each candidate hit's page frontmatter from <root>/<hit.file> and builds the exclude
+// predicate; tests write real wiki pages so the disk read is exercised. THE HEADLINE NO-OP (AC-6): with
+// no flagged pages, the block is byte-identical to the pre-exclusion baseline (decideRecall single-arg).
+
+// Write a wiki page file under the install root with optional frontmatter keys, so the shell's disk read
+// sees a real page. `fm` is a {key: value} map of frontmatter scalars (e.g. { stale: '...' }).
+function writeWikiPage(root, relFile, fm) {
+  const abs = path.join(root, relFile);
+  fs.mkdirSync(path.dirname(abs), { recursive: true });
+  const lines = ['---', ...Object.entries(fm || {}).map(([k, v]) => `${k}: ${v}`), '---', '', `# ${path.basename(relFile)}`, '', 'body'];
+  fs.writeFileSync(abs, lines.join('\n') + '\n');
+}
+
+test('recallFromDoor: with NO flagged pages, the block is byte-identical to the pre-exclusion baseline (AC-6 no-op)', async () => {
+  const root = installRoot('wrxn-recall-noop-');
+  writeEndpoint(root, { pid: process.pid, port: 65050 });
+  const files = ['.wrxn/wiki/concepts/a.md', '.wrxn/wiki/gotchas/b.md'];
+  for (const f of files) writeWikiPage(root, f, {}); // present, but NO stale / superseded_by
+  // the pre-exclusion baseline for these exact gate-clearing hits (what recall emitted before S1)
+  const baselineHits = files.map((f, i) => hit({ id: String(i), name: `Page ${i}`, type: 'Page', file: f, sources: ['bm25', 'semantic'], semanticScore: 0.7 }));
+  const baseline = recall.decideRecall(baselineHits); // single-arg = pre-S1 behaviour
+  const block = await recall.recallFromDoor(root, 'a prompt long enough to query the door', { transport: proseDoor(files) });
+  assert.equal(block, baseline, 'unflagged recall is byte-identical to the pre-exclusion baseline');
+});
+
+test('recallFromDoor: a candidate whose page on disk is flagged stale: is excluded end-to-end', async () => {
+  const root = installRoot('wrxn-recall-e2e-stale-');
+  writeEndpoint(root, { pid: process.pid, port: 65051 });
+  writeWikiPage(root, '.wrxn/wiki/concepts/live.md', {});
+  writeWikiPage(root, '.wrxn/wiki/concepts/stale.md', { stale: 'concepts/gone-source.md' });
+  const block = await recall.recallFromDoor(root, 'a prompt long enough to query the door', {
+    transport: proseDoor(['.wrxn/wiki/concepts/stale.md', '.wrxn/wiki/concepts/live.md']),
+  });
+  assert.ok(block, 'the live page still surfaces');
+  assert.ok(!/concepts\/stale|\bstale\b/.test(block), 'the disk-flagged stale page is excluded end-to-end');
+  assert.match(block, /live/, 'only the live page surfaces');
+});
+
+test('recallFromDoor: a candidate superseded on disk (A→B→C) surfaces only the live head C', async () => {
+  const root = installRoot('wrxn-recall-e2e-super-');
+  writeEndpoint(root, { pid: process.pid, port: 65052 });
+  writeWikiPage(root, '.wrxn/wiki/concepts/a.md', { superseded_by: '.wrxn/wiki/concepts/b.md' });
+  writeWikiPage(root, '.wrxn/wiki/concepts/b.md', { superseded_by: '.wrxn/wiki/concepts/c.md' });
+  writeWikiPage(root, '.wrxn/wiki/concepts/c.md', {});
+  const block = await recall.recallFromDoor(root, 'a prompt long enough to query the door', {
+    transport: proseDoor(['.wrxn/wiki/concepts/a.md', '.wrxn/wiki/concepts/b.md', '.wrxn/wiki/concepts/c.md']),
+  });
+  assert.ok(block, 'the live head surfaces');
+  assert.match(block, /\bc\b|concepts\/c/, 'the live head C surfaces');
+  assert.ok(!/concepts\/a\b/.test(block) && !/concepts\/b\b/.test(block), 'the superseded ancestors A and B are excluded');
+});
+
+test('recallFromDoor: exclusion reads frontmatter best-effort — an unreadable page is treated as unflagged (kept, no throw)', async () => {
+  // A candidate whose page file is MISSING on disk (the door returned a hit for a since-deleted page).
+  // The frontmatter read fails; exclusion must fail-open (treat as unflagged → keep) and never throw.
+  const root = installRoot('wrxn-recall-e2e-missingpage-');
+  writeEndpoint(root, { pid: process.pid, port: 65053 });
+  // note: no writeWikiPage — the file does not exist on disk
+  const block = await recall.recallFromDoor(root, 'a prompt long enough to query the door', {
+    transport: proseDoor(['.wrxn/wiki/concepts/ghost.md']),
+  });
+  assert.ok(block, 'a candidate whose page is unreadable is kept (fail-open), recall still surfaces');
+  assert.match(block, /ghost/, 'the unflagged-by-default page surfaces');
+});
+
+// ── #26: the exclusion reader is CONFINED to the real wiki root (path-traversal defense-in-depth) ─────
+// readExclusionView turns a hit.file into a real fs.readFileSync path. The pre-fix guard was a substring
+// check (`wikiRelPath != null`) with no canonicalization and no `..` rejection, so a hit.file like
+// `.wrxn/wiki/../../../secret` passed it and the join resolved OUTSIDE the wiki root (readFileSync also
+// follows symlinks). The fix RESOLVES the path and reads ONLY files truly under <root>/.wrxn/wiki/ —
+// an escaping / absolute / symlink-escaping path is treated as unreadable (unflagged, kept), fail-open,
+// never read, never throws. Black-box proof: a real flagged-`stale:` file PLANTED OUTSIDE the wiki root,
+// pointed at by an escaping hit.file, must NOT exclude its hit (which it would iff the reader read it).
+
+test('readExclusionView (#26): a `..`-escaping hit.file is NOT read — its flag never lands in the view', () => {
+  const root = installRoot('wrxn-excl-traversal-');
+  // A page OUTSIDE the wiki root that, IF read, would flag the hit stale (proving the read happened).
+  fs.mkdirSync(path.join(root, '.wrxn'), { recursive: true });
+  fs.writeFileSync(path.join(root, '.wrxn', 'outside-secret.md'), '---\nstale: pwned\n---\n\n# x\n');
+  const escaping = '.wrxn/wiki/../outside-secret.md'; // resolves to <root>/.wrxn/outside-secret.md (outside the wiki root)
+  let view;
+  assert.doesNotThrow(() => { view = recall.readExclusionView(root, [{ file: escaping, type: 'Page' }]); });
+  // confined → unflagged: either the path is omitted entirely, or it is recorded as empty frontmatter.
+  assert.deepEqual(view[escaping] || {}, {}, 'an escaping path is treated as unflagged — its outside `stale:` flag is never read');
+});
+
+test('readExclusionView (#26): a deep `..` escape to a sibling OUTSIDE the install root is refused (not read)', () => {
+  const root = installRoot('wrxn-excl-deep-');
+  // A flagged file in a SIBLING dir of the install root (fully outside it), reachable only by climbing out.
+  const sibling = path.join(path.dirname(root), `${path.basename(root)}-sibling-secret.md`);
+  fs.writeFileSync(sibling, '---\nstale: pwned\n---\n\n# x\n');
+  // From the wiki root (<root>/.wrxn/wiki) climb out three levels (wiki → .wrxn → root → parent) to the
+  // sibling. The path still contains the '.wrxn/wiki/' substring (slips the old indexOf guard) yet
+  // resolves fully OUTSIDE the install root.
+  const escaping = `.wrxn/wiki/../../../${path.basename(root)}-sibling-secret.md`;
+  // sanity: this genuinely resolves outside the wiki root (and outside the install root) under both join and resolve
+  assert.equal(path.resolve(root, escaping), sibling, 'fixture: the escaping path really resolves to the outside sibling');
+  let view;
+  assert.doesNotThrow(() => { view = recall.readExclusionView(root, [{ file: escaping, type: 'Page' }]); });
+  assert.deepEqual(view[escaping] || {}, {}, 'a deep escape is unflagged — its outside `stale:` flag is never read');
+});
+
+test('readExclusionView (#26): a legitimate in-root page is still read normally (no regression)', () => {
+  const root = installRoot('wrxn-excl-inroot-');
+  writeWikiPage(root, '.wrxn/wiki/concepts/real.md', { stale: 'concepts/gone.md' });
+  const f = '.wrxn/wiki/concepts/real.md';
+  const view = recall.readExclusionView(root, [{ file: f, type: 'Page' }]);
+  assert.equal(view[f] && view[f].stale, 'concepts/gone.md', 'a genuinely-in-root page is read and its flag captured');
+});
+
+test('recallFromDoor (#26): an escaping candidate fails open — its outside `stale:` flag cannot retire it', async () => {
+  const root = installRoot('wrxn-recall-e2e-traversal-');
+  writeEndpoint(root, { pid: process.pid, port: 65055 });
+  // Plant a stale-flagged file OUTSIDE the wiki root; the door returns a hit whose path escapes to it.
+  fs.mkdirSync(path.join(root, '.wrxn'), { recursive: true });
+  fs.writeFileSync(path.join(root, '.wrxn', 'evil.md'), '---\nstale: pwned\n---\n\n# evil\n');
+  const escaping = '.wrxn/wiki/../evil.md';
+  let block;
+  await assert.doesNotReject(async () => {
+    block = await recall.recallFromDoor(root, 'a prompt long enough to query the door', {
+      transport: proseDoor([escaping]),
+    });
+  }, 'an escaping candidate never makes recall throw (fail-open)');
+  assert.ok(block, 'the candidate is treated as unflagged (its outside flag was never read) → recall surfaces');
+  assert.match(block, /evil/, 'the page surfaces — the path-traversal read was refused, not honoured');
+});
+
+test('recallFromDoor (#26): a symlink INSIDE the wiki root pointing OUTSIDE is not followed to read external content', async function () {
+  const root = installRoot('wrxn-recall-e2e-symlink-');
+  writeEndpoint(root, { pid: process.pid, port: 65056 });
+  // A stale-flagged file outside the wiki root; a symlink at a legitimate in-root path points to it.
+  const outside = path.join(root, 'outside-stale.md');
+  fs.writeFileSync(outside, '---\nstale: pwned\n---\n\n# outside\n');
+  fs.mkdirSync(path.join(root, '.wrxn', 'wiki', 'concepts'), { recursive: true });
+  const linkRel = '.wrxn/wiki/concepts/link.md';
+  try {
+    fs.symlinkSync(outside, path.join(root, linkRel));
+  } catch (e) {
+    return; // platform without symlink support (e.g. restricted Windows) → skip
+  }
+  let block;
+  await assert.doesNotReject(async () => {
+    block = await recall.recallFromDoor(root, 'a prompt long enough to query the door', {
+      transport: proseDoor([linkRel]),
+    });
+  }, 'a symlink-escaping candidate never makes recall throw (fail-open)');
+  assert.ok(block, 'the symlinked page is treated as unflagged (external content not followed) → recall surfaces');
+  assert.match(block, /link/, 'the page surfaces — the symlink to outside content was not followed for the flag');
+});
+
+// ── S4 structural recall arm (#23): edit-aware second recon_find query, RRF-fused with the prompt arm ──
+// Adapted (no-invention): recon-wrxn exposes no DOCUMENTED_BY code→wiki edge, so F is kernel-only — it
+// REUSES the .touched per-session edited-paths list (written by code-intel-push) to seed a SECOND
+// recon_find query against the SAME door, then RRF-fuses that ranked list with the prompt-semantic list
+// BEFORE the exclusion / gate / reward / top-N. The query-builder and the fusion are PURE black boxes;
+// the structural fetch is injected (DI). Empty .touched or any structural fault → no-op (byte-identical).
+
+// ── buildStructuralQuery — PURE: edited paths → a recon_find seed (file basenames, tokenized, deduped) ──
+
+test('buildStructuralQuery: maps touched paths to a deduped basename token seed', () => {
+  assert.equal(
+    recall.buildStructuralQuery(['payload/.claude/hooks/recall-surface.cjs', 'lib/recall-engine.cjs']),
+    'recall surface engine',
+    'basenames (sans extension) are tokenized on non-alphanumerics and deduped (recall appears once)'
+  );
+  assert.equal(recall.buildStructuralQuery(['lib/foo.cjs']), 'foo', 'a single path yields its basename token');
+});
+
+test('buildStructuralQuery: empty / non-array / junk input → empty string (the no-op seed)', () => {
+  assert.equal(recall.buildStructuralQuery([]), '', 'no edits → empty seed');
+  assert.equal(recall.buildStructuralQuery(undefined), '', 'non-array → empty seed');
+  assert.equal(recall.buildStructuralQuery([null, 42, '']), '', 'unusable entries are skipped → empty seed');
+});
+
+// ── rrfFuse — PURE reciprocal-rank fusion of two ranked hit lists (deduped by page key) ───────────────
+
+test('rrfFuse: a page present in BOTH arms outranks pages present in only one (summed reciprocal ranks)', () => {
+  const both = hit({ file: '.wrxn/wiki/concepts/both.md', name: 'Both' });
+  const aOnly = hit({ file: '.wrxn/wiki/concepts/a-only.md', name: 'A only' });
+  const bOnly = hit({ file: '.wrxn/wiki/concepts/b-only.md', name: 'B only' });
+  // semantic arm ranks [both, aOnly]; structural arm ranks [both, bOnly] → `both` accrues two contributions
+  const fused = recall.rrfFuse([both, aOnly], [both, bOnly]);
+  assert.deepEqual(fused.map((h) => h.file), [
+    '.wrxn/wiki/concepts/both.md',     // in both arms → highest fused score
+    '.wrxn/wiki/concepts/a-only.md',   // rank-2 of arm A (1/(k+2)) beats rank-2 of arm B by first-seen tie order
+    '.wrxn/wiki/concepts/b-only.md',
+  ], 'the consensus page leads; each page appears once (deduped by file key)');
+});
+
+test('rrfFuse: IDENTITY when one list is empty — the non-empty list is returned in order, same objects', () => {
+  // This property is the cornerstone of the no-op guarantee: empty .touched → structural arm yields [] →
+  // the prompt-semantic list flows through fusion unchanged (same order, same hit references).
+  const a = hit({ file: '.wrxn/wiki/concepts/a.md', name: 'A' });
+  const b = hit({ file: '.wrxn/wiki/concepts/b.md', name: 'B' });
+  const c = hit({ file: '.wrxn/wiki/concepts/c.md', name: 'C' });
+  const list = [a, b, c];
+  const fusedRight = recall.rrfFuse(list, []);
+  assert.deepEqual(fusedRight, list, 'rrfFuse(list, []) preserves order');
+  assert.equal(fusedRight[0], a, 'and preserves the exact hit object references (no copies)');
+  assert.deepEqual(recall.rrfFuse([], list), list, 'rrfFuse([], list) is likewise the identity');
+  assert.deepEqual(recall.rrfFuse([], []), [], 'two empty arms → []');
+});
+
+// ── readTouched — REUSE the .touched per-session edited-paths list (written by code-intel-push) ───────
+// code-intel-push appends each first-touched relPath to .wrxn/history/<safeId(sid)>.touched. The
+// structural arm reads it back; the session-id → filename transform MUST match code-intel-push exactly,
+// so this helper mirrors its safeId. No new persistence path is created — the arm only READS .touched.
+
+function safeIdForTouched(sid) {
+  return String(sid || 'session')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48) || 'session';
+}
+function writeTouched(root, sessionId, lines) {
+  const dir = path.join(root, '.wrxn', 'history');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, `${safeIdForTouched(sessionId)}.touched`), lines.join('\n') + '\n');
+}
+
+test('readTouched: reads the session .touched file back as a deduped, order-preserving path list', () => {
+  const root = installRoot('wrxn-touched-read-');
+  writeTouched(root, 'sess-s4', ['lib/a.cjs', 'lib/b.cjs', 'lib/a.cjs', '  ', 'lib/c.cjs']);
+  assert.deepEqual(
+    recall.readTouched(root, 'sess-s4'),
+    ['lib/a.cjs', 'lib/b.cjs', 'lib/c.cjs'],
+    'blank lines dropped, duplicates collapsed, first-seen order kept'
+  );
+});
+
+test('readTouched: an absent .touched file → [] (the common no-edits case, never throws)', () => {
+  const root = installRoot('wrxn-touched-absent-');
+  assert.deepEqual(recall.readTouched(root, 'sess-none'), [], 'no edits this session → empty list');
+  assert.doesNotThrow(() => recall.readTouched(root, undefined), 'a missing session id never throws');
+});
+
+// ── the structural arm wired through recallFromDoor: a query-discriminating door (DI) ─────────────────
+// A transport that answers the prompt-semantic query and the edit-seeded structural query DIFFERENTLY,
+// so a test can prove a page reachable ONLY via the structural arm surfaces after fusion.
+
+// `byQuery` maps a recon_find query string → the prose files that query returns (each a gate-clearing hit).
+function splitArmDoor(byQuery) {
+  return async ({ body }) => {
+    const files = byQuery[body.query] || [];
+    const hits = files.map((f, i) =>
+      hit({ id: `${body.query}-${i}`, name: f, type: 'Page', file: f, sources: ['bm25', 'semantic'], semanticScore: 0.7 })
+    );
+    return { statusCode: 200, body: JSON.stringify({ result: '', hits }) };
+  };
+}
+
+test('recallFromDoor (S4): a page reachable only via the edit-seeded structural arm surfaces after fusion', async () => {
+  const root = installRoot('wrxn-s4-surface-');
+  writeEndpoint(root, { pid: process.pid, port: 65060 });
+  writeTouched(root, 'sess-s4', ['lib/recall-engine.cjs']); // → structural query 'recall engine'
+  const PROMPT = 'how should I tune the deploy runbook for prod';
+  const SEMANTIC_PAGE = '.wrxn/wiki/concepts/deploy-runbook.md';
+  const STRUCTURAL_PAGE = '.wrxn/wiki/concepts/recall-engine.md'; // mentions the edited symbol, NOT the prompt
+  const door = splitArmDoor({
+    [PROMPT.slice(0, 512)]: [SEMANTIC_PAGE],          // the prompt arm finds only the runbook page
+    'recall engine': [STRUCTURAL_PAGE],               // the edit-seeded arm finds the recall-engine page
+  });
+
+  // CONTROL: with NO .touched the structural arm is dormant → the structural page must NOT surface.
+  const rootNoTouch = installRoot('wrxn-s4-control-');
+  writeEndpoint(rootNoTouch, { pid: process.pid, port: 65061 });
+  const control = await recall.recallFromDoor(rootNoTouch, PROMPT, { transport: door, sessionId: 'sess-s4' });
+  assert.ok(control, 'control surfaces the semantic page');
+  assert.match(control, /deploy-runbook/, 'control: the prompt-semantic page surfaces');
+  assert.ok(!/recall-engine/.test(control), 'control: with no edits, the structural page is NOT reachable');
+
+  // WITH .touched the structural arm fires and the recall-engine page is fused in and surfaces.
+  const block = await recall.recallFromDoor(root, PROMPT, { transport: door, sessionId: 'sess-s4' });
+  assert.ok(block, 'recall surfaces');
+  assert.match(block, /recall-engine/, 'the edit-seeded structural page surfaces via the structural arm + fusion');
+  assert.match(block, /deploy-runbook/, 'the prompt-semantic page still surfaces too (both arms fused)');
+});
+
+test('recallFromDoor (S4 no-op): empty .touched → byte-identical to the pre-S4 semantic-only baseline', async () => {
+  const root = installRoot('wrxn-s4-noop-');
+  writeEndpoint(root, { pid: process.pid, port: 65062 });
+  // NO writeTouched — the structural arm must stay dormant.
+  const PROMPT = 'how should I tune the deploy runbook for prod';
+  const SEMANTIC_PAGE = '.wrxn/wiki/concepts/deploy-runbook.md';
+  const STRUCTURAL_PAGE = '.wrxn/wiki/concepts/recall-engine.md';
+  // The door HAS a structural answer ready — proving the no-op holds because the arm never fires, not
+  // because the door lacks structural content to contribute.
+  const door = splitArmDoor({ [PROMPT]: [SEMANTIC_PAGE], 'recall engine': [STRUCTURAL_PAGE] });
+  // The pre-S4 baseline: exactly the block recall emitted for the prompt arm alone (the door's prompt hit).
+  const promptHit = hit({ id: `${PROMPT}-0`, name: SEMANTIC_PAGE, type: 'Page', file: SEMANTIC_PAGE, sources: ['bm25', 'semantic'], semanticScore: 0.7 });
+  const baseline = recall.decideRecall([promptHit]);
+  const block = await recall.recallFromDoor(root, PROMPT, { transport: door, sessionId: 'sess-s4' });
+  assert.equal(block, baseline, 'with no edits, recall is byte-identical to the pre-S4 semantic-only output');
+  assert.ok(!/recall-engine/.test(block), 'the dormant structural arm contributes nothing');
+});
+
+test('recallFromDoor (S4 fail-open): a structural-query fault → arm empty, recall unchanged, never throws', async () => {
+  const root = installRoot('wrxn-s4-failopen-');
+  writeEndpoint(root, { pid: process.pid, port: 65063 });
+  writeTouched(root, 'sess-s4', ['lib/recall-engine.cjs']); // arm fires with query 'recall engine'
+  const PROMPT = 'how should I tune the deploy runbook for prod';
+  const SEMANTIC_PAGE = '.wrxn/wiki/concepts/deploy-runbook.md';
+  // The SEMANTIC arm succeeds; the STRUCTURAL query blows up (timeout / refused / 500 — all reach here).
+  const transport = async ({ body }) => {
+    if (body.query === 'recall engine') throw new Error('structural door blew up');
+    return { statusCode: 200, body: JSON.stringify({ result: '', hits: [hit({ id: '0', name: SEMANTIC_PAGE, type: 'Page', file: SEMANTIC_PAGE, sources: ['bm25', 'semantic'], semanticScore: 0.7 })] }) };
+  };
+  const baseline = recall.decideRecall([hit({ id: '0', name: SEMANTIC_PAGE, type: 'Page', file: SEMANTIC_PAGE, sources: ['bm25', 'semantic'], semanticScore: 0.7 })]);
+  let block;
+  await assert.doesNotReject(async () => {
+    block = await recall.recallFromDoor(root, PROMPT, { transport, sessionId: 'sess-s4' });
+  }, 'a structural-arm fault never makes recall throw (fail-open)');
+  assert.equal(block, baseline, 'a structural fault leaves recall byte-identical to the semantic-only baseline');
+  assert.match(block, /deploy-runbook/, 'the semantic arm still surfaces');
+});
+
+test('recallFromDoor (S4 + S1): a stale page arriving via the structural arm is STILL excluded (over the fused set)', async () => {
+  // Fusion runs BEFORE diskExclusion, so the S1 exclusion view is built from the FULL fused candidate set
+  // (both arms). A page retired in its frontmatter must never reach a top-N slot regardless of which arm
+  // surfaced it — proving S1's guarantee is preserved across the new structural path.
+  const root = installRoot('wrxn-s4-s1-');
+  writeEndpoint(root, { pid: process.pid, port: 65064 });
+  writeTouched(root, 'sess-s4', ['lib/old-engine.cjs']); // → structural query 'old engine'
+  const PROMPT = 'how should I tune the deploy runbook for prod';
+  const LIVE = '.wrxn/wiki/concepts/deploy-runbook.md';  // semantic arm, live
+  const STALE = '.wrxn/wiki/concepts/old-engine.md';     // structural arm, flagged stale on disk
+  writeWikiPage(root, LIVE, {});
+  writeWikiPage(root, STALE, { stale: 'concepts/gone-source.md' });
+  const door = splitArmDoor({ [PROMPT]: [LIVE], 'old engine': [STALE] });
+  const block = await recall.recallFromDoor(root, PROMPT, { transport: door, sessionId: 'sess-s4' });
+  assert.ok(block, 'the live page still surfaces');
+  assert.match(block, /deploy-runbook/, 'the live semantic page surfaces');
+  assert.ok(!/old-engine/.test(block), 'the disk-flagged stale page is excluded even though it arrived via the structural arm');
+});
