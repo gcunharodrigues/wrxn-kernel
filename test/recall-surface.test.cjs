@@ -1250,3 +1250,189 @@ test('recallFromDoor (#26): a symlink INSIDE the wiki root pointing OUTSIDE is n
   assert.ok(block, 'the symlinked page is treated as unflagged (external content not followed) → recall surfaces');
   assert.match(block, /link/, 'the page surfaces — the symlink to outside content was not followed for the flag');
 });
+
+// ── S4 structural recall arm (#23): edit-aware second recon_find query, RRF-fused with the prompt arm ──
+// Adapted (no-invention): recon-wrxn exposes no DOCUMENTED_BY code→wiki edge, so F is kernel-only — it
+// REUSES the .touched per-session edited-paths list (written by code-intel-push) to seed a SECOND
+// recon_find query against the SAME door, then RRF-fuses that ranked list with the prompt-semantic list
+// BEFORE the exclusion / gate / reward / top-N. The query-builder and the fusion are PURE black boxes;
+// the structural fetch is injected (DI). Empty .touched or any structural fault → no-op (byte-identical).
+
+// ── buildStructuralQuery — PURE: edited paths → a recon_find seed (file basenames, tokenized, deduped) ──
+
+test('buildStructuralQuery: maps touched paths to a deduped basename token seed', () => {
+  assert.equal(
+    recall.buildStructuralQuery(['payload/.claude/hooks/recall-surface.cjs', 'lib/recall-engine.cjs']),
+    'recall surface engine',
+    'basenames (sans extension) are tokenized on non-alphanumerics and deduped (recall appears once)'
+  );
+  assert.equal(recall.buildStructuralQuery(['lib/foo.cjs']), 'foo', 'a single path yields its basename token');
+});
+
+test('buildStructuralQuery: empty / non-array / junk input → empty string (the no-op seed)', () => {
+  assert.equal(recall.buildStructuralQuery([]), '', 'no edits → empty seed');
+  assert.equal(recall.buildStructuralQuery(undefined), '', 'non-array → empty seed');
+  assert.equal(recall.buildStructuralQuery([null, 42, '']), '', 'unusable entries are skipped → empty seed');
+});
+
+// ── rrfFuse — PURE reciprocal-rank fusion of two ranked hit lists (deduped by page key) ───────────────
+
+test('rrfFuse: a page present in BOTH arms outranks pages present in only one (summed reciprocal ranks)', () => {
+  const both = hit({ file: '.wrxn/wiki/concepts/both.md', name: 'Both' });
+  const aOnly = hit({ file: '.wrxn/wiki/concepts/a-only.md', name: 'A only' });
+  const bOnly = hit({ file: '.wrxn/wiki/concepts/b-only.md', name: 'B only' });
+  // semantic arm ranks [both, aOnly]; structural arm ranks [both, bOnly] → `both` accrues two contributions
+  const fused = recall.rrfFuse([both, aOnly], [both, bOnly]);
+  assert.deepEqual(fused.map((h) => h.file), [
+    '.wrxn/wiki/concepts/both.md',     // in both arms → highest fused score
+    '.wrxn/wiki/concepts/a-only.md',   // rank-2 of arm A (1/(k+2)) beats rank-2 of arm B by first-seen tie order
+    '.wrxn/wiki/concepts/b-only.md',
+  ], 'the consensus page leads; each page appears once (deduped by file key)');
+});
+
+test('rrfFuse: IDENTITY when one list is empty — the non-empty list is returned in order, same objects', () => {
+  // This property is the cornerstone of the no-op guarantee: empty .touched → structural arm yields [] →
+  // the prompt-semantic list flows through fusion unchanged (same order, same hit references).
+  const a = hit({ file: '.wrxn/wiki/concepts/a.md', name: 'A' });
+  const b = hit({ file: '.wrxn/wiki/concepts/b.md', name: 'B' });
+  const c = hit({ file: '.wrxn/wiki/concepts/c.md', name: 'C' });
+  const list = [a, b, c];
+  const fusedRight = recall.rrfFuse(list, []);
+  assert.deepEqual(fusedRight, list, 'rrfFuse(list, []) preserves order');
+  assert.equal(fusedRight[0], a, 'and preserves the exact hit object references (no copies)');
+  assert.deepEqual(recall.rrfFuse([], list), list, 'rrfFuse([], list) is likewise the identity');
+  assert.deepEqual(recall.rrfFuse([], []), [], 'two empty arms → []');
+});
+
+// ── readTouched — REUSE the .touched per-session edited-paths list (written by code-intel-push) ───────
+// code-intel-push appends each first-touched relPath to .wrxn/history/<safeId(sid)>.touched. The
+// structural arm reads it back; the session-id → filename transform MUST match code-intel-push exactly,
+// so this helper mirrors its safeId. No new persistence path is created — the arm only READS .touched.
+
+function safeIdForTouched(sid) {
+  return String(sid || 'session')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48) || 'session';
+}
+function writeTouched(root, sessionId, lines) {
+  const dir = path.join(root, '.wrxn', 'history');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, `${safeIdForTouched(sessionId)}.touched`), lines.join('\n') + '\n');
+}
+
+test('readTouched: reads the session .touched file back as a deduped, order-preserving path list', () => {
+  const root = installRoot('wrxn-touched-read-');
+  writeTouched(root, 'sess-s4', ['lib/a.cjs', 'lib/b.cjs', 'lib/a.cjs', '  ', 'lib/c.cjs']);
+  assert.deepEqual(
+    recall.readTouched(root, 'sess-s4'),
+    ['lib/a.cjs', 'lib/b.cjs', 'lib/c.cjs'],
+    'blank lines dropped, duplicates collapsed, first-seen order kept'
+  );
+});
+
+test('readTouched: an absent .touched file → [] (the common no-edits case, never throws)', () => {
+  const root = installRoot('wrxn-touched-absent-');
+  assert.deepEqual(recall.readTouched(root, 'sess-none'), [], 'no edits this session → empty list');
+  assert.doesNotThrow(() => recall.readTouched(root, undefined), 'a missing session id never throws');
+});
+
+// ── the structural arm wired through recallFromDoor: a query-discriminating door (DI) ─────────────────
+// A transport that answers the prompt-semantic query and the edit-seeded structural query DIFFERENTLY,
+// so a test can prove a page reachable ONLY via the structural arm surfaces after fusion.
+
+// `byQuery` maps a recon_find query string → the prose files that query returns (each a gate-clearing hit).
+function splitArmDoor(byQuery) {
+  return async ({ body }) => {
+    const files = byQuery[body.query] || [];
+    const hits = files.map((f, i) =>
+      hit({ id: `${body.query}-${i}`, name: f, type: 'Page', file: f, sources: ['bm25', 'semantic'], semanticScore: 0.7 })
+    );
+    return { statusCode: 200, body: JSON.stringify({ result: '', hits }) };
+  };
+}
+
+test('recallFromDoor (S4): a page reachable only via the edit-seeded structural arm surfaces after fusion', async () => {
+  const root = installRoot('wrxn-s4-surface-');
+  writeEndpoint(root, { pid: process.pid, port: 65060 });
+  writeTouched(root, 'sess-s4', ['lib/recall-engine.cjs']); // → structural query 'recall engine'
+  const PROMPT = 'how should I tune the deploy runbook for prod';
+  const SEMANTIC_PAGE = '.wrxn/wiki/concepts/deploy-runbook.md';
+  const STRUCTURAL_PAGE = '.wrxn/wiki/concepts/recall-engine.md'; // mentions the edited symbol, NOT the prompt
+  const door = splitArmDoor({
+    [PROMPT.slice(0, 512)]: [SEMANTIC_PAGE],          // the prompt arm finds only the runbook page
+    'recall engine': [STRUCTURAL_PAGE],               // the edit-seeded arm finds the recall-engine page
+  });
+
+  // CONTROL: with NO .touched the structural arm is dormant → the structural page must NOT surface.
+  const rootNoTouch = installRoot('wrxn-s4-control-');
+  writeEndpoint(rootNoTouch, { pid: process.pid, port: 65061 });
+  const control = await recall.recallFromDoor(rootNoTouch, PROMPT, { transport: door, sessionId: 'sess-s4' });
+  assert.ok(control, 'control surfaces the semantic page');
+  assert.match(control, /deploy-runbook/, 'control: the prompt-semantic page surfaces');
+  assert.ok(!/recall-engine/.test(control), 'control: with no edits, the structural page is NOT reachable');
+
+  // WITH .touched the structural arm fires and the recall-engine page is fused in and surfaces.
+  const block = await recall.recallFromDoor(root, PROMPT, { transport: door, sessionId: 'sess-s4' });
+  assert.ok(block, 'recall surfaces');
+  assert.match(block, /recall-engine/, 'the edit-seeded structural page surfaces via the structural arm + fusion');
+  assert.match(block, /deploy-runbook/, 'the prompt-semantic page still surfaces too (both arms fused)');
+});
+
+test('recallFromDoor (S4 no-op): empty .touched → byte-identical to the pre-S4 semantic-only baseline', async () => {
+  const root = installRoot('wrxn-s4-noop-');
+  writeEndpoint(root, { pid: process.pid, port: 65062 });
+  // NO writeTouched — the structural arm must stay dormant.
+  const PROMPT = 'how should I tune the deploy runbook for prod';
+  const SEMANTIC_PAGE = '.wrxn/wiki/concepts/deploy-runbook.md';
+  const STRUCTURAL_PAGE = '.wrxn/wiki/concepts/recall-engine.md';
+  // The door HAS a structural answer ready — proving the no-op holds because the arm never fires, not
+  // because the door lacks structural content to contribute.
+  const door = splitArmDoor({ [PROMPT]: [SEMANTIC_PAGE], 'recall engine': [STRUCTURAL_PAGE] });
+  // The pre-S4 baseline: exactly the block recall emitted for the prompt arm alone (the door's prompt hit).
+  const promptHit = hit({ id: `${PROMPT}-0`, name: SEMANTIC_PAGE, type: 'Page', file: SEMANTIC_PAGE, sources: ['bm25', 'semantic'], semanticScore: 0.7 });
+  const baseline = recall.decideRecall([promptHit]);
+  const block = await recall.recallFromDoor(root, PROMPT, { transport: door, sessionId: 'sess-s4' });
+  assert.equal(block, baseline, 'with no edits, recall is byte-identical to the pre-S4 semantic-only output');
+  assert.ok(!/recall-engine/.test(block), 'the dormant structural arm contributes nothing');
+});
+
+test('recallFromDoor (S4 fail-open): a structural-query fault → arm empty, recall unchanged, never throws', async () => {
+  const root = installRoot('wrxn-s4-failopen-');
+  writeEndpoint(root, { pid: process.pid, port: 65063 });
+  writeTouched(root, 'sess-s4', ['lib/recall-engine.cjs']); // arm fires with query 'recall engine'
+  const PROMPT = 'how should I tune the deploy runbook for prod';
+  const SEMANTIC_PAGE = '.wrxn/wiki/concepts/deploy-runbook.md';
+  // The SEMANTIC arm succeeds; the STRUCTURAL query blows up (timeout / refused / 500 — all reach here).
+  const transport = async ({ body }) => {
+    if (body.query === 'recall engine') throw new Error('structural door blew up');
+    return { statusCode: 200, body: JSON.stringify({ result: '', hits: [hit({ id: '0', name: SEMANTIC_PAGE, type: 'Page', file: SEMANTIC_PAGE, sources: ['bm25', 'semantic'], semanticScore: 0.7 })] }) };
+  };
+  const baseline = recall.decideRecall([hit({ id: '0', name: SEMANTIC_PAGE, type: 'Page', file: SEMANTIC_PAGE, sources: ['bm25', 'semantic'], semanticScore: 0.7 })]);
+  let block;
+  await assert.doesNotReject(async () => {
+    block = await recall.recallFromDoor(root, PROMPT, { transport, sessionId: 'sess-s4' });
+  }, 'a structural-arm fault never makes recall throw (fail-open)');
+  assert.equal(block, baseline, 'a structural fault leaves recall byte-identical to the semantic-only baseline');
+  assert.match(block, /deploy-runbook/, 'the semantic arm still surfaces');
+});
+
+test('recallFromDoor (S4 + S1): a stale page arriving via the structural arm is STILL excluded (over the fused set)', async () => {
+  // Fusion runs BEFORE diskExclusion, so the S1 exclusion view is built from the FULL fused candidate set
+  // (both arms). A page retired in its frontmatter must never reach a top-N slot regardless of which arm
+  // surfaced it — proving S1's guarantee is preserved across the new structural path.
+  const root = installRoot('wrxn-s4-s1-');
+  writeEndpoint(root, { pid: process.pid, port: 65064 });
+  writeTouched(root, 'sess-s4', ['lib/old-engine.cjs']); // → structural query 'old engine'
+  const PROMPT = 'how should I tune the deploy runbook for prod';
+  const LIVE = '.wrxn/wiki/concepts/deploy-runbook.md';  // semantic arm, live
+  const STALE = '.wrxn/wiki/concepts/old-engine.md';     // structural arm, flagged stale on disk
+  writeWikiPage(root, LIVE, {});
+  writeWikiPage(root, STALE, { stale: 'concepts/gone-source.md' });
+  const door = splitArmDoor({ [PROMPT]: [LIVE], 'old engine': [STALE] });
+  const block = await recall.recallFromDoor(root, PROMPT, { transport: door, sessionId: 'sess-s4' });
+  assert.ok(block, 'the live page still surfaces');
+  assert.match(block, /deploy-runbook/, 'the live semantic page surfaces');
+  assert.ok(!/old-engine/.test(block), 'the disk-flagged stale page is excluded even though it arrived via the structural arm');
+});

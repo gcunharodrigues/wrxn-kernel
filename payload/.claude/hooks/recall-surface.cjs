@@ -42,6 +42,7 @@ const REINFORCE_REL = path.join('.wrxn', 'reinforce.json'); // coalesced access-
 const SURFACED_REL = path.join('.wrxn', 'surfaced.json'); // per-session surfaced-log sidecar (STATE)
 const WIKI_PREFIX = '.wrxn/wiki/'; // the wiki root — stripped to form the D1 join key
 const REWARD_REL = path.join('.wrxn', 'reward.json'); // per-page Beta-Bernoulli store (STATE) — read-only here
+const HISTORY_REL = path.join('.wrxn', 'history'); // per-session edit trail dir (STATE) — .touched lives here (S4)
 
 // The single shipped mode gating the reward re-rank (mirrors recon's SHIPPED_DECAY_MODE). It is DERIVED
 // from the recorded lift-gate verdict via selectRewardMode — never hard-coded — so the live state is never
@@ -140,6 +141,71 @@ function buildExclusion(view) {
     if (fm.superseded_by) return resolveHead(file, v) !== file; // not its own head → retired (incl. fail-safe)
     return false;
   };
+}
+
+// ── S4 structural arm: edited paths → a recon_find seed, and reciprocal-rank fusion (#23) ────────────
+//
+// Adapted (no-invention): recon-wrxn exposes no DOCUMENTED_BY code→wiki graph edge, so the structural
+// arm is kernel-only — it REUSES the .touched per-session edited-paths list and issues a SECOND
+// recon_find seeded by those edits, then RRF-fuses that ranked list with the prompt-semantic one BEFORE
+// the exclusion / gate / reward / top-N. Both helpers here are PURE black boxes (the fetch + the .touched
+// read are the injectable IO shell below).
+
+// Seed a recon_find query from the session's edited paths: take each path's basename (sans extension),
+// tokenize on non-alphanumerics, dedup case-insensitively, join with spaces, cap at the query budget. A
+// dir-segment carries little semantic signal (and a code-seeded arm fetches mostly code that the prose
+// filter drops anyway), so only basenames are seeded — they are what a wiki page about the file is titled
+// after. Empty / non-array / all-junk input → '' (the no-op seed: the structural arm then never fires).
+function buildStructuralQuery(paths) {
+  const list = Array.isArray(paths) ? paths : [];
+  const seen = new Set();
+  const tokens = [];
+  for (const p of list) {
+    if (typeof p !== 'string' || !p) continue;
+    const base = path.basename(p).replace(/\.[^.]+$/, '');
+    for (const raw of base.split(/[^A-Za-z0-9]+/)) {
+      const tok = raw.trim();
+      if (!tok) continue;
+      const key = tok.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      tokens.push(tok);
+    }
+  }
+  return tokens.join(' ').slice(0, MAX_QUERY_CHARS);
+}
+
+// Reciprocal-rank fusion of two ranked hit lists into one, deduped by page key. Each hit contributes
+// 1/(k + rank) (rank 1-based) to its key's score; a page in BOTH arms accrues both contributions and so
+// outranks a single-arm page (rank-based consensus, never a score magnitude — same posture as the gate).
+// IDENTITY when one list is empty: a single list's per-rank scores strictly decrease, so the sort returns
+// it in its original order with its original hit objects — this is what makes the empty-.touched path a
+// byte-identical no-op. On a key collision listA's hit object is the kept representative (the semantic arm
+// is primary; the structural arm only boosts an already-present page's rank). Ties break by first-seen
+// order (stable). A hit with no usable key (no file/id/name) is skipped.
+const RRF_K = 60; // the standard RRF damping constant (Cormack et al.) — large k softens top-rank dominance
+
+function hitKey(h) {
+  return (h && (h.file || h.id || h.name)) || null;
+}
+
+function rrfFuse(listA, listB, k) {
+  const K = Number.isFinite(k) && k > 0 ? k : RRF_K;
+  const acc = new Map(); // key → { hit, score, order }
+  let order = 0;
+  const fold = (list) => {
+    (Array.isArray(list) ? list : []).forEach((h, i) => {
+      const key = hitKey(h);
+      if (key == null) return;
+      const contrib = 1 / (K + i + 1); // rank is 1-based
+      const cur = acc.get(key);
+      if (cur) cur.score += contrib; // page in both arms → summed reciprocal ranks (consensus boost)
+      else acc.set(key, { hit: h, score: contrib, order: order++ }); // first arm to see it owns the object
+    });
+  };
+  fold(listA); // listA (semantic) folded first → it owns the representative on a collision
+  fold(listB);
+  return [...acc.values()].sort((x, y) => y.score - x.score || x.order - y.order).map((x) => x.hit);
 }
 
 function slugify(s) {
@@ -337,6 +403,43 @@ function surfacedLog(root, sessionId, hits) {
     map[sessionId] = paths;
     return true;
   });
+}
+
+// ── S4 structural arm: read the .touched edit trail (IO shell) (#23) ─────────────────────────────────
+//
+// The session-id → filename transform MUST match code-intel-push's safeId byte-for-byte, or the arm reads
+// the wrong file. Replicated here (self-contained: no shared import) — the same discipline that duplicates
+// secretScan across the install-only modules.
+function safeSessionId(sid) {
+  return String(sid || 'session')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48) || 'session';
+}
+
+// Read this session's edited paths back from <root>/.wrxn/history/<safeId>.touched — the list
+// code-intel-push already maintains (REUSE; no new persistence path). Deduped on read, order preserved.
+// FAIL-OPEN: an absent file (the common no-edits case) or any read fault → [] (the structural arm then
+// never fires). The values are treated ONLY as a query seed — never as filesystem paths.
+function readTouched(root, sessionId) {
+  if (!root) return [];
+  const marker = path.join(root, HISTORY_REL, `${safeSessionId(sessionId)}.touched`);
+  let raw;
+  try {
+    raw = fs.readFileSync(marker, 'utf8');
+  } catch {
+    return []; // absent / unreadable → no edits this session
+  }
+  const seen = new Set();
+  const out = [];
+  for (const line of raw.split('\n')) {
+    const p = line.trim();
+    if (!p || seen.has(p)) continue;
+    seen.add(p);
+    out.push(p);
+  }
+  return out;
 }
 
 // ── the door (IO shell, injectable transport) ───────────────────────────────────────
@@ -568,6 +671,36 @@ function diskExclusion(root, hits) {
   }
 }
 
+// One recon_find POST against the warm door → the hits array. Both arms (prompt-semantic and S4
+// structural) share this single fetch path, so they hit the SAME door identically. THROWS on any fault
+// (transport reject / non-200 / malformed body); each caller decides what a fault means — the semantic
+// arm aborts recall (the existing contract), the structural arm swallows it (fail-open).
+async function findHits(transport, port, query, timeoutMs) {
+  const resp = await (transport || httpTransport)({
+    port,
+    path: FIND_PATH,
+    body: { query, limit: FETCH_LIMIT },
+    timeoutMs: timeoutMs || TIMEOUT_MS,
+  });
+  if (!resp || resp.statusCode !== 200) throw new Error('recall door non-200');
+  const parsed = JSON.parse(resp.body); // throws on a malformed body
+  return Array.isArray(parsed.hits) ? parsed.hits : [];
+}
+
+// S4 structural arm: seed a query from this session's edited paths (.touched) and issue a SECOND
+// recon_find for it. Empty .touched → empty seed → [] (the arm never fires — the no-op). The hits are
+// returned RAW; the caller fuses them with the semantic arm and the shared pipeline then prose-filters,
+// excludes, gates, and caps — so a code-seeded arm's code hits are dropped exactly as in the semantic arm.
+async function structuralArm(root, sessionId, port, { transport, timeoutMs } = {}) {
+  try {
+    const query = buildStructuralQuery(readTouched(root, sessionId));
+    if (!query) return []; // no edits this session → no structural arm
+    return await findHits(transport, port, query, timeoutMs);
+  } catch {
+    return []; // any structural fault (read / fetch / non-200 / malformed) → empty arm; recall proceeds on the semantic arm
+  }
+}
+
 // IO shell: discover the door, POST the prose query, gate the hits. Returns the block string or null.
 // `transport` is injected in tests; production uses httpTransport. Sends NO `type` (recon_find takes a
 // single NodeType, not an array) — prose scope is enforced by decideRecall's post-filter.
@@ -576,25 +709,18 @@ async function recallFromDoor(root, prompt, { transport, timeoutMs, now, session
   if (!door) return null; // not warm → Abstain (silent)
   const query = String(prompt || '').trim().slice(0, MAX_QUERY_CHARS);
   if (!query) return null;
-  let resp;
+  let semanticHits;
   try {
-    resp = await (transport || httpTransport)({
-      port: door.port,
-      path: FIND_PATH,
-      body: { query, limit: FETCH_LIMIT },
-      timeoutMs: timeoutMs || TIMEOUT_MS,
-    });
+    semanticHits = await findHits(transport, door.port, query, timeoutMs);
   } catch {
-    return null; // timeout / connection refused / abort → silent
+    return null; // timeout / connection refused / abort / non-200 / malformed body → silent (existing contract)
   }
-  if (!resp || resp.statusCode !== 200) return null;
-  let parsed;
-  try {
-    parsed = JSON.parse(resp.body);
-  } catch {
-    return null; // malformed body → silent
-  }
-  const hits = Array.isArray(parsed.hits) ? parsed.hits : [];
+  // S4 structural arm: a SECOND recon_find seeded by this session's edited paths (.touched), RRF-fused
+  // with the prompt-semantic arm BEFORE the exclusion / gate / reward / top-N. Fuse only when the arm has
+  // hits: empty .touched (or any structural fault) → no structural hits → the fused set IS the semantic
+  // set object, so recall output stays byte-identical to pre-S4 (the strict no-op guarantee).
+  const structuralHits = await structuralArm(root, sessionId, door.port, { transport, timeoutMs });
+  const hits = structuralHits.length ? rrfFuse(semanticHits, structuralHits) : semanticHits;
   // SHADOW (shipped default): pass NO lookup → decideRecall is the identity (door order), byte-identical
   // to pre-reward recall regardless of what sits in reward.json. LIVE (gate-flipped / test-forced): read
   // the reward sidecar and re-rank the qualifying candidates by reward factor before the top-N cut.
@@ -669,6 +795,9 @@ module.exports = {
   qualifies,
   buildExclusion,
   resolveHead,
+  buildStructuralQuery,
+  rrfFuse,
+  readTouched,
   renderBlock,
   findInstallRoot,
   SEMANTIC_FLOOR,
