@@ -187,6 +187,35 @@ test('synthesize short-circuits on a successful primary — the fallback is neve
   assert.deepEqual(calls.map((c) => c.engine), ['gemini'], 'no fallback call once the primary returns text');
 });
 
+// ── task-aware engine success (#50): the dream fallback fires on UNUSABLE primary output ─────────
+// A dream PRIMARY returning non-empty-but-unparseable prose must NOT "win": the gate would parse zero
+// proposals from it and write nothing while a healthy fallback sat unused. Engine success is task-aware —
+// dream output is usable only if the gate (parseProposals) reads ≥1 proposal (or it's an explicit abstain),
+// so an unusable primary exhausts its retries and synthesizeDetailed advances to the fallback. Handoff
+// stays permissive: any non-empty text is a usable handoff, so it short-circuits on the primary as before.
+
+const DREAM_PROSE = 'Here is a prose summary of the session with no structured proposals whatsoever.';
+const DREAM_JSON = JSON.stringify({ proposals: [{ slug: 'log-with-pino' }] });
+
+test('dream falls back when the primary returns unusable (unparseable) text — the fallback JSON reaches the caller', async () => {
+  // apiKey set so the gemini PRIMARY actually runs (and returns prose); the claude FALLBACK returns valid JSON.
+  const { invoke, calls } = fakeInvoke({ gemini: { ok: true, text: DREAM_PROSE }, claude: { ok: true, text: DREAM_JSON } });
+  const text = await synth.synthesize({ task: 'dream', prompt: 'P', blob: 'B', config: DEFAULT_CFG, apiKey: 'KEY', invoke, sleep: noSleep });
+  assert.equal(text, DREAM_JSON, 'the fallback engine valid proposals-JSON is what the caller receives (the prose primary did NOT win)');
+  assert.ok(synth.parseProposals(text).length > 0, 'and the returned text parses to ≥1 proposal');
+  // the gemini primary was attempted (and rejected) and the claude fallback was reached last.
+  const seq = calls.map((c) => c.engine);
+  assert.ok(seq.includes('gemini'), 'the prose primary was attempted first');
+  assert.equal(seq[seq.length - 1], 'claude', 'the fallback engine is the last one tried');
+});
+
+test('handoff stays permissive (#50): a non-empty primary short-circuits — no fallback, even for prose', async () => {
+  const { invoke, calls } = fakeInvoke({ gemini: { ok: true, text: DREAM_PROSE }, claude: { ok: true, text: 'FB' } });
+  const text = await synth.synthesize({ task: 'handoff', prompt: 'P', blob: 'B', config: DEFAULT_CFG, apiKey: 'KEY', invoke, sleep: noSleep });
+  assert.equal(text, DREAM_PROSE, 'any non-empty primary text is a usable handoff — it wins');
+  assert.deepEqual(calls.map((c) => c.engine), ['gemini'], 'the handoff never reaches the fallback (permissive, unchanged)');
+});
+
 // ── graceful degradation: missing CLI / missing key / invoker error → null (never throws) ──
 
 test('synthesize degrades to null when the CLI is unavailable AND there is no key — and never issues a keyless gemini call', async () => {

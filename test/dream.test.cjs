@@ -209,6 +209,17 @@ test('filter tuning: "services are registered transient" passes the gate (DI-lif
   assert.deepEqual(v, { ok: true });
 });
 
+test('filter tuning: a token-bucket rate-limiting FEATURE page passes the gate (rate-limit matches only the error sense)', () => {
+  const t = freshInstall('dream-rate-limit-feature-');
+  const v = checkOne(t, validProposal({
+    kind: 'decision', tier: 'decisions', slug: 'token-bucket-rate-limiting',
+    title: 'Adopt token-bucket rate limiting',
+    body: '# Rate limiting\n\nWe chose a token-bucket rate limiter with a per-tenant rate limit of 100 requests per second; the gateway exposes a rate-limited tier for free accounts.',
+    rationale: 'Locks the rate-limiting design so future sessions know the limiter is token-bucket, not a fixed window.',
+  }));
+  assert.deepEqual(v, { ok: true });
+});
+
 // ── anti-superstition negative filters (each rejects with a negative_filter_* reason) ──
 
 const NEGATIVE = {
@@ -247,6 +258,21 @@ for (const [reason, proposal] of Object.entries(NEGATIVE)) {
     assert.match(v.reason, /^negative_filter_/);
   });
 }
+
+// A transient rate-limit war-story still rejects (the error sense survives the feature-page fix). Kept as a
+// standalone test rather than a NEGATIVE-map entry because the map is keyed by reason and the transient key
+// is already taken by the ECONNREFUSED/timeout fixture above — both transient paths must stay covered (AC4).
+test('anti-superstition: a "got rate-limited (429)" war-story still rejects negative_filter_transient_failure', () => {
+  const t = freshInstall('dream-neg-rate-limit-transient-');
+  const v = checkOne(t, validProposal({
+    kind: 'gotcha', tier: 'gotchas', slug: 'api-rate-limited-us',
+    title: 'API rate-limited us',
+    body: '# Transient throttling\n\nThe upstream API rate-limited us; we got rate-limited (429) and had to back off and retry.',
+    rationale: 'A transient throttling episode, not a durable property — recorded only as a war story.',
+  }));
+  assert.equal(v.ok, false);
+  assert.equal(v.reason, 'negative_filter_transient_failure');
+});
 
 // ── run-level: restraint, scoping, the ≤5 cap ─────────────────────────────────
 

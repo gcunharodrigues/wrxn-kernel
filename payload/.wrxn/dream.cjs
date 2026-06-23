@@ -390,7 +390,11 @@ const NEGATIVE_FILTERS = [
   // a transient environment / setup failure — not a durable property of the system. (The bare adjectives
   // `transient`/`intermittent` are intentionally NOT here: they false-positive on DI-lifetime decisions
   // like "services are registered transient" — the concrete error codes below carry the failure intent.)
-  { reason: 'negative_filter_transient_failure', re: /\b(econnrefused|enoent|eaddrinuse|etimedout|connection refused|connection reset|timed out|time-?out|flak(e|y|ey)|rate[- ]?limit(ed)?|http 5\d\d|50[234]|port (already )?in use|address already in use|network (error|issue|glitch)|dns (error|failure))\b/ },
+  // SAME discipline for rate-limiting: the bare noun "rate limit" / adjective "rate-limited" is NOT matched
+  // (it false-positives on rate limiting AS A FEATURE — a token-bucket decision, a "rate-limited tier").
+  // Only the ERROR sense matches: a passive/verb "got rate-limited", a transitive "rate-limited us", or a
+  // "rate-limit(ed) error" / "rate limit exceeded" cue — the transient war-story, never the design.
+  { reason: 'negative_filter_transient_failure', re: /\b(econnrefused|enoent|eaddrinuse|etimedout|connection refused|connection reset|timed out|time-?out|flak(e|y|ey)|(?:got|get|getting|gets|was|were|been|being|keeps?|kept|repeatedly) rate[- ]?limited|rate[- ]?limited (?:us|me|them|by|again)|rate[- ]?limit(?:ed|ing)? (?:error|errors|exceeded)|http 5\d\d|50[234]|port (already )?in use|address already in use|network (error|issue|glitch)|dns (error|failure))\b/ },
   // a smoke / sanity / happy-path RESULT — proves nothing durable. Gated on a result word so a forward
   // decision ("we adopt smoke tests", "the happy path must stay fast") is NOT a false positive.
   { reason: 'negative_filter_smoke_test', re: /\bhello[- ]?world\b|\b(smoke[- ]?tests?|sanity[- ]?checks?|happy path)\s+(pass(ed|es|ing)?|ran|run|succeed(ed|s)?|works?|worked|green)\b/ },

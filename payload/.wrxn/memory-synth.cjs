@@ -390,10 +390,13 @@ function defaultSleep(ms) {
  * Run a single engine through the invoker; return `{ text, attempts }` (text null when no output). A
  * `gemini` engine with no API key fails WITHOUT calling the invoker (no key → no request, attempts 0). A
  * transient `ok:false` is retried up to ENGINE_ATTEMPTS with a fixed backoff via the injected sleep; the
- * first non-empty text wins. An invoker that throws is caught → counts as a failed attempt, then null.
+ * first text that is non-empty AND passes the optional task `validate` predicate wins. A non-empty text
+ * that FAILS `validate` (unusable output — e.g. dream prose the gate can't parse) is a failed attempt →
+ * retried, then null, so synthesizeDetailed advances to the fallback. No validator → any non-empty wins.
+ * An invoker that throws is caught → counts as a failed attempt, then null.
  * @returns {Promise<{ text: string|null, attempts: number }>}
  */
-async function runEngine(engine, { prompt, blob, apiKey, invoke, sleep = defaultSleep }) {
+async function runEngine(engine, { prompt, blob, apiKey, invoke, sleep = defaultSleep, validate }) {
   if (!engine || !engine.engine) return { text: null, attempts: 0 };
   let spec;
   if (engine.engine === 'claude') {
@@ -415,10 +418,28 @@ async function runEngine(engine, { prompt, blob, apiKey, invoke, sleep = default
     } catch {
       text = null; // an invoker throw is a transient failure for this attempt (degrade, never throw).
     }
-    if (text) return { text, attempts };
+    // success = non-empty AND task-usable (validate). No validator → permissive: any non-empty text wins.
+    if (text && (!validate || validate(text))) return { text, attempts };
     if (i < ENGINE_ATTEMPTS - 1) sleep(ENGINE_BACKOFF_MS); // back off before the next attempt (not after the last). sleep is synchronous (Atomics.wait / injected no-op) — no await.
   }
   return { text: null, attempts };
+}
+
+// ── per-task engine-success validators (synth-robustness #50) ───────────────────
+// An engine attempt succeeds only when its text is non-empty AND passes the task's validator, so an engine
+// that returns non-empty-but-UNUSABLE output exhausts its retries and synthesizeDetailed advances to the
+// fallback — instead of the unusable primary "winning" while the downstream gate parses zero proposals and
+// writes nothing. A task with NO registered validator is permissive (any non-empty text wins, exactly as
+// before), so every existing caller is preserved.
+const TASK_VALIDATORS = {
+  // dream output is usable only if the gate (parseProposals) reads ≥1 proposal from it, OR it is an explicit
+  // abstain — a deliberate "nothing to record" is a valid answer, NOT a reason to churn through the fallback.
+  dream: (text) => parseProposals(text).length > 0 || /abstain/i.test(text),
+};
+
+// Resolve a task's engine-success validator; an unregistered task is permissive (any non-empty text wins).
+function validatorFor(task) {
+  return TASK_VALIDATORS[task] || (() => true);
 }
 
 /**
@@ -431,9 +452,10 @@ async function runEngine(engine, { prompt, blob, apiKey, invoke, sleep = default
  */
 async function synthesizeDetailed({ task, prompt, blob, config, apiKey, invoke = defaultInvoke, sleep }) {
   const { primary, fallback } = resolveTask(config || DEFAULTS, task);
+  const validate = validatorFor(task); // task-aware success: dream needs parseable proposals; handoff is permissive.
   let attempts = 0;
   for (const engine of [primary, fallback]) {
-    const r = await runEngine(engine, { prompt, blob, apiKey, invoke, sleep });
+    const r = await runEngine(engine, { prompt, blob, apiKey, invoke, sleep, validate });
     attempts += r.attempts;
     if (r.text) return { text: r.text, engine: engine && engine.engine, attempts };
   }
