@@ -204,10 +204,11 @@ function holdForHandoff({ root, capMs = HOLD_CAP_MS, now = Date.now, sleep } = {
 // ── baton-staleness guard (#51) ─────────────────────────────────────────────────
 // The handoff baton is surfaced as the resume point with no health check, so a baton frozen by a failed
 // SessionEnd synth (no-engine / error) is shown as current — silently (real incident 2026-06-22→23: the
-// baton froze ~20h while .synth.log logged no-engine). This guard reads the synth log + the baton mtime
-// and, when the latest synth attempt failed and no successful write has refreshed the baton since, surfaces
-// a visible warning. The DECISION is pure (no IO, no clock — the holdDecision idiom); the hook does the IO
-// and formats the age where it holds the clock. NO polling/sleeping — one file read + one stat.
+// baton froze ~20h while .synth.log logged no-engine from later sessions). This guard reads the synth log +
+// the baton mtime and, when the latest synth attempt failed and it is NOT a same-session double-spawn (the
+// session that wrote the baton failing again right after — #45), surfaces a visible warning. The DECISION is
+// pure (no IO, no clock — the holdDecision idiom); the hook does the IO and formats the age where it holds
+// the clock. NO polling/sleeping — one file read + one stat.
 
 const SYNTH_LOG_REL = ['.wrxn', 'continuity', '.synth.log'];
 
@@ -217,8 +218,9 @@ function isFailure(outcome) {
   return o === 'no-engine' || /^error/.test(o);
 }
 
-// Parse the tab-separated synth log into chronological rows { timestampMs, outcome }, dropping any line we
-// cannot resolve (malformed / unparseable timestamp) — "newest-resolvable last". PURE + total, never throws.
+// Parse the tab-separated synth log into chronological rows { timestampMs, sessionId, outcome }, dropping
+// any line we cannot resolve (malformed / unparseable timestamp) — "newest-resolvable last". The sessionId
+// (field 1, `-` when absent) is what discriminates a double-spawn from genuine rot. PURE + total, never throws.
 function parseSynthLog(text) {
   const rows = [];
   for (const line of String(text || '').split('\n')) {
@@ -227,7 +229,7 @@ function parseSynthLog(text) {
     if (f.length < 6) continue; // not a full outcome row → skip (fail-open)
     const ts = Date.parse(f[0]);
     if (!Number.isFinite(ts)) continue; // unresolvable timestamp → drop
-    rows.push({ timestampMs: ts, outcome: f.slice(5).join('\t').trim() });
+    rows.push({ timestampMs: ts, sessionId: f[1], outcome: f.slice(5).join('\t').trim() });
   }
   return rows;
 }
@@ -243,16 +245,34 @@ function formatAge(ms) {
   return rem ? `${d}d ${rem}h` : `${d}d`;
 }
 
+// Sanitize the echoed synth outcome before it is interpolated into the orientation block (sec-F1). An
+// `error: …` row carries a FREE-FORM message, so a crafted/corrupt log row could smuggle control chars or a
+// forged `</wrxn-orientation>` close tag into additionalContext. Strip control chars (incl CR/LF/tab), drop
+// angle brackets so no tag can be forged, and cap the length. PURE + total. (Mirrors memory-synth's
+// sanitizeLogField idiom — each install-only hook is self-contained, node stdlib only.)
+function sanitizeOutcome(s) {
+  return String(s == null ? '' : s)
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\x00-\x1f\x7f-\x9f]/g, '')
+    .replace(/[<>]/g, '')
+    .slice(0, 120);
+}
+
 /**
  * Pure baton-staleness decision (#51). Given the baton's last-write time and the synth-log rows
- * (chronological, newest-resolvable last), return the FAILING outcome to name in the warning, or null when
- * the baton is healthy/fresh. Warn IFF the newest row failed (`no-engine`|`error…`) AND the baton predates
- * that newest row AND no `wrote` row carries a timestamp ≥ the baton's mtime. A healthy newest row, a baton
- * at/after the newest row, or any `wrote` at/after the baton → fresh (null). The wrote-≥-baton clause is the
- * double-spawn guard: a SessionEnd synth that logs `wrote` then a spurious `no-engine` ~2s later must not cry
- * wolf — the `wrote` row's timestamp ≥ the baton mtime it just wrote, so the warning is suppressed (#45).
- * PURE + total: no IO, no clock, never throws.
- * @param {{ batonMtimeMs:number, rows:Array<{timestampMs:number, outcome:string}> }} [input]
+ * (chronological, newest-resolvable last, each carrying its sessionId), return the FAILING outcome to name
+ * in the warning, or null when the baton is healthy/fresh. Warn IFF the newest row failed (`no-engine` |
+ * `error…`) AND the baton predates that newest row AND it is NOT a same-session double-spawn.
+ *
+ * Double-spawn vs genuine-rot is discriminated by SESSION ID, NOT by timestamp. The session that wrote the
+ * CURRENT baton is the session of the MOST-RECENT `wrote` row (every successful synth logs a `wrote` row in
+ * runHandoff's finally, a few ms AFTER it set the baton mtime — so that row's timestamp is ALWAYS ≥ the baton
+ * mtime, and a timestamp test can never tell the two apart). The #45 double-spawn logs `wrote` then a spurious
+ * `no-engine` ~2s later under the SAME session → suppress. A genuine freeze has later failures from DIFFERENT
+ * sessions (real incident 2026-06-22→23: baton written by 6898c0a9, then 7b69b97c / 39e5754b no-engine hours
+ * later) → warn. A missing/`-` session id on either side cannot confirm a double-spawn → default to warn (a
+ * loud false-positive beats silent rot). PURE + total: no IO, no clock, never throws.
+ * @param {{ batonMtimeMs:number, rows:Array<{timestampMs:number, sessionId?:string, outcome:string}> }} [input]
  * @returns {string|null} the failing outcome to name, or null when healthy
  */
 function batonStaleness({ batonMtimeMs, rows } = {}) {
@@ -260,12 +280,18 @@ function batonStaleness({ batonMtimeMs, rows } = {}) {
   if (typeof batonMtimeMs !== 'number' || !Number.isFinite(batonMtimeMs)) return null; // no usable mtime
   const newest = rows[rows.length - 1];
   if (!newest || !isFailure(newest.outcome)) return null; // latest run healthy → fresh
-  if (Number.isFinite(newest.timestampMs) && newest.timestampMs <= batonMtimeMs) return null; // baton ≥ newest → fresh
-  const refreshed = rows.some(
-    (r) => r && r.outcome === 'wrote' && Number.isFinite(r.timestampMs) && r.timestampMs >= batonMtimeMs,
-  );
-  if (refreshed) return null; // a successful write at/after the baton → the baton IS that fresh write
-  return newest.outcome; // stale → name the failing outcome
+  if (Number.isFinite(newest.timestampMs) && newest.timestampMs <= batonMtimeMs) return null; // baton at/after newest → fresh
+  // The session that wrote the CURRENT baton = the session of the most-recent `wrote` row.
+  let wroteSession;
+  for (const r of rows) {
+    if (r && r.outcome === 'wrote') wroteSession = r.sessionId;
+  }
+  const sameSession =
+    !!wroteSession && wroteSession !== '-' &&
+    !!newest.sessionId && newest.sessionId !== '-' &&
+    wroteSession === newest.sessionId;
+  if (sameSession) return null; // same-session double-spawn → not stale
+  return newest.outcome; // genuine rot (or unconfirmable) → name the failing outcome
 }
 
 function main() {
@@ -317,9 +343,10 @@ function main() {
       const failing = batonStaleness({ batonMtimeMs, rows });
       if (failing) {
         const age = formatAge(Date.now() - batonMtimeMs);
+        const outcome = sanitizeOutcome(failing); // sec-F1: never echo a raw log field into the orientation
         parts.push(
           '',
-          `WARNING — stale handoff baton: the latest memory-synth run failed ("${failing}") and the baton has not been refreshed for ${age}. It may not reflect the last session — see .wrxn/continuity/.synth.log.`,
+          `WARNING — stale handoff baton: the latest memory-synth run failed ("${outcome}") and the baton has not been refreshed for ${age}. It may not reflect the last session — see .wrxn/continuity/.synth.log.`,
         );
       }
     } catch {
