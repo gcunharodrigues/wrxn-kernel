@@ -16,7 +16,7 @@ const PKG_ROOT = path.join(__dirname, '..');
 const { init, RECEIPT } = require('../lib/install.cjs');
 const { loadManifest } = require('../lib/manifest.cjs');
 
-const RECON_VERSION = '6.0.0-wrxn.8';
+const RECON_VERSION = '6.0.0-wrxn.9';
 
 function tmp(p) {
   return fs.mkdtempSync(path.join(os.tmpdir(), p));
