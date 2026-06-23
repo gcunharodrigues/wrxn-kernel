@@ -636,8 +636,11 @@ async function runHandoff({ root, invoke = defaultInvoke, sleep }) {
   // guard: a 2nd synth whose sibling already consumed+cleared the stash (or a manual --from-spawn with
   // none) must not log a spurious `trivial`/`no-engine` row that pollutes the log + the baton-staleness
   // signal. SPECIFIC to the ABSENT-file case — a present-but-trivial stash still logs `trivial` below.
-  // existsSync is total (never throws); there are no markers to clear when nothing was ever staged.
+  // existsSync is total (never throws). NB-1: a stranded `.pending-handoff` can linger here (a concurrent /
+  // no-session-id race cleared `.pending` after a sibling re-raised both) — release session-start's hold
+  // before returning, or its holdForHandoff waits the full cap. rmQuiet is best-effort/total.
   if (!fs.existsSync(continuityPath(root, PENDING))) {
+    rmQuiet(continuityPath(root, PENDING_HANDOFF));
     return { wrote: false, blob: '', reason: 'no-stash' };
   }
   let wrote = false;

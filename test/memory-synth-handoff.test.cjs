@@ -571,3 +571,25 @@ test('run --from-spawn with no .pending exits 0, logs nothing, never throws (#45
   assert.equal(calls.length, 0, 'no engine call for a stash-less from-spawn run');
   assert.equal(fs.existsSync(synthLogPath(root)), false, 'no synth-log row is written for a stash-less from-spawn run');
 });
+
+// ── #45 NB-1 (review): the stash-gate must still RELEASE session-start's hold ─────
+// The stash-presence gate early-returns before runHandoff's finally, which clears `.pending-handoff`. In a
+// concurrent / no-session-id race `.pending` can be absent while `.pending-handoff` lingers (one synth
+// cleared `.pending` after a fresh 2nd spawn re-raised both). If the gate returns without clearing the
+// handoff marker, the NEXT session-start's holdForHandoff waits up to the 180s cap (self-heals, never
+// blocks close, but it's a regression from the pre-gate behavior). The gate clears the handoff marker
+// before returning — preserving the no-log-row goal.
+test('runHandoff with no .pending but a stranded .pending-handoff clears the handoff marker, writes no log row (#45 NB-1)', async () => {
+  const root = tmp('wrxn-handoff-strand-');
+  continuityDir(root); // ensure the dir exists for the marker write below.
+  // .pending is ABSENT but .pending-handoff lingers from a racing sibling spawn — the gate must release it.
+  fs.writeFileSync(handoffMarker(root), String(Date.now()));
+  const { invoke, calls } = fakeInvoke({ claude: { ok: true, text: 'NEVER' } });
+
+  const res = await synth.runHandoff({ root, invoke });
+
+  assert.equal(res.wrote, false, 'nothing written — there was no stash to process');
+  assert.equal(calls.length, 0, 'no engine call for a stash-less run');
+  assert.ok(!fs.existsSync(handoffMarker(root)), 'the stranded handoff marker is cleared so session-start never waits the full cap');
+  assert.equal(fs.existsSync(synthLogPath(root)), false, 'still NO synth-log row for an absent stash');
+});
