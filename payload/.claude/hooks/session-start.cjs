@@ -212,6 +212,33 @@ function holdForHandoff({ root, capMs = HOLD_CAP_MS, now = Date.now, sleep } = {
 
 const SYNTH_LOG_REL = ['.wrxn', 'continuity', '.synth.log'];
 
+// sec-F2 (#52): cap the .synth.log read at its TAIL. The staleness decision needs only the NEWEST rows (+ the
+// latest `wrote`), which live at the END of this append-only log — so reading the last SYNTH_LOG_TAIL_BYTES
+// bounds memory against a pathologically large log without losing the signal. A partial first line (a row
+// sliced mid-way by the byte window) is dropped so parseSynthLog only ever sees complete rows. FAIL-OPEN +
+// total: a sub-cap log is read whole (unchanged); any stat/open/read fault → "" (no rows → no warning, no throw).
+const SYNTH_LOG_TAIL_BYTES = 64 * 1024;
+
+function readSynthLogTail(p) {
+  let fd;
+  try {
+    const size = fs.statSync(p).size;
+    if (size <= SYNTH_LOG_TAIL_BYTES) return readFileOr(p, '');
+    fd = fs.openSync(p, 'r');
+    const buf = Buffer.allocUnsafe(SYNTH_LOG_TAIL_BYTES);
+    const read = fs.readSync(fd, buf, 0, SYNTH_LOG_TAIL_BYTES, size - SYNTH_LOG_TAIL_BYTES);
+    const text = buf.toString('utf8', 0, read);
+    const nl = text.indexOf('\n');
+    return nl === -1 ? text : text.slice(nl + 1); // drop the partial first line sliced by the byte window
+  } catch {
+    return ''; // fail-open: any stat/open/read fault → no rows → no warning
+  } finally {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch { /* fd already gone — never throw out of the cleanup */ }
+    }
+  }
+}
+
 // A synth row is a FAILURE iff its outcome is `no-engine` or an `error…` string (`wrote`/`trivial` = healthy).
 function isFailure(outcome) {
   const o = String(outcome || '');
@@ -338,7 +365,7 @@ function main() {
     // — a frozen baton must not be surfaced as current silently. Fail-open: any read/stat/parse fault → no
     // warning, never a throw. Pure file reads + a stat only (no polling/sleeping beyond the hold cap above).
     try {
-      const rows = parseSynthLog(readFileOr(path.join(root, ...SYNTH_LOG_REL), ''));
+      const rows = parseSynthLog(readSynthLogTail(path.join(root, ...SYNTH_LOG_REL)));
       const batonMtimeMs = fs.statSync(path.join(root, '.wrxn', 'continuity', 'latest.md')).mtimeMs;
       const failing = batonStaleness({ batonMtimeMs, rows });
       if (failing) {
@@ -372,4 +399,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { holdDecision, holdForHandoff, HOLD_CAP_MS, stampStartHead, resolveGitHead, BASELINE_DIR_REL, batonStaleness };
+module.exports = { holdDecision, holdForHandoff, HOLD_CAP_MS, stampStartHead, resolveGitHead, BASELINE_DIR_REL, batonStaleness, parseSynthLog, readSynthLogTail, SYNTH_LOG_TAIL_BYTES };

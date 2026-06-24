@@ -283,6 +283,51 @@ test('batonStaleness is fail-safe on a missing/empty log — no rows → no warn
   });
 });
 
+// ── #52 (sec-F2): the .synth.log read is TAIL-capped so a pathologically large log can't blow memory ──
+// The staleness decision needs only the NEWEST rows (+ the latest `wrote`), which live at the END of the
+// append-only log — so session-start reads the last SYNTH_LOG_TAIL_BYTES, not the whole file. A sub-cap log is
+// read WHOLE (unchanged); an over-cap log yields only its tail with any partial first line dropped, and the
+// staleness signal still survives in that tail. PURE + fail-open (a missing file / read fault → "").
+const { readSynthLogTail, parseSynthLog, SYNTH_LOG_TAIL_BYTES } = sessionStart;
+const synthRow = (sid, outcome, ts = T) => `${new Date(ts).toISOString()}\t${sid}\thandoff\tgemini\tattempts=1\t${outcome}\n`;
+
+test('readSynthLogTail reads a sub-cap log WHOLE and is fail-safe on a missing file (#52)', () => {
+  const dir = tmp('wrxn-synthtail-small-');
+  const p = path.join(dir, '.synth.log');
+  const whole = synthRow('A', 'wrote');
+  fs.writeFileSync(p, whole);
+  assert.equal(readSynthLogTail(p), whole, 'a sub-cap log is returned byte-for-byte (behaves exactly as before)');
+  assert.equal(readSynthLogTail(path.join(dir, 'nope.log')), '', 'a missing file → "" (fail-open, never throws)');
+});
+
+test('readSynthLogTail caps an over-sized log to its tail, dropping the partial first line (#52)', () => {
+  const dir = tmp('wrxn-synthtail-big-');
+  const p = path.join(dir, '.synth.log');
+  const filler = synthRow('OLD', 'trivial').repeat(2000); // ~120 KB of old rows — well past the cap
+  const newest = synthRow('NEW', 'no-engine', T + 7200000);
+  fs.writeFileSync(p, filler + newest);
+  assert.ok(Buffer.byteLength(filler + newest) > SYNTH_LOG_TAIL_BYTES, 'the fixture exceeds the cap');
+
+  const tail = readSynthLogTail(p);
+  assert.ok(Buffer.byteLength(tail) <= SYNTH_LOG_TAIL_BYTES, 'the tail read is bounded by the cap');
+  assert.ok(tail.endsWith(newest), 'the newest rows are preserved (they live at the end of the append-only log)');
+  assert.ok(
+    tail.split('\n').filter(Boolean).every((l) => l.split('\t').length >= 6),
+    'no truncated partial first line leaks — every retained line is a complete 6-field row',
+  );
+});
+
+test('an over-cap .synth.log whose newest row is a stale no-engine still drives batonStaleness to warn (#52)', () => {
+  const dir = tmp('wrxn-synthtail-stale-');
+  const p = path.join(dir, '.synth.log');
+  const filler = synthRow('OLD', 'trivial').repeat(2000);
+  const newest = synthRow('NEW', 'no-engine', T + 7200000); // different session, hours later → genuine rot
+  fs.writeFileSync(p, filler + newest);
+
+  const rows = parseSynthLog(readSynthLogTail(p));
+  assert.equal(batonStaleness({ batonMtimeMs: T, rows }), 'no-engine', 'the staleness signal survives the tail cap → still warns');
+});
+
 test('session-start surfaces a staleness warning naming the outcome + baton age + the synth log (AC2)', () => {
   const target = freshInstall('wrxn-sess-stale-');
   const realNow = Date.now();
