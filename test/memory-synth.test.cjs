@@ -353,3 +353,122 @@ test('the manifest registers .env.example (managed, project) so init/update lay 
   assert.equal(entry.class, 'managed', '.env.example is managed (refreshed on update)');
   assert.equal(entry.profile, 'project');
 });
+
+// ── thinking-model robustness (#30): thinkingConfig + thought-part + output cap + 400 retry ──
+// The gemini engine must work with BOTH thinking-default and non-thinking models, with no per-model code
+// change. Four hardenings, all behind the existing invoke seam (NO real network): disable thinking by
+// default (thinkingConfig.thinkingBudget=0), skip dropped `thought` parts in the parser, raise the output
+// cap, and retry-without-thinkingConfig for forced-thinking models that reject the directive (HTTP 400).
+
+// AC2 + AC6 — parseGeminiResponse stays pure + total: it EXCLUDES any `thought` part and concatenates the
+// text of the REMAINING parts (not just parts[0]), so a model that emits its reasoning as a separate thought
+// part first still yields the answer. Unexpected shapes / no answer text → null, never throws.
+test('parseGeminiResponse excludes thought parts and concatenates the remaining answer parts (#30)', () => {
+  // a thought part FIRST (the answer is parts[1]) — the old parts[0] reader would have returned the reasoning.
+  const thoughtFirst = JSON.stringify({
+    candidates: [{ content: { parts: [{ thought: true, text: 'let me reason about this' }, { text: 'THE ANSWER' }] } }],
+  });
+  assert.equal(synth.parseGeminiResponse(thoughtFirst), 'THE ANSWER', 'the thought part is dropped; only the answer is returned');
+
+  // a multi-part answer (split across parts) is concatenated whole, not truncated to parts[0].
+  const multi = JSON.stringify({ candidates: [{ content: { parts: [{ text: 'AB' }, { text: 'CD' }] } }] });
+  assert.equal(synth.parseGeminiResponse(multi), 'ABCD', 'all non-thought answer parts are concatenated');
+
+  // a response that is ONLY a thought (no answer text) → null (no usable answer).
+  const thoughtOnly = JSON.stringify({ candidates: [{ content: { parts: [{ thought: true, text: 'only reasoning, no answer' }] } }] });
+  assert.equal(synth.parseGeminiResponse(thoughtOnly), null, 'a thought-only response yields no answer → null');
+
+  // total: missing parts / junk still → null (never throws).
+  assert.equal(synth.parseGeminiResponse(JSON.stringify({ candidates: [{ content: {} }] })), null, 'missing parts → null');
+  assert.equal(synth.parseGeminiResponse('not json'), null, 'unparseable → null, never throws');
+});
+
+// AC1 + AC4 + the AC3 testability seam — buildGeminiSpec disables thinking by DEFAULT
+// (generationConfig.thinkingConfig.thinkingBudget=0: a verified HTTP-200 no-op on non-thinking models,
+// disables thinking on thinking-default ones), and can OMIT the directive (thinking:false) so the AC3 retry
+// can re-issue the request for a forced-thinking model that rejects thinkingConfig.
+test('buildGeminiSpec sets thinkingConfig.thinkingBudget=0 by default and omits it when thinking:false (#30)', () => {
+  const on = synth.buildGeminiSpec({ model: 'm', prompt: 'P', blob: 'B', apiKey: 'K' });
+  assert.deepEqual(on.body.generationConfig.thinkingConfig, { thinkingBudget: 0 }, 'thinking is disabled by default');
+  // the existing knobs are preserved alongside the new directive (no regression to temperature / cap).
+  assert.equal(on.body.generationConfig.temperature, 0.2, 'temperature is preserved');
+  assert.ok(typeof on.body.generationConfig.maxOutputTokens === 'number', 'the output cap is still set');
+
+  const off = synth.buildGeminiSpec({ model: 'm', prompt: 'P', blob: 'B', apiKey: 'K', thinking: false });
+  assert.ok(!('thinkingConfig' in off.body.generationConfig), 'thinking:false omits thinkingConfig (the AC3 retry-without path)');
+});
+
+// AC1 + AC5(c) — the output cap is raised so reasoning tokens + a rich dream JSON (~4.3k chars observed) no
+// longer truncate the answer (1200 truncated even a non-thinking model on a dense session).
+test('buildGeminiSpec raises the output cap past the old 1200 so a rich answer is not truncated (#30)', () => {
+  const spec = synth.buildGeminiSpec({ model: 'm', prompt: 'P', blob: 'B', apiKey: 'K' });
+  assert.ok(spec.body.generationConfig.maxOutputTokens >= 4096, 'the output cap is at least 4096 (was 1200)');
+});
+
+// AC3 (real-invoker contract) — the real Gemini invoker must emit a DISTINGUISHABLE signal when the model
+// rejects the thinkingConfig directive (HTTP 400 mentioning thinking), so the orchestration knows to retry
+// WITHOUT it. parseGeminiResult is the pure status-aware classifier invokeGemini uses, unit-tested with no
+// network: a 200 with text → ok; a 400-thinking body → thinkingUnsupported; any other failure → plain ok:false.
+test('parseGeminiResult flags a 400 thinking-unsupported body and stays a plain failure otherwise (#30)', () => {
+  const okBody = JSON.stringify({ candidates: [{ content: { parts: [{ text: 'HELLO' }] } }] });
+  assert.deepEqual(synth.parseGeminiResult(200, okBody), { ok: true, text: 'HELLO' }, 'a 200 with text → ok');
+
+  const tb = JSON.stringify({ error: { code: 400, message: 'Thinking budget is not supported by this model.' } });
+  const r = synth.parseGeminiResult(400, tb);
+  assert.equal(r.ok, false);
+  assert.equal(r.thinkingUnsupported, true, 'a 400 thinking-unsupported body is flagged for the retry-without path');
+
+  // a non-thinking 400 (or any other error) is a PLAIN failure — never mis-flagged as thinking-unsupported.
+  const other = synth.parseGeminiResult(400, JSON.stringify({ error: { code: 400, message: 'invalid argument: bad blob' } }));
+  assert.equal(other.ok, false);
+  assert.ok(!other.thinkingUnsupported, 'an unrelated 400 is not flagged thinking-unsupported');
+  assert.equal(synth.parseGeminiResult(403, JSON.stringify({ error: { message: 'no key' } })).thinkingUnsupported, undefined, 'a 403 is a plain failure');
+});
+
+// AC3 + AC5(b) — a forced-thinking model that rejects thinkingConfig still SUCCEEDS: the gemini branch
+// issues the thinking spec, sees the thinkingUnsupported signal, rebuilds WITHOUT thinkingConfig, and issues
+// once more — that second call wins, no fallback needed, no throw. Simulated entirely behind the fake invoke.
+test('synthesize retries without thinkingConfig when the model rejects it, and succeeds (#30)', async () => {
+  // the fake simulates a forced-thinking model: any spec carrying thinkingConfig → 400 thinking-unsupported;
+  // the SAME request without thinkingConfig → the real answer.
+  const geminiThinkingGate = (answer) => (spec) => {
+    const sentThinking = !!(spec.body && spec.body.generationConfig && spec.body.generationConfig.thinkingConfig);
+    return sentThinking ? { ok: false, thinkingUnsupported: true } : { ok: true, text: answer };
+  };
+  const { invoke, calls } = fakeInvoke({ gemini: geminiThinkingGate('**TL;DR** resumed despite forced thinking') });
+
+  let text;
+  await assert.doesNotReject(async () => {
+    text = await synth.synthesize({ task: 'handoff', prompt: 'P', blob: 'B', config: DEFAULT_CFG, apiKey: 'KEY', invoke, sleep: noSleep });
+  });
+  assert.match(text, /TL;DR/, 'the retry-without-thinkingConfig call produced the answer');
+
+  // the FIRST gemini call carried thinkingConfig (rejected); a SECOND omitted it (won) — claude never reached.
+  const geminiCalls = calls.filter((c) => c.engine === 'gemini');
+  assert.ok(geminiCalls.length >= 2, 'a second gemini call was issued');
+  assert.ok(geminiCalls[0].body.generationConfig.thinkingConfig, 'the first gemini call carried thinkingConfig');
+  assert.ok(!geminiCalls[1].body.generationConfig.thinkingConfig, 'the retry omitted thinkingConfig');
+  assert.ok(!calls.some((c) => c.engine === 'claude'), 'the retry-without succeeded, so the claude fallback was never reached');
+});
+
+// AC1 — a thinking-default model returns USABLE output via synthesize(): with thinking disabled it emits a
+// COMPLETE handoff (starts **TL;DR) and a COMPLETE dream JSON the gate parses (parseProposals>0). The fake
+// encodes the live precondition — a thinking-default model only returns full output when thinkingBudget=0 was
+// sent (without it the answer truncates) — so this is red until buildGeminiSpec disables thinking by default.
+test('AC1: with thinking disabled, a thinking-default model yields a complete handoff and a parseable dream (#30)', async () => {
+  const handoff = '**TL;DR** shipped the engine fix; next is the rollout.';
+  const dreamJson = JSON.stringify({ proposals: [{ kind: 'decision', tier: 'decisions', slug: 's', title: 'T', body: '# T', confidence: 0.9, evidence: [{ quote: 'a verbatim span here' }] }] });
+  const gemini = (spec) => {
+    const gc = spec.body.generationConfig;
+    const disabled = gc.thinkingConfig && gc.thinkingConfig.thinkingBudget === 0;
+    if (!disabled) return { ok: true, text: 'tiny' }; // a thinking-default model truncates when thinking is NOT disabled.
+    return { ok: true, text: spec.body.system_instruction.parts[0].text.includes('HANDOFF') ? handoff : dreamJson };
+  };
+  const { invoke } = fakeInvoke({ gemini });
+
+  const h = await synth.synthesize({ task: 'handoff', prompt: synth.PROMPTS.handoff, blob: 'B', config: DEFAULT_CFG, apiKey: 'KEY', invoke, sleep: noSleep });
+  assert.ok(h.startsWith('**TL;DR'), 'the handoff is complete and starts at the TL;DR (thinking was disabled)');
+
+  const d = await synth.synthesize({ task: 'dream', prompt: synth.PROMPTS.dream, blob: 'B', config: DEFAULT_CFG, apiKey: 'KEY', invoke, sleep: noSleep });
+  assert.ok(synth.parseProposals(d).length > 0, 'the dream output is complete and parses to ≥1 proposal (no truncation)');
+});
