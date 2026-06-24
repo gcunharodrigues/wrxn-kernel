@@ -187,6 +187,35 @@ const THINK_MAX = 600;
 const TOOL_USE_MAX = 300;
 const TOOL_RESULT_MAX = 200;
 
+// Hook-injected framework-context sentinels. SessionStart emits <wrxn-orientation> (which embeds the
+// ENTIRE prior baton as the resume surface); UserPromptSubmit emits <synapse-rules>/<recall-surface>/
+// <reference-candidate> each turn; <system-reminder> wraps harness notes. All land verbatim in the
+// transcript. Left in, they out-mass a light session's real turns → the synth re-emits the embedded
+// prior baton (fresh `wrote`, frozen content) — the content-channel rot of #62. Strip them BEFORE
+// chunking. The blob builder is the ONE shared surface, so the claude and gemini paths both benefit.
+const INJECTED_SENTINELS = ['wrxn-orientation', 'synapse-rules', 'recall-surface', 'reference-candidate', 'system-reminder'];
+
+/**
+ * Strip hook-injected framework-context blocks from one transcript text part BEFORE chunking. Each known
+ * sentinel's `<tag>…</tag>` span (multi-line via [\s\S]) is removed. PURE and FAIL-OPEN: any fault returns
+ * the input unchanged — a filter fault must NEVER break the blob (the synth stays fail-open). Node stdlib
+ * only. Mirrors the redactSecrets scrub discipline. (#62)
+ * @param {string} text
+ * @returns {string}
+ */
+function stripInjectedContext(text) {
+  try {
+    let out = String(text || '');
+    for (const tag of INJECTED_SENTINELS) {
+      out = out.replace(new RegExp(`<${tag}>[\\s\\S]*?</${tag}>`, 'g'), ''); // closed block, anywhere in the part
+      out = out.replace(new RegExp(`<${tag}>[\\s\\S]*$`), ''); // unclosed block (transcript truncated mid-block) → strip to end-of-part (the role boundary)
+    }
+    return out;
+  } catch {
+    return String(text || ''); // a filter fault never breaks the blob
+  }
+}
+
 /**
  * Build a bounded plain-text blob from a Claude Code transcript (JSONL string).
  * @param {string} jsonlText the raw transcript file contents
@@ -208,12 +237,12 @@ function buildTranscriptBlob(jsonlText) {
     const c = m.content;
     const parts = [];
     if (typeof c === 'string') {
-      parts.push(c);
+      parts.push(stripInjectedContext(c)); // a SessionStart-injected orientation often arrives as string content
     } else if (Array.isArray(c)) {
       for (const p of c) {
         if (!p || typeof p !== 'object') continue;
         if (p.type === 'text') {
-          parts.push(p.text || '');
+          parts.push(stripInjectedContext(p.text || '')); // UserPromptSubmit sentinels prepend the user's text part
         } else if (p.type === 'thinking') {
           parts.push('[thinking] ' + String(p.thinking || '').slice(0, THINK_MAX));
         } else if (p.type === 'tool_use') {

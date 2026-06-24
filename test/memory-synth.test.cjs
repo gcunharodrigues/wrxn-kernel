@@ -134,6 +134,69 @@ test('buildTranscriptBlob truncates a long thinking block to keep tokens bounded
   assert.ok(!blob.includes('A'.repeat(601)), 'thinking is truncated at 600 chars');
 });
 
+// ── #62: strip hook-injected framework context (SessionStart orientation, UserPromptSubmit rules) ──
+// SessionStart injects <wrxn-orientation> embedding the ENTIRE prior baton; UserPromptSubmit injects
+// <synapse-rules>/<recall-surface>/etc. Left in the blob, the prior baton echoes forward (fresh `wrote`,
+// frozen content — #62). The builder strips known sentinels per text part BEFORE chunking, while the
+// real user/assistant work survives. The builder is the ONE shared surface (claude + gemini paths).
+
+test('buildTranscriptBlob strips closed framework-sentinel blocks (orientation, rules, recall) but keeps the real work', () => {
+  const orientation = '<wrxn-orientation>\nResume — prior handoff:\n**TL;DR** Shipped kernel 0.15.0; next step #45\n**Gemini-primary default** is live\n</wrxn-orientation>';
+  const jsonl = [
+    JSON.stringify({ type: 'user', message: { role: 'user', content: orientation } }),
+    JSON.stringify({ type: 'user', message: { role: 'user', content: '<synapse-rules>\nLayer 2 build loop\n</synapse-rules>\nfix the parser off-by-one' } }),
+    JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: '<recall-surface>\nrelated: parser slice\n</recall-surface>patched the slice index and added a test' }] } }),
+  ].join('\n');
+
+  const blob = synth.buildTranscriptBlob(jsonl);
+
+  assert.ok(!blob.includes('Shipped kernel 0.15.0'), 'the prior baton embedded in the orientation is stripped');
+  assert.ok(!blob.includes('Gemini-primary default'), 'no orientation span survives');
+  assert.ok(!blob.includes('wrxn-orientation'), 'the orientation sentinel tags are gone');
+  assert.ok(!blob.includes('synapse-rules') && !blob.includes('Layer 2 build loop'), 'the injected synapse-rules block is stripped');
+  assert.ok(!blob.includes('recall-surface') && !blob.includes('related: parser slice'), 'the injected recall-surface block is stripped');
+  assert.ok(blob.includes('fix the parser off-by-one'), 'the real user prompt (after the injected rules) survives');
+  assert.ok(blob.includes('patched the slice index'), 'the real assistant work survives');
+});
+
+test('buildTranscriptBlob strips an UNCLOSED/truncated sentinel block to the role boundary, never throwing', () => {
+  // the transcript was truncated mid-orientation: the block opens but never closes (no </wrxn-orientation>).
+  const jsonl = [
+    JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'real work: refactored the parser' }] } }),
+    JSON.stringify({ type: 'user', message: { role: 'user', content: '<wrxn-orientation>\n**TL;DR** Shipped kernel 0.15.0; next step #45\nGemini-primary default' } }),
+  ].join('\n');
+
+  let blob;
+  assert.doesNotThrow(() => {
+    blob = synth.buildTranscriptBlob(jsonl);
+  }, 'a truncated sentinel block must never throw — the synth is fail-open');
+  assert.ok(!blob.includes('Shipped kernel 0.15.0'), 'the unclosed orientation content is stripped to end-of-part');
+  assert.ok(!blob.includes('wrxn-orientation'), 'the dangling open tag is gone');
+  assert.ok(blob.includes('refactored the parser'), 'real work in a prior turn (a different role boundary) survives');
+});
+
+test('buildTranscriptBlob still skips malformed JSONL while stripping sentinels and keeping a heavy session intact', () => {
+  // a malformed line, an injected orientation, and three real turns (user prompt, assistant text + tool_use,
+  // tool_result) coexist: malformed → skipped, orientation → stripped, the real work → all captured.
+  const jsonl = [
+    'not json at all',
+    JSON.stringify({ type: 'user', message: { role: 'user', content: '<wrxn-orientation>\n**TL;DR** Shipped kernel 0.15.0\n</wrxn-orientation>' } }),
+    JSON.stringify({ type: 'user', message: { role: 'user', content: 'add a retry to the uploader' } }),
+    JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'added exponential backoff' }, { type: 'tool_use', name: 'Bash', input: { command: 'npm test' } }] } }),
+    JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', content: [{ type: 'text', text: 'all green' }] }] } }),
+  ].join('\n');
+
+  const blob = synth.buildTranscriptBlob(jsonl);
+  const chunks = blob.split('\n').filter(Boolean);
+
+  assert.ok(!blob.includes('not json at all'), 'the malformed line is skipped, never thrown on');
+  assert.ok(!blob.includes('Shipped kernel 0.15.0'), 'the injected orientation is stripped from the heavy session too');
+  assert.equal(chunks.length, 3, 'three real turns are captured (orientation-only chunk dropped, malformed skipped)');
+  assert.ok(blob.includes('add a retry to the uploader'), 'the real user prompt survives');
+  assert.ok(blob.includes('added exponential backoff') && blob.includes('[tool_use Bash]'), 'assistant text + tool_use survive');
+  assert.ok(blob.includes('[tool_result] all green'), 'the tool_result survives');
+});
+
 // ── claude engine: arg construction (pure spec) ─────────────────────────────────
 // `claude -p --model <id>`, the prompt+blob on stdin, WRXN_MEMORY_SYNTH=1 in env (the recursion
 // sentinel), a bounded timeout, the operator's CLI auth (NO key). The spec is pure so the contract is
