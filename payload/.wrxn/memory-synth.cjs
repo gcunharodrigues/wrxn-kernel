@@ -194,21 +194,37 @@ const TOOL_RESULT_MAX = 200;
 // prior baton (fresh `wrote`, frozen content) — the content-channel rot of #62. Strip them BEFORE
 // chunking. The blob builder is the ONE shared surface, so the claude and gemini paths both benefit.
 const INJECTED_SENTINELS = ['wrxn-orientation', 'synapse-rules', 'recall-surface', 'reference-candidate', 'system-reminder'];
+// ReDoS bound (#62): the phase-1 closed-block strip is ~quadratic on a pathological part (many opens, no
+// closes). A real injected block (orientation embeds a ≤400-word baton) is a few KB; this cap sits far
+// above that yet below the multi-second regex range, so the strip stays effectively linear.
+const INJECTED_STRIP_MAX = 65536;
 
 /**
- * Strip hook-injected framework-context blocks from one transcript text part BEFORE chunking. Each known
- * sentinel's `<tag>…</tag>` span (multi-line via [\s\S]) is removed. PURE and FAIL-OPEN: any fault returns
- * the input unchanged — a filter fault must NEVER break the blob (the synth stays fail-open). Node stdlib
- * only. Mirrors the redactSecrets scrub discipline. (#62)
+ * Strip hook-injected framework-context blocks from one transcript text part BEFORE chunking. Two phases:
+ *   1. every well-delimited `<tag>…</tag>` block, anywhere (multi-line via [\s\S]; nested/sequential safe);
+ *   2. a part-LEADING unclosed `<tag>…` (transcript truncated mid-block) → stripped to end-of-part.
+ * The phase-2 strip is ANCHORED to part-leading (`^\s*` — after optional whitespace, incl. the newline a
+ * phase-1 removal leaves) because real framework injections are always part-leading. A sentinel merely
+ * MENTIONED mid-prose is therefore NOT a leading match, so its trailing text survives (Finding A). PURE
+ * and FAIL-OPEN: any fault returns the input unchanged — a filter fault must NEVER break the blob. Node
+ * stdlib only. Mirrors the redactSecrets scrub discipline. (#62)
  * @param {string} text
  * @returns {string}
  */
 function stripInjectedContext(text) {
   try {
     let out = String(text || '');
+    // ReDoS guard (Finding B): skip a part far larger than any real injected block — it is ordinary content
+    // (a pasted file/log) with nothing part-leading to strip, so returning it as-is can never hang.
+    if (out.length > INJECTED_STRIP_MAX) return out;
+    // Phase 1 — remove every well-delimited block anywhere (low risk; sequential + nested blocks collapse).
     for (const tag of INJECTED_SENTINELS) {
-      out = out.replace(new RegExp(`<${tag}>[\\s\\S]*?</${tag}>`, 'g'), ''); // closed block, anywhere in the part
-      out = out.replace(new RegExp(`<${tag}>[\\s\\S]*$`), ''); // unclosed block (transcript truncated mid-block) → strip to end-of-part (the role boundary)
+      out = out.replace(new RegExp(`<${tag}>[\\s\\S]*?</${tag}>`, 'g'), '');
+    }
+    // Phase 2 — remove a part-LEADING unclosed remainder to end-of-part (after phase 1, any leading injected
+    // block left dangling by truncation is part-leading). Anchored so a mid-prose mention keeps its tail.
+    for (const tag of INJECTED_SENTINELS) {
+      out = out.replace(new RegExp(`^\\s*<${tag}>[\\s\\S]*$`), '');
     }
     return out;
   } catch {

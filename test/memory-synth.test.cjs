@@ -197,6 +197,55 @@ test('buildTranscriptBlob still skips malformed JSONL while stripping sentinels 
   assert.ok(blob.includes('[tool_result] all green'), 'the tool_result survives');
 });
 
+// ── #62 correction: the unclosed-tag strip must not over-strip real prose (Finding A) ──
+// The truncation strip cuts to end-of-part, so an UNANCHORED match would nuke everything after a sentinel
+// that a human merely MENTIONS mid-sentence. Real framework injections are always part-leading, so the
+// strip is anchored there — a mid-prose mention keeps its trailing text.
+test('buildTranscriptBlob keeps real prose that mentions a sentinel mid-text (no tail-drop)', () => {
+  const jsonl = JSON.stringify({
+    type: 'assistant',
+    message: { role: 'assistant', content: [{ type: 'text', text: 'the <synapse-rules> block is double-counted, then add a retry to the uploader' }] },
+  });
+
+  const blob = synth.buildTranscriptBlob(jsonl);
+
+  assert.ok(blob.includes('then add a retry to the uploader'), 'a mid-prose sentinel mention must not nuke the trailing text');
+  assert.ok(blob.includes('the '), 'the leading prose survives too');
+});
+
+// ── #62 correction: the strip must not hang on a large transcript part (Finding B — ReDoS) ──
+// The global closed-block regex is ~quadratic on a pathological part (many opens, no closes); the
+// fail-open try/catch covers a throw but NOT a multi-second hang. A length guard keeps it effectively
+// linear — a part far larger than any real injected block is ordinary content with nothing to strip.
+test('buildTranscriptBlob bounds a very large text part — completes fast and never throws (no ReDoS hang)', () => {
+  const huge = '<synapse-rules>'.repeat(34000); // ~510 KB of sentinel opens with no closes — the quadratic shape
+  const jsonl = JSON.stringify({ type: 'user', message: { role: 'user', content: huge + ' tail work' } });
+
+  const start = Date.now();
+  let blob;
+  assert.doesNotThrow(() => {
+    blob = synth.buildTranscriptBlob(jsonl);
+  }, 'a huge part never throws (fail-open)');
+  const elapsedMs = Date.now() - start;
+  assert.ok(elapsedMs < 1000, `the strip must stay bounded on a large part (took ${elapsedMs}ms)`);
+  assert.equal(typeof blob, 'string', 'the builder still returns a blob');
+});
+
+// ── #62 correction: SEQUENTIAL part-leading injected blocks all strip, trailing work survives ──
+// A single injected part can hold one block immediately followed by another (synapse-rules then
+// recall-surface) before the real prompt. Both are stripped; the trailing real work is kept.
+test('buildTranscriptBlob strips sequential part-leading injected blocks, keeping the trailing real work', () => {
+  const injected = '<synapse-rules>\nLayer 2 build loop\n</synapse-rules>\n<recall-surface>\nrelated: uploader slice\n</recall-surface>\nadd a retry to the uploader';
+  const jsonl = JSON.stringify({ type: 'user', message: { role: 'user', content: injected } });
+
+  const blob = synth.buildTranscriptBlob(jsonl);
+
+  assert.ok(!blob.includes('Layer 2 build loop'), 'the first injected block is stripped');
+  assert.ok(!blob.includes('related: uploader slice'), 'the second sequential injected block is stripped');
+  assert.ok(!blob.includes('synapse-rules') && !blob.includes('recall-surface'), 'no injected sentinel tags survive');
+  assert.ok(blob.includes('add a retry to the uploader'), 'the trailing real work survives');
+});
+
 // ── claude engine: arg construction (pure spec) ─────────────────────────────────
 // `claude -p --model <id>`, the prompt+blob on stdin, WRXN_MEMORY_SYNTH=1 in env (the recursion
 // sentinel), a bounded timeout, the operator's CLI auth (NO key). The spec is pure so the contract is
