@@ -242,9 +242,10 @@ function readTranscriptBlob(transcriptPath) {
 const CLAUDE_TIMEOUT_MS = 120000; // headless sonnet handoff/dream — generous but bounded.
 const GEMINI_TIMEOUT_MS = 30000; // mirrors the proven aimem `curl -m 30` fallback.
 const SENTINEL = 'WRXN_MEMORY_SYNTH'; // recursion guard: set on every engine spawn (the spawn hook no-ops when it sees it).
-// 1200 (vs the aimem reference's 900): the handoff prompt self-caps at ~400 words, so the extra
-// headroom is for the denser `dream` consolidation that shares this engine (lands in slice 04).
-const GEMINI_MAX_OUTPUT_TOKENS = 1200;
+// 4096 (vs the aimem reference's 900, and the prior 1200): a thinking-default model spends part of the
+// output budget on reasoning BEFORE the answer, and a rich `dream` consolidation runs ~4.3k chars — 1200
+// truncated even a non-thinking model on a dense session. 4096 fits the observed clean dream JSON (#30).
+const GEMINI_MAX_OUTPUT_TOKENS = 4096;
 
 /** Assemble the model input: the task system prompt, then the transcript blob (mirrors the reference). */
 function assemblePrompt(prompt, blob) {
@@ -270,8 +271,16 @@ function buildClaudeSpec({ model, prompt, blob }) {
  * Build the `gemini` engine spec: a POST to `…/v1beta/models/<model>:generateContent` with the
  * `x-goog-api-key` header, the task prompt as `system_instruction` and the blob as user content
  * (mirrors the proven aimem-handoff-synth call). PURE.
+ *
+ * `thinking` controls the `generationConfig.thinkingConfig` directive (#30): when true (default) the spec
+ * carries `{ thinkingBudget: 0 }`, which DISABLES model-side thinking on thinking-default models (a verified
+ * HTTP-200 no-op on non-thinking models) so reasoning tokens never consume the output budget and the answer
+ * is never split into a dropped `thought` part. Pass `false` to OMIT the directive — the AC3 retry path for
+ * forced-thinking models (gemma-class) that reject thinkingConfig with an HTTP 400.
  */
-function buildGeminiSpec({ model, prompt, blob, apiKey }) {
+function buildGeminiSpec({ model, prompt, blob, apiKey, thinking = true }) {
+  const generationConfig = { temperature: 0.2, maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS };
+  if (thinking) generationConfig.thinkingConfig = { thinkingBudget: 0 };
   return {
     engine: 'gemini',
     method: 'POST',
@@ -280,28 +289,57 @@ function buildGeminiSpec({ model, prompt, blob, apiKey }) {
     body: {
       system_instruction: { parts: [{ text: prompt || '' }] },
       contents: [{ role: 'user', parts: [{ text: `TRANSCRIPT:\n${blob || ''}` }] }],
-      generationConfig: { temperature: 0.2, maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS },
+      generationConfig,
     },
     timeoutMs: GEMINI_TIMEOUT_MS,
   };
 }
 
 /**
- * Extract the model text from a Gemini `generateContent` response body
- * (`candidates[0].content.parts[0].text`). An error payload, unexpected shape, or unparseable body →
- * null, so the engine fails cleanly (→ fallback / null). PURE — pins the response contract with no
- * network round-trip.
+ * Extract the model text from a Gemini `generateContent` response body. Concatenates the `.text` of every
+ * content part EXCEPT parts flagged `thought: true` — a thinking-default / forced-thinking model emits its
+ * reasoning as a separate `thought` part (often parts[0]), which must be dropped, not returned, and the
+ * answer may itself span several parts (#30). An error payload, unexpected shape, no answer text, or an
+ * unparseable body → null, so the engine fails cleanly (→ fallback / null). PURE + total — pins the response
+ * contract with no network round-trip, never throws.
  */
 function parseGeminiResponse(bodyString) {
   try {
     const d = JSON.parse(bodyString);
-    const t = d && d.candidates && d.candidates[0] && d.candidates[0].content
-      && d.candidates[0].content.parts && d.candidates[0].content.parts[0]
-      && d.candidates[0].content.parts[0].text;
-    return typeof t === 'string' && t.trim() ? t : null;
+    const parts = d && d.candidates && d.candidates[0] && d.candidates[0].content
+      && d.candidates[0].content.parts;
+    if (!Array.isArray(parts)) return null;
+    const text = parts
+      .filter((p) => p && p.thought !== true && typeof p.text === 'string')
+      .map((p) => p.text)
+      .join('');
+    return text.trim() ? text : null;
   } catch {
     return null;
   }
+}
+
+// A forced-thinking model (gemma-class) rejects the thinkingConfig directive with an HTTP 400 whose body
+// mentions "thinking" (e.g. "Thinking budget is not supported"). That single discriminating token gates the
+// retry-without path (#30) — narrow enough that an unrelated 400 is NOT mis-flagged (it degrades as a plain
+// failure → fallback / null). A false positive would only cost one harmless retry-without-thinkingConfig.
+const THINKING_UNSUPPORTED_RE = /thinking/i;
+
+/**
+ * Classify a Gemini HTTP response into the invoke-result the orchestration consumes (#30). PURE + total:
+ *   - a parseable answer → `{ ok:true, text }`;
+ *   - HTTP 400 whose body mentions thinking → `{ ok:false, thinkingUnsupported:true, detail }` (the signal
+ *     runEngine uses to rebuild the spec WITHOUT thinkingConfig and retry once);
+ *   - anything else → `{ ok:false, detail }` (a plain failure, exactly as before).
+ * Kept pure (statusCode + body in, result out) so invokeGemini's 400-detection is unit-tested with no network.
+ */
+function parseGeminiResult(statusCode, bodyString) {
+  const text = parseGeminiResponse(bodyString);
+  if (text) return { ok: true, text };
+  if (statusCode === 400 && THINKING_UNSUPPORTED_RE.test(String(bodyString || ''))) {
+    return { ok: false, text: '', thinkingUnsupported: true, detail: 'gemini http 400 thinking-unsupported' };
+  }
+  return { ok: false, text: '', detail: `gemini http ${statusCode}` };
 }
 
 // ── defaultInvoke: the REAL engine invoker (the production path behind the seam) ──
@@ -341,8 +379,9 @@ function invokeGemini(spec) {
         let data = '';
         res.on('data', (c) => { data += c; });
         res.on('end', () => {
-          const text = parseGeminiResponse(data);
-          resolve(text ? { ok: true, text } : { ok: false, text: '', detail: `gemini http ${res.statusCode}` });
+          // parseGeminiResult is status-aware: a 400 thinking-unsupported body becomes a `thinkingUnsupported`
+          // signal so runEngine retries WITHOUT thinkingConfig; any other failure stays a plain ok:false (#30).
+          resolve(parseGeminiResult(res.statusCode, data));
         });
       },
     );
@@ -398,12 +437,27 @@ function defaultSleep(ms) {
  */
 async function runEngine(engine, { prompt, blob, apiKey, invoke, sleep = defaultSleep, validate }) {
   if (!engine || !engine.engine) return { text: null, attempts: 0 };
-  let spec;
+
+  // `callOnce()` is ONE engine call — the unit the transient-spawn retry loop below repeats. For gemini it
+  // also encapsulates the thinking-unsupported fallback (#30): issue the spec carrying thinkingConfig; if the
+  // model REJECTS that directive (HTTP 400 → `thinkingUnsupported`), rebuild the SAME request WITHOUT
+  // thinkingConfig and issue it once more, using that result. This lives ABOVE the invoke seam, so a fake
+  // invoke simulates both halves with no network; it composes with the transient retries (the whole callOnce
+  // is the retried unit) and preserves the gemini-no-key early-out (no key → no request, below).
+  let callOnce;
   if (engine.engine === 'claude') {
-    spec = buildClaudeSpec({ model: engine.model, prompt, blob });
+    const spec = buildClaudeSpec({ model: engine.model, prompt, blob });
+    callOnce = () => invoke(spec);
   } else if (engine.engine === 'gemini') {
     if (!apiKey) return { text: null, attempts: 0 }; // missing key fails this engine (→ fallback / null), no request, no retry.
-    spec = buildGeminiSpec({ model: engine.model, prompt, blob, apiKey });
+    callOnce = async () => {
+      const r = await invoke(buildGeminiSpec({ model: engine.model, prompt, blob, apiKey, thinking: true }));
+      if (r && r.thinkingUnsupported) {
+        // this model rejects the thinkingConfig directive (forced-thinking / gemma-class) — retry once without it.
+        return invoke(buildGeminiSpec({ model: engine.model, prompt, blob, apiKey, thinking: false }));
+      }
+      return r;
+    };
   } else {
     return { text: null, attempts: 0 }; // unknown engine name → skip.
   }
@@ -412,7 +466,7 @@ async function runEngine(engine, { prompt, blob, apiKey, invoke, sleep = default
     attempts += 1;
     let text = null;
     try {
-      const r = await invoke(spec);
+      const r = await callOnce();
       const t = r && r.ok && typeof r.text === 'string' ? r.text.trim() : '';
       text = t || null;
     } catch {
@@ -912,6 +966,7 @@ module.exports = {
   buildClaudeSpec,
   buildGeminiSpec,
   parseGeminiResponse,
+  parseGeminiResult,
   parseProposals,
   defaultInvoke,
   synthesize,
