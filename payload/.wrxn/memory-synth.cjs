@@ -452,11 +452,12 @@ async function runEngine(engine, { prompt, blob, apiKey, invoke, sleep = default
     callOnce = () => invoke(spec);
   } else if (engine.engine === 'gemini') {
     if (!apiKey) return { text: null, attempts: 0 }; // missing key fails this engine (→ fallback / null), no request, no retry.
+    const { thinkingBudget, maxOutputTokens } = engine; // per-engine reasoning config (#59); absent → buildGeminiSpec defaults (0 / 4096).
     callOnce = async () => {
-      const r = await invoke(buildGeminiSpec({ model: engine.model, prompt, blob, apiKey, thinkingBudget: 0 }));
+      const r = await invoke(buildGeminiSpec({ model: engine.model, prompt, blob, apiKey, thinkingBudget, maxOutputTokens }));
       if (r && r.thinkingUnsupported) {
-        // this model rejects the thinkingConfig directive (forced-thinking / gemma-class) — retry once without it.
-        return invoke(buildGeminiSpec({ model: engine.model, prompt, blob, apiKey, thinkingBudget: null }));
+        // this model rejects the thinkingConfig directive (forced-thinking / gemma-class) — retry once without it (same cap).
+        return invoke(buildGeminiSpec({ model: engine.model, prompt, blob, apiKey, thinkingBudget: null, maxOutputTokens }));
       }
       return r;
     };

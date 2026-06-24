@@ -530,3 +530,39 @@ test('AC1: with thinking disabled, a thinking-default model yields a complete ha
   const d = await synth.synthesize({ task: 'dream', prompt: synth.PROMPTS.dream, blob: 'B', config: DEFAULT_CFG, apiKey: 'KEY', invoke, sleep: noSleep });
   assert.ok(synth.parseProposals(d).length > 0, 'the dream output is complete and parses to ≥1 proposal (no truncation)');
 });
+
+// ── #59: the per-engine reasoning config flows config → runEngine → the gemini spec ──
+// The resolved engine's thinkingBudget + maxOutputTokens must reach the ACTUAL gemini request. Captured via
+// the fake-invoke seam: a configured task yields a spec carrying the configured values; an engine that omits
+// the fields falls back (thinkingBudget→0, maxOutputTokens→4096) — the absent-field default, end to end.
+test('the per-engine thinkingBudget + maxOutputTokens flow from task config through runEngine into the gemini spec (#59)', async () => {
+  const cfgWith = {
+    tasks: {
+      handoff: {
+        primary: { engine: 'gemini', model: 'gemini-3.5-flash', thinkingBudget: -1, maxOutputTokens: 8192 },
+        fallback: { engine: 'claude', model: 'claude-sonnet-4-6' },
+      },
+    },
+  };
+  const withFake = fakeInvoke({ gemini: { ok: true, text: '**TL;DR** ok' } });
+  await synth.synthesize({ task: 'handoff', prompt: 'P', blob: 'B', config: cfgWith, apiKey: 'KEY', invoke: withFake.invoke, sleep: noSleep });
+  const g1 = withFake.calls.find((c) => c.engine === 'gemini');
+  assert.ok(g1, 'the gemini primary was invoked');
+  assert.equal(g1.body.generationConfig.thinkingConfig.thinkingBudget, -1, 'the configured thinkingBudget reaches the spec');
+  assert.equal(g1.body.generationConfig.maxOutputTokens, 8192, 'the configured maxOutputTokens reaches the spec');
+
+  // a gemini engine with NEITHER field set falls back to the safe defaults (0 / 4096) — the absent-field default.
+  const cfgBare = {
+    tasks: {
+      handoff: {
+        primary: { engine: 'gemini', model: 'gemini-3.1-flash-lite' },
+        fallback: { engine: 'claude', model: 'claude-sonnet-4-6' },
+      },
+    },
+  };
+  const bareFake = fakeInvoke({ gemini: { ok: true, text: '**TL;DR** ok' } });
+  await synth.synthesize({ task: 'handoff', prompt: 'P', blob: 'B', config: cfgBare, apiKey: 'KEY', invoke: bareFake.invoke, sleep: noSleep });
+  const g2 = bareFake.calls.find((c) => c.engine === 'gemini');
+  assert.equal(g2.body.generationConfig.thinkingConfig.thinkingBudget, 0, 'an absent thinkingBudget defaults to 0 (preserves #30)');
+  assert.equal(g2.body.generationConfig.maxOutputTokens, 4096, 'an absent maxOutputTokens defaults to 4096');
+});
