@@ -216,6 +216,44 @@ test('handoff stays permissive (#50): a non-empty primary short-circuits — no 
   assert.deepEqual(calls.map((c) => c.engine), ['gemini'], 'the handoff never reaches the fallback (permissive, unchanged)');
 });
 
+// ── #52: the dream abstain check is STRUCTURED, not a bare-word substring ─────────
+// The dream validator used to accept ANY text containing "abstain" (a broad /abstain/i substring), so a
+// model that merely WROTE the word in prose would "win" as an abstain while the gate parsed zero proposals.
+// Tightened to a structured signal (isAbstain — the text must actually carry {abstain:true}, mirroring
+// parseProposals' first-balanced-JSON-span extraction). Bare-word prose is therefore UNUSABLE → it exhausts
+// the primary and the fallback is reached, exactly like any other unparseable output. A real structured
+// abstain still validates (a deliberate "nothing to record" must NOT churn the fallback).
+const DREAM_ABSTAIN_PROSE = 'On reflection I will abstain from recording anything durable this session.';
+const DREAM_ABSTAIN_JSON = JSON.stringify({ abstain: true });
+
+test('dream does NOT treat the bare word "abstain" in prose as a valid answer — it falls through to the fallback (#52)', async () => {
+  // OLD behavior (broad /abstain/i): the prose "wins" as an abstain and the fallback is never reached.
+  const { invoke, calls } = fakeInvoke({ gemini: { ok: true, text: DREAM_ABSTAIN_PROSE }, claude: { ok: true, text: DREAM_JSON } });
+  const text = await synth.synthesize({ task: 'dream', prompt: 'P', blob: 'B', config: DEFAULT_CFG, apiKey: 'KEY', invoke, sleep: noSleep });
+  assert.equal(text, DREAM_JSON, 'bare-word "abstain" prose is unusable → the fallback JSON reaches the caller');
+  const seq = calls.map((c) => c.engine);
+  assert.equal(seq[seq.length - 1], 'claude', 'the fallback was reached (the prose did NOT validate as a structured abstain)');
+});
+
+test('dream treats a STRUCTURED {abstain:true} as a valid answer — no fallback churn (#52)', async () => {
+  const { invoke, calls } = fakeInvoke({ gemini: { ok: true, text: DREAM_ABSTAIN_JSON }, claude: { ok: true, text: DREAM_JSON } });
+  const text = await synth.synthesize({ task: 'dream', prompt: 'P', blob: 'B', config: DEFAULT_CFG, apiKey: 'KEY', invoke, sleep: noSleep });
+  assert.equal(text, DREAM_ABSTAIN_JSON, 'a real structured abstain validates on the primary');
+  assert.deepEqual(calls.map((c) => c.engine), ['gemini'], 'a structured abstain short-circuits — the fallback is never reached');
+});
+
+test('isAbstain accepts ONLY a structured abstain (clean / fenced / prose-wrapped), never the bare word (#52)', () => {
+  assert.equal(synth.isAbstain(DREAM_ABSTAIN_JSON), true, 'a clean {abstain:true} is an abstain');
+  assert.equal(synth.isAbstain('```json\n{"abstain": true}\n```'), true, 'a fenced structured abstain is an abstain');
+  assert.equal(synth.isAbstain('No durable learnings this time.\n{"abstain":true}'), true, 'a prose-wrapped structured abstain is an abstain');
+  assert.equal(synth.isAbstain(DREAM_ABSTAIN_PROSE), false, 'the bare word "abstain" in prose is NOT a structured abstain');
+  assert.equal(synth.isAbstain('{"abstain": false}'), false, '{abstain:false} is not an abstain');
+  assert.equal(synth.isAbstain('[{"abstain":true}]'), false, 'an array is not an abstain object');
+  assert.equal(synth.isAbstain(''), false, 'empty text is not an abstain');
+  assert.equal(synth.isAbstain('plain prose, no json at all'), false, 'no JSON span → not an abstain');
+  assert.doesNotThrow(() => synth.isAbstain(null), 'total — never throws on a non-string');
+});
+
 // ── graceful degradation: missing CLI / missing key / invoker error → null (never throws) ──
 
 test('synthesize degrades to null when the CLI is unavailable AND there is no key — and never issues a keyless gemini call', async () => {

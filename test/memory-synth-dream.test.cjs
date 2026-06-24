@@ -85,6 +85,11 @@ function fakeInvoke(byEngine) {
   return { invoke, calls };
 }
 
+// A no-op injected sleep so the engine retry loop runs instantly in tests (no wall-clock wait) — matches the
+// pattern in memory-synth.test.cjs / -handoff.test.cjs. A dream output that FAILS validation (#50's task-aware
+// success) exhausts ENGINE_ATTEMPTS × ENGINE_BACKOFF_MS; the no-op sleep keeps that path off the real clock (#52).
+const noSleep = () => {};
+
 // A transcript blob with a substantive, verbatim decision span the proposal can cite.
 const BLOB = [
   '[user] we debated the logging stack at length today',
@@ -212,7 +217,9 @@ test('runDream writes nothing when the engine returns no usable proposals (empty
   const root = freshInstall('wrxn-dream-noprops-');
   const { invoke } = fakeInvoke({ claude: { ok: true, text: 'I could not find anything durable to record.' } });
 
-  const res = await synth.runDream({ root, blob: BLOB, invoke });
+  // non-JSON dream output FAILS the task-aware validator (#50), so the engine exhausts its retries before this
+  // resolves — inject the no-op sleep so those bounded backoffs don't run on the real clock (#52, test hygiene).
+  const res = await synth.runDream({ root, blob: BLOB, invoke, sleep: noSleep });
 
   assert.deepEqual(res.written, [], 'non-JSON / no-proposal output commits nothing');
   assert.equal(res.reason, 'abstain', 'an unparseable/empty proposal set is treated as abstain');

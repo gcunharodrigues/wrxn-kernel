@@ -486,9 +486,11 @@ async function runEngine(engine, { prompt, blob, apiKey, invoke, sleep = default
 // writes nothing. A task with NO registered validator is permissive (any non-empty text wins, exactly as
 // before), so every existing caller is preserved.
 const TASK_VALIDATORS = {
-  // dream output is usable only if the gate (parseProposals) reads ≥1 proposal from it, OR it is an explicit
-  // abstain — a deliberate "nothing to record" is a valid answer, NOT a reason to churn through the fallback.
-  dream: (text) => parseProposals(text).length > 0 || /abstain/i.test(text),
+  // dream output is usable only if the gate (parseProposals) reads ≥1 proposal from it, OR it is a STRUCTURED
+  // abstain (isAbstain — the text carries an actual {abstain:true}, NOT merely the word in prose). A deliberate
+  // "nothing to record" is a valid answer, NOT a reason to churn through the fallback (#52: the old /abstain/i
+  // substring let a model that just wrote the word pass as an abstain).
+  dream: (text) => parseProposals(text).length > 0 || isAbstain(text),
 };
 
 // Resolve a task's engine-success validator; an unregistered task is permissive (any non-empty text wins).
@@ -759,35 +761,59 @@ function dreamAdapter() {
 }
 
 /**
- * Parse the engine's dream output into a proposals array. The model is asked for STRICT JSON, but a real
- * model may wrap it in prose or ```json fences — so we extract the first balanced {...} / [...] span and
- * parse it. An `{ abstain:true }` or anything unparseable / shapeless yields [] (write nothing). PURE.
+ * Extract the first JSON value from model output. The model is asked for STRICT JSON, but a real model may
+ * wrap it in prose or ```json fences — so on a direct-parse miss we grab the first balanced {…} / […] span and
+ * parse that. Returns the parsed value, or null when nothing parses. PURE + total — never throws. This is the
+ * SINGLE tolerant parse shared by both parseProposals and isAbstain so the two can never diverge (#52).
+ * @param {string} text the engine output
+ * @returns {object|Array|null}
+ */
+function firstJsonValue(text) {
+  const s = String(text || '');
+  try {
+    return JSON.parse(s);
+  } catch {
+    // tolerate prose/fences around the JSON: grab the first { … } or [ … ] span and try that.
+    const start = s.search(/[[{]/);
+    if (start === -1) return null;
+    const open = s[start];
+    const close = open === '{' ? '}' : ']';
+    const end = s.lastIndexOf(close);
+    if (end <= start) return null;
+    try {
+      return JSON.parse(s.slice(start, end + 1));
+    } catch {
+      return null;
+    }
+  }
+}
+
+/**
+ * Parse the engine's dream output into a proposals array (via firstJsonValue's tolerant extraction). An
+ * `{ abstain:true }` or anything unparseable / shapeless yields [] (write nothing). PURE.
  * @param {string} text the engine output
  * @returns {Array} the proposals (possibly empty)
  */
 function parseProposals(text) {
-  const s = String(text || '');
-  let parsed = null;
-  try {
-    parsed = JSON.parse(s);
-  } catch {
-    // tolerate prose/fences around the JSON: grab the first { … } or [ … ] span and try that.
-    const start = s.search(/[[{]/);
-    if (start === -1) return [];
-    const open = s[start];
-    const close = open === '{' ? '}' : ']';
-    const end = s.lastIndexOf(close);
-    if (end <= start) return [];
-    try {
-      parsed = JSON.parse(s.slice(start, end + 1));
-    } catch {
-      return [];
-    }
-  }
+  const parsed = firstJsonValue(text);
   if (parsed && typeof parsed === 'object' && parsed.abstain === true) return [];
   if (Array.isArray(parsed)) return parsed;
   if (parsed && typeof parsed === 'object' && Array.isArray(parsed.proposals)) return parsed.proposals;
   return [];
+}
+
+/**
+ * A STRUCTURED dream abstain (#52): the output carries an actual `{ abstain:true }` — not merely the word
+ * "abstain" somewhere in prose. Reuses firstJsonValue's extraction (clean / fenced / prose-wrapped JSON all
+ * resolve) and returns true only when the parsed object literally has `abstain === true`. PURE + total — never
+ * throws. The dream engine-success validator uses it so a model that just writes the word does NOT pass as a
+ * deliberate "nothing to record" (the old broad /abstain/i substring did).
+ * @param {string} text the engine output
+ * @returns {boolean}
+ */
+function isAbstain(text) {
+  const parsed = firstJsonValue(text);
+  return !!(parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed.abstain === true);
 }
 
 /** Run a dream.cjs subcommand in-process-but-separate (spawnSync node), rooted at the install. Parses its
@@ -816,17 +842,19 @@ function writeTemp(root, tag, content) {
  * the dream.cjs gate (check → stage accepted → commit, all `--source`-verified against the blob), and
  * returns the committed slugs. Writes nothing on a trivial blob / abstain / empty-or-rejected set. Cleans
  * up its temp files. Never throws (a fault degrades to "wrote nothing").
- * @param {{ root:string, blob:string, invoke?:Function }} opts
+ * @param {{ root:string, blob:string, invoke?:Function, sleep?:Function }} opts
  * @returns {Promise<{ written:string[], reason?:string }>}
  */
-async function runDream({ root, blob, invoke = defaultInvoke }) {
+async function runDream({ root, blob, invoke = defaultInvoke, sleep }) {
   const temps = [];
   try {
     if (!blob || blob.trim().length < TRIVIAL_BLOB_MIN) return { written: [], reason: 'trivial' };
     const config = loadConfig(root);
     const apiKey = loadEnv(root).GEMINI_API_KEY;
     const safeBlob = redactSecrets(blob); // scrub BEFORE the blob egresses to the external model.
-    const text = await synthesize({ task: 'dream', prompt: PROMPTS.dream, blob: safeBlob, config, apiKey, invoke });
+    // `sleep` is threaded to the engine retry loop (default real backoff in production; tests inject a no-op so
+    // a validate-fail dream — which exhausts ENGINE_ATTEMPTS × ENGINE_BACKOFF_MS — runs instantly, #52).
+    const text = await synthesize({ task: 'dream', prompt: PROMPTS.dream, blob: safeBlob, config, apiKey, invoke, sleep });
     const proposals = parseProposals(text);
     if (proposals.length === 0) return { written: [], reason: 'abstain' };
 
@@ -968,6 +996,7 @@ module.exports = {
   parseGeminiResponse,
   parseGeminiResult,
   parseProposals,
+  isAbstain,
   defaultInvoke,
   synthesize,
   runHandoff,
