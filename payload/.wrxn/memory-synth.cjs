@@ -272,15 +272,17 @@ function buildClaudeSpec({ model, prompt, blob }) {
  * `x-goog-api-key` header, the task prompt as `system_instruction` and the blob as user content
  * (mirrors the proven aimem-handoff-synth call). PURE.
  *
- * `thinking` controls the `generationConfig.thinkingConfig` directive (#30): when true (default) the spec
- * carries `{ thinkingBudget: 0 }`, which DISABLES model-side thinking on thinking-default models (a verified
- * HTTP-200 no-op on non-thinking models) so reasoning tokens never consume the output budget and the answer
- * is never split into a dropped `thought` part. Pass `false` to OMIT the directive — the AC3 retry path for
- * forced-thinking models (gemma-class) that reject thinkingConfig with an HTTP 400.
+ * `thinkingBudget` is the PER-ENGINE reasoning directive (#59, generalizing #30): a NUMBER sets
+ * `generationConfig.thinkingConfig = { thinkingBudget }` — `0` disables model-side thinking (a verified
+ * HTTP-200 no-op on non-thinking models), `-1` lets the model decide (dynamic), `N>0` bounds it to N thinking
+ * tokens. An ABSENT budget defaults to `0` (preserves #30's safe default). An explicit `null` OMITS
+ * thinkingConfig entirely — the AC3 retry path for forced-thinking models (gemma-class) that reject the
+ * directive with an HTTP 400. `maxOutputTokens` is the per-engine output cap (default GEMINI_MAX_OUTPUT_TOKENS).
  */
-function buildGeminiSpec({ model, prompt, blob, apiKey, thinking = true }) {
-  const generationConfig = { temperature: 0.2, maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS };
-  if (thinking) generationConfig.thinkingConfig = { thinkingBudget: 0 };
+function buildGeminiSpec({ model, prompt, blob, apiKey, thinkingBudget = 0, maxOutputTokens = GEMINI_MAX_OUTPUT_TOKENS }) {
+  const generationConfig = { temperature: 0.2, maxOutputTokens };
+  // a NUMBER (incl. 0 and -1) sets the directive; an explicit `null` OMITS it (the AC3 retry-without path).
+  if (thinkingBudget !== null) generationConfig.thinkingConfig = { thinkingBudget };
   return {
     engine: 'gemini',
     method: 'POST',
@@ -451,10 +453,10 @@ async function runEngine(engine, { prompt, blob, apiKey, invoke, sleep = default
   } else if (engine.engine === 'gemini') {
     if (!apiKey) return { text: null, attempts: 0 }; // missing key fails this engine (→ fallback / null), no request, no retry.
     callOnce = async () => {
-      const r = await invoke(buildGeminiSpec({ model: engine.model, prompt, blob, apiKey, thinking: true }));
+      const r = await invoke(buildGeminiSpec({ model: engine.model, prompt, blob, apiKey, thinkingBudget: 0 }));
       if (r && r.thinkingUnsupported) {
         // this model rejects the thinkingConfig directive (forced-thinking / gemma-class) — retry once without it.
-        return invoke(buildGeminiSpec({ model: engine.model, prompt, blob, apiKey, thinking: false }));
+        return invoke(buildGeminiSpec({ model: engine.model, prompt, blob, apiKey, thinkingBudget: null }));
       }
       return r;
     };

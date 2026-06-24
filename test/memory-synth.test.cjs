@@ -423,17 +423,17 @@ test('parseGeminiResponse excludes thought parts and concatenates the remaining 
 
 // AC1 + AC4 + the AC3 testability seam — buildGeminiSpec disables thinking by DEFAULT
 // (generationConfig.thinkingConfig.thinkingBudget=0: a verified HTTP-200 no-op on non-thinking models,
-// disables thinking on thinking-default ones), and can OMIT the directive (thinking:false) so the AC3 retry
-// can re-issue the request for a forced-thinking model that rejects thinkingConfig.
-test('buildGeminiSpec sets thinkingConfig.thinkingBudget=0 by default and omits it when thinking:false (#30)', () => {
+// disables thinking on thinking-default ones), and can OMIT the directive (thinkingBudget:null, #59) so the
+// AC3 retry can re-issue the request for a forced-thinking model that rejects thinkingConfig.
+test('buildGeminiSpec sets thinkingConfig.thinkingBudget=0 by default and omits it when thinkingBudget:null (#30/#59)', () => {
   const on = synth.buildGeminiSpec({ model: 'm', prompt: 'P', blob: 'B', apiKey: 'K' });
   assert.deepEqual(on.body.generationConfig.thinkingConfig, { thinkingBudget: 0 }, 'thinking is disabled by default');
   // the existing knobs are preserved alongside the new directive (no regression to temperature / cap).
   assert.equal(on.body.generationConfig.temperature, 0.2, 'temperature is preserved');
   assert.ok(typeof on.body.generationConfig.maxOutputTokens === 'number', 'the output cap is still set');
 
-  const off = synth.buildGeminiSpec({ model: 'm', prompt: 'P', blob: 'B', apiKey: 'K', thinking: false });
-  assert.ok(!('thinkingConfig' in off.body.generationConfig), 'thinking:false omits thinkingConfig (the AC3 retry-without path)');
+  const off = synth.buildGeminiSpec({ model: 'm', prompt: 'P', blob: 'B', apiKey: 'K', thinkingBudget: null });
+  assert.ok(!('thinkingConfig' in off.body.generationConfig), 'thinkingBudget:null omits thinkingConfig (the AC3 retry-without path)');
 });
 
 // AC1 + AC5(c) — the output cap is raised so reasoning tokens + a rich dream JSON (~4.3k chars observed) no
@@ -441,6 +441,26 @@ test('buildGeminiSpec sets thinkingConfig.thinkingBudget=0 by default and omits 
 test('buildGeminiSpec raises the output cap past the old 1200 so a rich answer is not truncated (#30)', () => {
   const spec = synth.buildGeminiSpec({ model: 'm', prompt: 'P', blob: 'B', apiKey: 'K' });
   assert.ok(spec.body.generationConfig.maxOutputTokens >= 4096, 'the output cap is at least 4096 (was 1200)');
+});
+
+// ── #59: buildGeminiSpec reads PER-ENGINE reasoning config (thinkingBudget + maxOutputTokens) ──
+// #30's hardcoded thinkingConfig:{thinkingBudget:0} + global cap are generalized to per-engine params, so a
+// task can run ANY budget (0 off / -1 dynamic / N>0 bounded) and size its own output cap. A NUMBER sets
+// generationConfig.thinkingConfig.thinkingBudget (incl 0 and -1); an ABSENT budget defaults to 0 (preserves
+// #30's safe default); an explicit `null` OMITS thinkingConfig (the AC3 retry-without path). This REPLACES
+// the old `thinking:boolean` param.
+test('buildGeminiSpec carries a per-engine thinkingBudget (0/-1/N), defaults absent to 0, omits on null, and honors maxOutputTokens (#59)', () => {
+  const gc = (args) => synth.buildGeminiSpec({ model: 'm', prompt: 'P', blob: 'B', apiKey: 'K', ...args }).body.generationConfig;
+
+  assert.equal(gc({ thinkingBudget: -1 }).thinkingConfig.thinkingBudget, -1, 'dynamic reasoning (-1) flows through');
+  assert.equal(gc({ thinkingBudget: 0 }).thinkingConfig.thinkingBudget, 0, 'reasoning off (0) flows through');
+  assert.equal(gc({ thinkingBudget: 256 }).thinkingConfig.thinkingBudget, 256, 'a bounded budget (N>0) flows through');
+  assert.equal(gc({}).thinkingConfig.thinkingBudget, 0, 'an ABSENT thinkingBudget defaults to 0 (preserves #30 safe default)');
+  assert.ok(!('thinkingConfig' in gc({ thinkingBudget: null })), 'an explicit null OMITS thinkingConfig (the AC3 retry-without path)');
+
+  assert.equal(gc({ maxOutputTokens: 8192 }).maxOutputTokens, 8192, 'the configured output cap flows through');
+  assert.equal(gc({}).maxOutputTokens, 4096, 'an absent maxOutputTokens defaults to 4096');
+  assert.equal(gc({ thinkingBudget: -1 }).temperature, 0.2, 'temperature is preserved');
 });
 
 // AC3 (real-invoker contract) — the real Gemini invoker must emit a DISTINGUISHABLE signal when the model
