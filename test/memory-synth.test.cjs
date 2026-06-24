@@ -23,40 +23,65 @@ function tmp(prefix) {
 }
 
 // ── config parse + defaults ───────────────────────────────────────────────────
-// memory.config.json holds per-task {primary,fallback} of {engine,model}; defaults are
-// gemini/gemini-3.1-flash-lite primary, claude/claude-sonnet-4-6 fallback (the shipped default tiering).
+// memory.config.json holds per-task {primary,fallback} of {engine,model,thinkingBudget?,maxOutputTokens?};
+// the #59 defaults are handoff = gemini-3.1-flash-lite + thinkingBudget:0 (fast), dream = gemini-3.5-flash +
+// thinkingBudget:-1 + maxOutputTokens:8192 (reasoning on), both falling back to claude/claude-sonnet-4-6.
 
 test('loadConfig returns the default tiering when no memory.config.json is present', () => {
   const root = tmp('wrxn-synth-cfg-');
   const cfg = synth.loadConfig(root);
   const handoff = synth.resolveTask(cfg, 'handoff');
-  assert.deepEqual(handoff.primary, { engine: 'gemini', model: 'gemini-3.1-flash-lite' });
+  assert.deepEqual(handoff.primary, { engine: 'gemini', model: 'gemini-3.1-flash-lite', thinkingBudget: 0 });
   assert.deepEqual(handoff.fallback, { engine: 'claude', model: 'claude-sonnet-4-6' });
   const dream = synth.resolveTask(cfg, 'dream');
-  assert.deepEqual(dream.primary, { engine: 'gemini', model: 'gemini-3.1-flash-lite' });
+  assert.deepEqual(dream.primary, { engine: 'gemini', model: 'gemini-3.5-flash', thinkingBudget: -1, maxOutputTokens: 8192 });
   assert.deepEqual(dream.fallback, { engine: 'claude', model: 'claude-sonnet-4-6' });
 });
 
 test('loadConfig deep-merges a partial operator override over the defaults so every task still resolves both engines', () => {
   const root = tmp('wrxn-synth-cfg-merge-');
   fs.mkdirSync(path.join(root, '.wrxn'), { recursive: true });
-  // an operator overrides ONE field of ONE task — just the handoff primary model.
+  // an operator overrides just the handoff primary model, and sets explicit reasoning fields on dream primary.
   fs.writeFileSync(
     path.join(root, '.wrxn', 'memory.config.json'),
-    JSON.stringify({ tasks: { handoff: { primary: { model: 'gemini-3.1-pro' } } } }),
+    JSON.stringify({ tasks: { handoff: { primary: { model: 'gemini-3.1-pro' } }, dream: { primary: { thinkingBudget: 512, maxOutputTokens: 2048 } } } }),
   );
 
   const cfg = synth.loadConfig(root);
 
-  // the overridden field wins; the rest of that pair keeps its default (engine unchanged).
+  // the overridden field wins; the rest of that pair keeps its default — incl. the default thinkingBudget:0
+  // (the absent-field carry-through: a partial model override does NOT wipe the default reasoning fields, #59).
   const handoff = synth.resolveTask(cfg, 'handoff');
-  assert.deepEqual(handoff.primary, { engine: 'gemini', model: 'gemini-3.1-pro' }, 'override merges over the default primary');
+  assert.deepEqual(handoff.primary, { engine: 'gemini', model: 'gemini-3.1-pro', thinkingBudget: 0 }, 'override merges over the default primary; default thinkingBudget survives');
   assert.deepEqual(handoff.fallback, { engine: 'claude', model: 'claude-sonnet-4-6' }, 'the un-touched fallback survives');
 
-  // a task the operator never mentioned is still fully resolved from the defaults.
+  // an EXPLICIT operator thinkingBudget + maxOutputTokens carry through (loadConfig merges them), while the
+  // un-touched default model/engine survive the partial override.
   const dream = synth.resolveTask(cfg, 'dream');
-  assert.deepEqual(dream.primary, { engine: 'gemini', model: 'gemini-3.1-flash-lite' });
+  assert.deepEqual(dream.primary, { engine: 'gemini', model: 'gemini-3.5-flash', thinkingBudget: 512, maxOutputTokens: 2048 }, 'explicit reasoning fields carry through; default model/engine survive');
   assert.deepEqual(dream.fallback, { engine: 'claude', model: 'claude-sonnet-4-6' });
+});
+
+// ── #59: the shipped defaults turn dream reasoning ON (off the critical path) while handoff stays fast ──
+// handoff.primary stays gemini-3.1-flash-lite with thinkingBudget:0 (reasoning OFF — on the 180s hold path);
+// dream.primary becomes gemini-3.5-flash with thinkingBudget:-1 (dynamic reasoning) + maxOutputTokens:8192
+// (sized for reasoning + the ~4.3k-char dream JSON). Both fallbacks stay claude/claude-sonnet-4-6. The in-code
+// DEFAULTS and the SEEDED payload memory.config.json are kept in sync — fresh installs get exactly these.
+test('the #59 defaults ship handoff fast (reasoning off) + dream reasoning on, in DEFAULTS and the seeded config (#59)', () => {
+  const handoff = synth.resolveTask(synth.DEFAULTS, 'handoff');
+  assert.deepEqual(handoff.primary, { engine: 'gemini', model: 'gemini-3.1-flash-lite', thinkingBudget: 0 }, 'handoff stays fast: reasoning off');
+  assert.deepEqual(handoff.fallback, { engine: 'claude', model: 'claude-sonnet-4-6' });
+
+  const dream = synth.resolveTask(synth.DEFAULTS, 'dream');
+  assert.deepEqual(dream.primary, { engine: 'gemini', model: 'gemini-3.5-flash', thinkingBudget: -1, maxOutputTokens: 8192 }, 'dream reasons: dynamic budget + larger cap');
+  assert.deepEqual(dream.fallback, { engine: 'claude', model: 'claude-sonnet-4-6' });
+
+  // the seeded payload config is kept in sync with the in-code DEFAULTS (a fresh install gets these).
+  const seeded = JSON.parse(fs.readFileSync(path.join(PKG_ROOT, 'payload', '.wrxn', 'memory.config.json'), 'utf8'));
+  assert.deepEqual(seeded.tasks.handoff.primary, handoff.primary, 'seeded handoff.primary matches DEFAULTS');
+  assert.deepEqual(seeded.tasks.dream.primary, dream.primary, 'seeded dream.primary matches DEFAULTS');
+  assert.deepEqual(seeded.tasks.handoff.fallback, handoff.fallback, 'seeded handoff.fallback matches DEFAULTS');
+  assert.deepEqual(seeded.tasks.dream.fallback, dream.fallback, 'seeded dream.fallback matches DEFAULTS');
 });
 
 // ── transcript-blob builder ─────────────────────────────────────────────────────
@@ -354,7 +379,7 @@ test('the seeded payload memory.config.json parses to the default tiering', () =
   fs.mkdirSync(path.join(root, '.wrxn'), { recursive: true });
   fs.copyFileSync(seeded, path.join(root, '.wrxn', 'memory.config.json'));
   const handoff = synth.resolveTask(synth.loadConfig(root), 'handoff');
-  assert.deepEqual(handoff.primary, { engine: 'gemini', model: 'gemini-3.1-flash-lite' });
+  assert.deepEqual(handoff.primary, { engine: 'gemini', model: 'gemini-3.1-flash-lite', thinkingBudget: 0 });
   assert.deepEqual(handoff.fallback, { engine: 'claude', model: 'claude-sonnet-4-6' });
 });
 
@@ -509,26 +534,32 @@ test('synthesize retries without thinkingConfig when the model rejects it, and s
   assert.ok(!calls.some((c) => c.engine === 'claude'), 'the retry-without succeeded, so the claude fallback was never reached');
 });
 
-// AC1 — a thinking-default model returns USABLE output via synthesize(): with thinking disabled it emits a
-// COMPLETE handoff (starts **TL;DR) and a COMPLETE dream JSON the gate parses (parseProposals>0). The fake
-// encodes the live precondition — a thinking-default model only returns full output when thinkingBudget=0 was
-// sent (without it the answer truncates) — so this is red until buildGeminiSpec disables thinking by default.
-test('AC1: with thinking disabled, a thinking-default model yields a complete handoff and a parseable dream (#30)', async () => {
+// AC1 (#30) + #59 end-to-end — synthesize() yields USABLE output for BOTH tasks under the SHIPPED defaults:
+// handoff stays fast (thinkingBudget:0 disables thinking → a complete handoff that starts **TL;DR), and dream
+// REASONS (thinkingBudget:-1 + the larger maxOutputTokens:8192 cap → a complete dream JSON the gate parses).
+// The fake encodes the live precondition per task: a thinking-default model truncates unless its task's budget
+// + cap are exactly what #59 ships. Exercises config → runEngine → spec → parse for the real DEFAULTS.
+test('AC1/#59: under the shipped defaults the handoff (fast) and the dream (reasoning) both yield usable output', async () => {
   const handoff = '**TL;DR** shipped the engine fix; next is the rollout.';
   const dreamJson = JSON.stringify({ proposals: [{ kind: 'decision', tier: 'decisions', slug: 's', title: 'T', body: '# T', confidence: 0.9, evidence: [{ quote: 'a verbatim span here' }] }] });
   const gemini = (spec) => {
     const gc = spec.body.generationConfig;
-    const disabled = gc.thinkingConfig && gc.thinkingConfig.thinkingBudget === 0;
-    if (!disabled) return { ok: true, text: 'tiny' }; // a thinking-default model truncates when thinking is NOT disabled.
-    return { ok: true, text: spec.body.system_instruction.parts[0].text.includes('HANDOFF') ? handoff : dreamJson };
+    const isHandoff = spec.body.system_instruction.parts[0].text.includes('HANDOFF');
+    if (isHandoff) {
+      // handoff: a thinking-default model returns a full handoff only when thinking is DISABLED (budget 0).
+      return gc.thinkingConfig && gc.thinkingConfig.thinkingBudget === 0 ? { ok: true, text: handoff } : { ok: true, text: 'tiny' };
+    }
+    // dream: reasoning ON (budget -1) + the larger cap (≥8192) yields the full JSON; otherwise it truncates.
+    const reasons = gc.thinkingConfig && gc.thinkingConfig.thinkingBudget === -1 && gc.maxOutputTokens >= 8192;
+    return reasons ? { ok: true, text: dreamJson } : { ok: true, text: 'tiny' };
   };
   const { invoke } = fakeInvoke({ gemini });
 
   const h = await synth.synthesize({ task: 'handoff', prompt: synth.PROMPTS.handoff, blob: 'B', config: DEFAULT_CFG, apiKey: 'KEY', invoke, sleep: noSleep });
-  assert.ok(h.startsWith('**TL;DR'), 'the handoff is complete and starts at the TL;DR (thinking was disabled)');
+  assert.ok(h.startsWith('**TL;DR'), 'the handoff is complete and starts at the TL;DR (thinking disabled, fast path)');
 
   const d = await synth.synthesize({ task: 'dream', prompt: synth.PROMPTS.dream, blob: 'B', config: DEFAULT_CFG, apiKey: 'KEY', invoke, sleep: noSleep });
-  assert.ok(synth.parseProposals(d).length > 0, 'the dream output is complete and parses to ≥1 proposal (no truncation)');
+  assert.ok(synth.parseProposals(d).length > 0, 'the dream output is complete and parses to ≥1 proposal (reasoning on, larger cap)');
 });
 
 // ── #59: the per-engine reasoning config flows config → runEngine → the gemini spec ──

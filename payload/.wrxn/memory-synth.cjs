@@ -24,19 +24,28 @@ const path = require('path');
 const https = require('https');
 const { spawnSync } = require('child_process');
 
-// ── default tiering (PRD) ──────────────────────────────────────────────────────
-// handoff + dream default to gemini/gemini-3.1-flash-lite, falling back to claude/claude-sonnet-4-6.
-// The seeded memory.config.json is this object serialized; an operator edits it and `wrxn update`
-// preserves it (seeded class). Claude stays the fallback so a keyless fresh install still writes a
-// baton via the operator's CLI auth (no GEMINI_API_KEY → gemini gated → claude carries it).
+// ── default tiering (PRD + #59) ────────────────────────────────────────────────
+// handoff stays FAST — gemini-3.1-flash-lite with thinkingBudget:0 (reasoning OFF), because handoff is on the
+// 180s session-start hold path. dream REASONS — gemini-3.5-flash with thinkingBudget:-1 (dynamic, the model
+// decides) + maxOutputTokens:8192 (sized for reasoning + the ~4.3k-char dream JSON so it can't truncate),
+// because dream runs off the critical path where quality matters. Both fall back to claude/claude-sonnet-4-6.
+// The seeded memory.config.json is DEFAULTS serialized; an operator edits it and `wrxn update` preserves it
+// (seeded class), so EXISTING installs keep their config and only FRESH installs get these defaults (no
+// migration). Claude stays the fallback so a keyless fresh install still writes a baton via the operator's CLI
+// auth (no GEMINI_API_KEY → gemini gated → claude carries it). thinkingBudget: 0 off / -1 dynamic / N>0 bounded.
+// DEFAULT_TASK is the conservative per-task default for any task NOT named in DEFAULTS.tasks (reasoning off,
+// preserving #30's safe default); handoff + dream pin their own tiering below.
 const DEFAULT_TASK = {
-  primary: { engine: 'gemini', model: 'gemini-3.1-flash-lite' },
+  primary: { engine: 'gemini', model: 'gemini-3.1-flash-lite', thinkingBudget: 0 },
   fallback: { engine: 'claude', model: 'claude-sonnet-4-6' },
 };
 const DEFAULTS = {
   tasks: {
     handoff: clone(DEFAULT_TASK),
-    dream: clone(DEFAULT_TASK),
+    dream: {
+      primary: { engine: 'gemini', model: 'gemini-3.5-flash', thinkingBudget: -1, maxOutputTokens: 8192 },
+      fallback: { engine: 'claude', model: 'claude-sonnet-4-6' },
+    },
   },
 };
 
