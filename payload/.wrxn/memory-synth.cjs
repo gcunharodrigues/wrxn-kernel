@@ -24,19 +24,28 @@ const path = require('path');
 const https = require('https');
 const { spawnSync } = require('child_process');
 
-// ── default tiering (PRD) ──────────────────────────────────────────────────────
-// handoff + dream default to gemini/gemini-3.1-flash-lite, falling back to claude/claude-sonnet-4-6.
-// The seeded memory.config.json is this object serialized; an operator edits it and `wrxn update`
-// preserves it (seeded class). Claude stays the fallback so a keyless fresh install still writes a
-// baton via the operator's CLI auth (no GEMINI_API_KEY → gemini gated → claude carries it).
+// ── default tiering (PRD + #59) ────────────────────────────────────────────────
+// handoff stays FAST — gemini-3.1-flash-lite with thinkingBudget:0 (reasoning OFF), because handoff is on the
+// 180s session-start hold path. dream REASONS — gemini-3.5-flash with thinkingBudget:-1 (dynamic, the model
+// decides) + maxOutputTokens:8192 (sized for reasoning + the ~4.3k-char dream JSON so it can't truncate),
+// because dream runs off the critical path where quality matters. Both fall back to claude/claude-sonnet-4-6.
+// The seeded memory.config.json is DEFAULTS serialized; an operator edits it and `wrxn update` preserves it
+// (seeded class), so EXISTING installs keep their config and only FRESH installs get these defaults (no
+// migration). Claude stays the fallback so a keyless fresh install still writes a baton via the operator's CLI
+// auth (no GEMINI_API_KEY → gemini gated → claude carries it). thinkingBudget: 0 off / -1 dynamic / N>0 bounded.
+// DEFAULT_TASK is the conservative per-task default for any task NOT named in DEFAULTS.tasks (reasoning off,
+// preserving #30's safe default); handoff + dream pin their own tiering below.
 const DEFAULT_TASK = {
-  primary: { engine: 'gemini', model: 'gemini-3.1-flash-lite' },
+  primary: { engine: 'gemini', model: 'gemini-3.1-flash-lite', thinkingBudget: 0 },
   fallback: { engine: 'claude', model: 'claude-sonnet-4-6' },
 };
 const DEFAULTS = {
   tasks: {
     handoff: clone(DEFAULT_TASK),
-    dream: clone(DEFAULT_TASK),
+    dream: {
+      primary: { engine: 'gemini', model: 'gemini-3.5-flash', thinkingBudget: -1, maxOutputTokens: 8192 },
+      fallback: { engine: 'claude', model: 'claude-sonnet-4-6' },
+    },
   },
 };
 
@@ -272,15 +281,17 @@ function buildClaudeSpec({ model, prompt, blob }) {
  * `x-goog-api-key` header, the task prompt as `system_instruction` and the blob as user content
  * (mirrors the proven aimem-handoff-synth call). PURE.
  *
- * `thinking` controls the `generationConfig.thinkingConfig` directive (#30): when true (default) the spec
- * carries `{ thinkingBudget: 0 }`, which DISABLES model-side thinking on thinking-default models (a verified
- * HTTP-200 no-op on non-thinking models) so reasoning tokens never consume the output budget and the answer
- * is never split into a dropped `thought` part. Pass `false` to OMIT the directive — the AC3 retry path for
- * forced-thinking models (gemma-class) that reject thinkingConfig with an HTTP 400.
+ * `thinkingBudget` is the PER-ENGINE reasoning directive (#59, generalizing #30): a NUMBER sets
+ * `generationConfig.thinkingConfig = { thinkingBudget }` — `0` disables model-side thinking (a verified
+ * HTTP-200 no-op on non-thinking models), `-1` lets the model decide (dynamic), `N>0` bounds it to N thinking
+ * tokens. An ABSENT budget defaults to `0` (preserves #30's safe default). An explicit `null` OMITS
+ * thinkingConfig entirely — the AC3 retry path for forced-thinking models (gemma-class) that reject the
+ * directive with an HTTP 400. `maxOutputTokens` is the per-engine output cap (default GEMINI_MAX_OUTPUT_TOKENS).
  */
-function buildGeminiSpec({ model, prompt, blob, apiKey, thinking = true }) {
-  const generationConfig = { temperature: 0.2, maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS };
-  if (thinking) generationConfig.thinkingConfig = { thinkingBudget: 0 };
+function buildGeminiSpec({ model, prompt, blob, apiKey, thinkingBudget = 0, maxOutputTokens = GEMINI_MAX_OUTPUT_TOKENS }) {
+  const generationConfig = { temperature: 0.2, maxOutputTokens };
+  // a NUMBER (incl. 0 and -1) sets the directive; an explicit `null` OMITS it (the AC3 retry-without path).
+  if (thinkingBudget !== null) generationConfig.thinkingConfig = { thinkingBudget };
   return {
     engine: 'gemini',
     method: 'POST',
@@ -450,11 +461,12 @@ async function runEngine(engine, { prompt, blob, apiKey, invoke, sleep = default
     callOnce = () => invoke(spec);
   } else if (engine.engine === 'gemini') {
     if (!apiKey) return { text: null, attempts: 0 }; // missing key fails this engine (→ fallback / null), no request, no retry.
+    const { thinkingBudget, maxOutputTokens } = engine; // per-engine reasoning config (#59); absent → buildGeminiSpec defaults (0 / 4096).
     callOnce = async () => {
-      const r = await invoke(buildGeminiSpec({ model: engine.model, prompt, blob, apiKey, thinking: true }));
+      const r = await invoke(buildGeminiSpec({ model: engine.model, prompt, blob, apiKey, thinkingBudget, maxOutputTokens }));
       if (r && r.thinkingUnsupported) {
-        // this model rejects the thinkingConfig directive (forced-thinking / gemma-class) — retry once without it.
-        return invoke(buildGeminiSpec({ model: engine.model, prompt, blob, apiKey, thinking: false }));
+        // this model rejects the thinkingConfig directive (forced-thinking / gemma-class) — retry once without it (same cap).
+        return invoke(buildGeminiSpec({ model: engine.model, prompt, blob, apiKey, thinkingBudget: null, maxOutputTokens }));
       }
       return r;
     };
