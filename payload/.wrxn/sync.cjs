@@ -264,11 +264,20 @@ async function driftFromDoor(root, { transport, timeoutMs } = {}) {
 // no shared kernel-lib import), exactly as findInstallRoot/flag/fail are duplicated across these files.
 // CASE-SENSITIVE: the token shapes are case-specific.
 const SECRET_PATTERNS = [
-  /AKIA[0-9A-Z]{16}/,                    // AWS access key id
-  /gh[pousr]_[A-Za-z0-9]{36}/,           // GitHub token (ghp_/gho_/ghu_/ghs_/ghr_)
-  /npm_[A-Za-z0-9]{36}/,                 // npm automation token
-  /sk-[A-Za-z0-9]{20,}/,                 // OpenAI-style secret key
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----/,  // PEM private-key header
+  /AKIA[0-9A-Z]{16}/, // AWS access key id
+  /gh[pousr]_[A-Za-z0-9]{20,}/, // GitHub token (ghp_/gho_/ghu_/ghs_/ghr_); {20,} covers the 36-char + CI forms
+  /github_pat_[A-Za-z0-9_]{22,}/, // GitHub fine-grained PAT
+  /xox[baprs]-[A-Za-z0-9-]{10,}/, // Slack token
+  /sk-[A-Za-z0-9]{20,}/, // OpenAI-style secret key
+  /sk-proj-[A-Za-z0-9_-]{20,}/, // OpenAI project-scoped key (underscore form sk-… misses)
+  /AIza[0-9A-Za-z._-]{10,}/, // Google / Gemini API key
+  /sk_(?:live|test)_[A-Za-z0-9]{20,}/, // Stripe live/test secret key
+  /npm_[A-Za-z0-9]{20,}/, // npm publish / automation token
+  /ey[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{3,}/, // JWT (incl. Bearer payloads); the eyJ… header gates it
+  /-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z ]+ )?PRIVATE KEY-----/, // PEM block (FULL — must precede the header fallback so redaction eats the body)
+  /-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----/, // PEM header (fallback: a lone/truncated header with no END)
+  /Bearer\s+[A-Za-z0-9._~+/=-]{20,}/, // opaque Bearer token (non-JWT)
+  /[A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD)\s*[:=]\s*\S+/i, // KEY/TOKEN/SECRET/PASSWORD = value
 ];
 
 function secretScan(text) {

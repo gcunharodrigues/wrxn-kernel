@@ -257,6 +257,14 @@ test('redactSecrets resolves the issue-06 npm-token repro (bare + Bearer-wrapped
   assert.doesNotMatch(wrapped, /npm_[A-Za-z0-9]{20}/, 'the Bearer-wrapped npm token from the repro is redacted');
 });
 
+// #39: redaction joins the one canonical set — a lone/truncated PEM header (no END) is now scrubbed too
+// (the full-block shape alone left a headerless key exposed). Coverage rises, never falls.
+test('redactSecrets scrubs a lone PEM private-key header with no END (#39 canonical fallback)', () => {
+  const out = synth.redactSecrets('the file has -----BEGIN OPENSSH PRIVATE KEY-----');
+  assert.doesNotMatch(out, /BEGIN OPENSSH PRIVATE KEY/, 'the lone header is redacted');
+  assert.match(out, /\[REDACTED\]/, 'the redaction is marked');
+});
+
 test('runHandoff redacts secrets from the synthesized handoff before writing the baton', async () => {
   const root = tmp('wrxn-handoff-redact-');
   stageSession(root, REAL_SESSION);

@@ -172,3 +172,69 @@ test('each self-contained adapter imports node stdlib or a co-located payload si
     }
   }
 });
+
+// ── #39 · the ONE canonical secret-pattern set, drift-pinned across every copy ──────────────
+// #39 consolidated the drifted SECRET_PATTERNS copies (three coverage levels) into a single canonical set.
+// The .wrxn detection adapters (dream/sync/harvest) and the memory-synth redactor carry it as
+// `const SECRET_PATTERNS = [ … ]`; the hooks-layer sidecar — which CANNOT import a .wrxn sibling (the
+// self-contained cross-layer doctrine) — replicates the set as `SECRET_PATTERNS_CANON`. This pins all five
+// copies BYTE-IDENTICAL: a future edit that broadens/narrows one shape in one file fails the build here,
+// so "drifted stale copies" becomes "one test-pinned set". (Same TEXT-slice idiom as AC1 — these arrays
+// are unexported, so we compare source text, not required values.)
+const CANON_SITES = {
+  dream: { file: path.join(PAYLOAD, '.wrxn', 'dream.cjs'), name: 'SECRET_PATTERNS' },
+  sync: { file: path.join(PAYLOAD, '.wrxn', 'sync.cjs'), name: 'SECRET_PATTERNS' },
+  harvest: { file: path.join(PAYLOAD, '.wrxn', 'harvest.cjs'), name: 'SECRET_PATTERNS' },
+  memorySynth: { file: path.join(PAYLOAD, '.wrxn', 'memory-synth.cjs'), name: 'SECRET_PATTERNS' },
+  sidecar: { file: path.join(PAYLOAD, '.claude', 'hooks', 'sidecar.cjs'), name: 'SECRET_PATTERNS_CANON' },
+};
+
+// Slice the `[ … ]` body of `const <name> = [` through the first column-0 `\n];` (indent-anchored, like
+// sliceSecretPatterns). Returns from '[' to '];' so the const NAME is excluded (sidecar names its copy
+// SECRET_PATTERNS_CANON) while every regex literal + comment is compared verbatim.
+function sliceArrayBody(src, name) {
+  const start = src.indexOf(`const ${name} = [`);
+  if (start === -1) return null;
+  const from = src.indexOf('[', start);
+  const m = /^[\s\S]*?\n\];/.exec(src.slice(from));
+  return m ? m[0] : null;
+}
+
+test('#39 the canonical SECRET_PATTERNS set is byte-identical across dream/sync/harvest/memory-synth/sidecar', () => {
+  const ref = sliceArrayBody(fs.readFileSync(CANON_SITES.dream.file, 'utf8'), CANON_SITES.dream.name);
+  assert.ok(ref && ref.includes('AKIA') && ref.includes('xox[baprs]') && ref.includes('PRIVATE KEY'), 'the canonical block is found in dream.cjs');
+  for (const [site, { file, name }] of Object.entries(CANON_SITES)) {
+    const got = sliceArrayBody(fs.readFileSync(file, 'utf8'), name);
+    assert.ok(got, `${site}: the canonical block (const ${name} = [ … ]) was not found`);
+    assert.equal(
+      got,
+      ref,
+      `${site}: its canonical secret-pattern copy has DRIFTED from dream.cjs — the #39 set is intentionally byte-identical; re-sync the copy`
+    );
+  }
+});
+
+test('#39 the PEM full-block shape precedes the header-only fallback (redaction must eat the key body)', () => {
+  const ref = sliceArrayBody(fs.readFileSync(CANON_SITES.dream.file, 'utf8'), 'SECRET_PATTERNS');
+  const full = ref.indexOf('-----END'); // only the FULL-block shape carries an END boundary
+  const headerOnly = ref.indexOf('/-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----/,'); // the lone-header fallback line
+  assert.ok(full !== -1 && headerOnly !== -1, 'both PEM shapes are present');
+  assert.ok(full < headerOnly, 'the FULL PEM block must appear BEFORE the header-only fallback so redaction consumes the body, not just the header');
+});
+
+test('#39 detection stays non-global; the redaction sites derive the g-flagged form from the one set', () => {
+  // the canonical base carries no global flag (detection .test is stateless over it) — the byte-identical
+  // pin already locks that; here we assert the two redaction sites DERIVE the global clone from it, so a
+  // shape can never be detected-but-not-redacted (or vice-versa).
+  for (const f of [CANON_SITES.memorySynth.file, CANON_SITES.sidecar.file]) {
+    assert.ok(
+      fs.readFileSync(f, 'utf8').includes("re.flags.includes('g')"),
+      `${f}: must derive the global redaction form from the canonical set (preserving each shape's own flags)`
+    );
+  }
+  // sidecar keeps its broader hooks-layer extras ON TOP of the pinned core, so the cross-layer copy never
+  // weakens (no pre-existing match lost) while the shared 14 stay drift-pinned.
+  const sc = fs.readFileSync(CANON_SITES.sidecar.file, 'utf8');
+  assert.ok(sc.includes('const SIDECAR_EXTRA = ['), 'sidecar declares its layer-specific extras');
+  assert.ok(sc.includes('[...SECRET_PATTERNS_CANON, ...SIDECAR_EXTRA]'), 'sidecar composes the pinned core + its extras');
+});

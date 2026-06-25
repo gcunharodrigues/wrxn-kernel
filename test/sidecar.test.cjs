@@ -154,6 +154,22 @@ test('redactSecrets leaves secret-free text byte-identical and coerces non-strin
   assert.equal(sidecar.redactSecrets(undefined), '', 'undefined → empty string');
 });
 
+// #39: sidecar adopts the ONE canonical set — it gains the vendor shapes it lacked (Slack / Google /
+// Stripe / GitHub-PAT / OpenAI-project), on TOP of its own broader extras (kept, asserted elsewhere).
+test('secretScan + redactSecrets gain the consolidated canonical shapes sidecar lacked (#39)', () => {
+  const cases = [
+    'xoxb-1234567890-abcdefABCDEF0987',
+    'AIzaSyA1B2C3D4E5F6G7H8I9J0kLmNoPqRsTu',
+    'sk_live_0123456789abcdefghijABCDEFGHIJ',
+    'github_pat_11ABCDEFG0abcdefghijkl_AbCdEf1234567890AbCdEf1234567890',
+    'sk-proj-0123456789abcdef_ABCDEFGHIJ-klmno',
+  ];
+  for (const s of cases) {
+    assert.equal(sidecar.secretScan(s), 'contains_secret', `gate flags: ${s}`);
+    assert.ok(!sidecar.redactSecrets(`x ${s} y`).includes(s), `redacted: ${s}`);
+  }
+});
+
 // ── #38 F2: broaden redaction to common secret shapes the 5-pattern set missed ──────────
 // C2 is the slice that newly persists RAW prompt text (emit-event.cjs → .wrxn/events/<sid>.jsonl), so
 // redaction must also scrub bearer tokens, password=/pwd= assignments, URI connection strings with inline

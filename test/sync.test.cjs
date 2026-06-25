@@ -386,6 +386,20 @@ test('secretScan: flags an AWS key, passes clean prose (AC4 primitive, reused fr
   assert.equal(sync.secretScan('# Notes\n\nplain reconciling prose, no secrets'), null);
 });
 
+// #39: the .wrxn detection set rises to the full canonical union — vendor shapes the stale 5-pattern
+// set missed (Slack / Google / Stripe / GitHub-PAT / OpenAI-project / JWT) must now be flagged.
+test('secretScan: flags the consolidated canonical shapes the stale set missed (#39)', () => {
+  const cases = [
+    'slack token xoxb-1234567890-abcdefABCDEF0987 here',
+    'google key AIzaSyA1B2C3D4E5F6G7H8I9J0kLmNoPqRsTu here',
+    'stripe sk_live_0123456789abcdefghijABCDEFGHIJ here',
+    'github_pat_11ABCDEFG0abcdefghijkl_AbCdEf1234567890AbCdEf1234567890 here',
+    'openai sk-proj-0123456789abcdef_ABCDEFGHIJ-klmno here',
+    'jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.dummysignature here',
+  ];
+  for (const s of cases) assert.equal(sync.secretScan(s), 'contains_secret', `must flag: ${s}`);
+});
+
 test('proposalHash: deterministic for the same content, changes when the body changes (integrity primitive)', () => {
   const a = sync.proposalHash({ doc: 'd', current: 'c', body: 'B' });
   assert.equal(a, sync.proposalHash({ doc: 'd', current: 'c', body: 'B' }), 'same content → same hash');
