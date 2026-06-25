@@ -43,7 +43,7 @@ const SIDECAR_EXTRA = [
   // OR bare (password=) — never a lone trailing quote, so a path ending in "passwd" used as a JSON key
   // (e.g. "../../etc/passwd": …) is NOT misread as an assignment (it would falsely refuse a sidecar write).
   /(?:["'](?:password|passwd|pwd)["']|(?:password|passwd|pwd))\s*[:=]\s*["']?[^\s"',;)&}{]+/i,
-  /[a-z][a-z0-9+.\-]+:\/\/[^\s:/@]+:[^\s/@]+@\S+/i, // URI connection string with inline creds (scheme://user:pass@host)
+  /[a-z][a-z0-9+.\-]{1,19}:\/\/[^\s:/@]+:[^\s/@]+@\S+/i, // URI connection string with inline creds (scheme://user:pass@host); scheme bounded {1,19} so a long letter-run fails fast — no O(n²) backtrack (#66)
   /eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}/, // JWT (eyJ header; shorter min than the canonical JWT)
 ];
 const SECRET_PATTERNS = [...SECRET_PATTERNS_CANON, ...SIDECAR_EXTRA];
