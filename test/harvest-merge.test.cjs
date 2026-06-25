@@ -28,6 +28,7 @@ const { init } = require('../lib/install.cjs');
 
 const HARVEST_REL = '.wrxn/harvest.cjs';
 const harvest = require('../payload/.wrxn/harvest.cjs');
+const fake = require('./helpers/fake-secrets.cjs'); // runtime-assembled secret-shaped fixtures (#70)
 
 function tmp(prefix) {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -142,7 +143,7 @@ test('mergeHash: deterministic, order-independent on absorbed, changes when the 
 // ── PURE: secretScan (reused from dream/sync) + composeSurvivor (the merged_from stamp) ──
 
 test('secretScan: flags an AWS key, passes clean prose', () => {
-  assert.equal(harvest.secretScan('# Notes\n\nthe key is AKIAIOSFODNN7EXAMPLE'), 'contains_secret');
+  assert.equal(harvest.secretScan('# Notes\n\nthe key is ' + fake.aws()), 'contains_secret');
   assert.equal(harvest.secretScan('# Notes\n\nplain merged prose'), null);
 });
 
@@ -191,7 +192,7 @@ test('stage (AC1): a survivor body containing a secret is REFUSED before staging
   const t = freshInstall('wrxn-harvest-merge-stage-secret-');
   plantCluster(t);
   let err;
-  try { runCli(t, ['stage', writeJson(t, 'p.json', mergeProposal({ body: '# Widget\n\ntoken AKIAIOSFODNN7EXAMPLE leaked' }))]); } catch (e) { err = e; }
+  try { runCli(t, ['stage', writeJson(t, 'p.json', mergeProposal({ body: '# Widget\n\ntoken ' + fake.aws() + ' leaked' }))]); } catch (e) { err = e; }
   assert.ok(err, 'stage exited non-zero on a secret');
   assert.match(String(err.stderr || ''), /credential|secret/i);
   assert.ok(!fs.existsSync(path.join(t, '.wrxn', 'harvest', 'staged.jsonl')), 'nothing staged');
@@ -336,7 +337,7 @@ test('AC2 secret re-scan: a seeded staged record carrying a secret (valid hash) 
   plantCluster(t);
   const survRel = '.wrxn/wiki/concepts/widget-pagination.md';
   const absorbed = ['.wrxn/wiki/concepts/alpha.md', '.wrxn/wiki/concepts/beta.md'];
-  const body = '# Widget\n\ntoken AKIAIOSFODNN7EXAMPLE slipped into the survivor';
+  const body = '# Widget\n\ntoken ' + fake.aws() + ' slipped into the survivor';
   seedStaged(t, [{ ts: 'x', op: 'stage', survivor: survRel, tier: 'concepts', slug: 'widget-pagination', description: '', body, absorbed, hash: harvest.mergeHash({ survivor: survRel, description: '', body, absorbed }) }]);
 
   const out = commit(t, [survRel]);
