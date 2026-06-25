@@ -95,7 +95,11 @@ function wikilinkTargets(body) {
   const out = new Set();
   const re = /\[\[([^\]\[]+)\]\]/g;
   let m;
-  const scannable = stripFencedCode(body); // code-block [[slug]] is illustrative, not navigable (#28)
+  // Strip fenced regions, THEN inline code spans (`…`): a [[slug]] in either is illustrative example syntax,
+  // not a navigable link, so it must not be checked for a dead target (#28). The inline pass uses disjoint
+  // adjacent classes (`+ / [^`\n] / `+) so it stays linear — no backtracking, per this file's ReDoS discipline;
+  // `\n` in the class keeps a span single-line so a stray backtick can't swallow real prose links below it.
+  const scannable = stripFencedCode(body).replace(/`+[^`\n]*`+/g, '');
   while ((m = re.exec(scannable))) {
     const slug = m[1].split('|')[0].split('#')[0].trim();
     if (slug) out.add(slug);
