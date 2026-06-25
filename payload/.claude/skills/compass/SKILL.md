@@ -84,7 +84,7 @@ build-time guard.
 
 ```buckets
 dev-pipeline: grill-me, grill-with-docs, tech-search, prototype, to-prd, to-issues, triage, tdd, qa-walk, diagnose, resolving-merge-conflicts, improve-codebase-architecture
-knowledge: dream, harvest, sync, ingest, memory
+knowledge: dream, harvest, sync, ingest, memory, chat-search
 setup-health: onboard, audit, level-up, setup-matt-pocock-skills, synapse
 meta: write-a-skill, write-an-agent, skill-creator, compass
 cross-session: handoff
@@ -93,7 +93,7 @@ cross-session: handoff
 - **dev-pipeline** — the four-phase build flow and its engineering activities (grill → research →
   prototype → PRD → issues → verticality → tdd → review → security → qa-walk → diagnose / refactor).
 - **knowledge** — the Brain / wiki memory lifecycle: consolidate (dream), curate (harvest), drift (sync),
-  distill sources (ingest), the wiki adapter (memory).
+  distill sources (ingest), the wiki adapter (memory), on-demand conversational-log retrieval (chat-search).
 - **setup-health** — install setup, configuration, and health: onboard, audit, level-up, the
   issue-tracker/domain block (setup-matt-pocock-skills), the SYNAPSE engine (synapse).
 - **meta** — authoring the OS's own extensions: skills (write-a-skill), agents (write-an-agent), the
