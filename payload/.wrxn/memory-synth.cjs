@@ -672,21 +672,30 @@ function stripPreamble(text) {
 // becomes the durable baton. Pattern-based (high-signal vendor token shapes, JWTs incl. Bearer
 // payloads, and `KEY/TOKEN/SECRET/PASSWORD=value` assignments); each match → `[REDACTED]`. Conservative
 // by design: it never rewrites ordinary prose, only well-known credential shapes.
-const REDACTIONS = [
-  /\bAKIA[0-9A-Z]{16}\b/g, // AWS access key id
-  /\bgh[pousr]_[A-Za-z0-9]{20,}\b/g, // GitHub PAT / OAuth / refresh / server tokens
-  /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g, // Slack tokens
-  /\bsk-[A-Za-z0-9]{20,}\b/g, // OpenAI-style secret keys
-  /\bAIza[0-9A-Za-z._-]{10,}\b/g, // Google / Gemini API keys
-  /\bey[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{3,}\b/g, // JWTs (incl. Bearer payloads): the discriminating `eyJ…` header gates it
-  /\bnpm_[A-Za-z0-9]{20,}\b/g, // npm publish / automation tokens (≥20 covers the 36-char granular form + variable-length CI tokens)
-  /\bgithub_pat_[A-Za-z0-9_]{22,}\b/g, // GitHub fine-grained PATs
-  /\bsk_(?:live|test)_[A-Za-z0-9]{20,}\b/g, // Stripe live/test secret keys
-  /\bsk-proj-[A-Za-z0-9_-]{20,}\b/g, // OpenAI project-scoped keys (underscore form not caught by sk-…)
-  /-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z ]+ )?PRIVATE KEY-----/g, // PEM private-key blocks
-  /\bBearer\s+[A-Za-z0-9._~+/=-]{20,}/g, // opaque Bearer tokens (non-JWT)
-  /\b[A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD)\b\s*[:=]\s*\S+/gi, // KEY/TOKEN/SECRET = value
+// The ONE canonical secret-shape set — drift-pinned byte-identical to the dream / sync / harvest copies
+// by adapter-drift-guard.test.cjs. Non-global base: redaction derives a g-flagged clone below. (Dropping
+// the older inline \b boundaries is deliberate and fail-safe — a redactor erring broader never under-scrubs.)
+const SECRET_PATTERNS = [
+  /AKIA[0-9A-Z]{16}/, // AWS access key id
+  /gh[pousr]_[A-Za-z0-9]{20,}/, // GitHub token (ghp_/gho_/ghu_/ghs_/ghr_); {20,} covers the 36-char + CI forms
+  /github_pat_[A-Za-z0-9_]{22,}/, // GitHub fine-grained PAT
+  /xox[baprs]-[A-Za-z0-9-]{10,}/, // Slack token
+  /sk-[A-Za-z0-9]{20,}/, // OpenAI-style secret key
+  /sk-proj-[A-Za-z0-9_-]{20,}/, // OpenAI project-scoped key (underscore form sk-… misses)
+  /AIza[0-9A-Za-z._-]{10,}/, // Google / Gemini API key
+  /sk_(?:live|test)_[A-Za-z0-9]{20,}/, // Stripe live/test secret key
+  /npm_[A-Za-z0-9]{20,}/, // npm publish / automation token
+  /\bey[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{3,}\b/, // JWT (incl. Bearer payloads); the eyJ… header gates it
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/, // PEM block (FULL — must precede the header fallback so redaction eats the body)
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----/, // PEM header (fallback: a lone/truncated header with no END)
+  /Bearer\s+[A-Za-z0-9._~+/=-]{20,}/, // opaque Bearer token (non-JWT)
+  /\b[A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD)\b\s*[:=]\s*\S+/i, // KEY/TOKEN/SECRET/PASSWORD = value
 ];
+
+// Redaction form: every shape made global so EVERY occurrence on a line is scrubbed (not just the first).
+// Each clone PRESERVES its own flags (e.g. the /i assignment shape) and only ADDS g — so detection and
+// redaction never diverge. String#replace resets a global regex's lastIndex per call → reuse is safe.
+const REDACTIONS = SECRET_PATTERNS.map((re) => new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g'));
 
 /**
  * Redact common secret shapes from `text`, replacing each match with `[REDACTED]`. PURE. Ordinary prose

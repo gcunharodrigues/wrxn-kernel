@@ -154,6 +154,48 @@ test('redactSecrets leaves secret-free text byte-identical and coerces non-strin
   assert.equal(sidecar.redactSecrets(undefined), '', 'undefined → empty string');
 });
 
+// #39: sidecar adopts the ONE canonical set — it gains the vendor shapes it lacked (Slack / Google /
+// Stripe / GitHub-PAT / OpenAI-project), on TOP of its own broader extras (kept, asserted elsewhere).
+test('secretScan + redactSecrets gain the consolidated canonical shapes sidecar lacked (#39)', () => {
+  const cases = [
+    'xoxb-1234567890-abcdefABCDEF0987',
+    'AIzaSyA1B2C3D4E5F6G7H8I9J0kLmNoPqRsTu',
+    'sk_live_0123456789abcdefghijABCDEFGHIJ',
+    'github_pat_11ABCDEFG0abcdefghijkl_AbCdEf1234567890AbCdEf1234567890',
+    'sk-proj-0123456789abcdef_ABCDEFGHIJ-klmno',
+  ];
+  for (const s of cases) {
+    assert.equal(sidecar.secretScan(s), 'contains_secret', `gate flags: ${s}`);
+    assert.ok(!sidecar.redactSecrets(`x ${s} y`).includes(s), `redacted: ${s}`);
+  }
+});
+
+// #39 security MEDIUM: the canonical assignment shape (#14) must keep its leading \b — dropping it made
+// it QUADRATIC (~12.7s @100k word chars), reachable through the uncapped raw-prompt sink
+// emit-event.cjs → sidecar.redactSecrets. A pathological 100k run of '_' isolates the canonical
+// assignment shape — '_' is in its [A-Za-z0-9_] class but matches no other canonical shape nor any
+// sidecar extra — so this guards #14 specifically and must complete fast, never hang.
+test('redactSecrets handles the assignment-shape pathological run in linear time (#39 ReDoS guard)', () => {
+  const pathological = '_'.repeat(100000);
+  const t = process.hrtime.bigint();
+  sidecar.redactSecrets(pathological);
+  const elapsedMs = Number(process.hrtime.bigint() - t) / 1e6;
+  assert.ok(elapsedMs < 1000, `the assignment shape over 100k word chars must stay linear (ReDoS guard); took ${elapsedMs.toFixed(0)}ms`);
+});
+
+// #39 security LOW: the PEM label was narrowed from [A-Z ]* to (?:[A-Z ]+ )?, which stops matching a
+// malformed double-space label. AC1 says no existing match may weaken — the broadest [A-Z ]* form must
+// still flag every standard descriptor AND the malformed double-space / unlabeled forms.
+test('secretScan flags every PEM private-key label incl. malformed double-space (#39 no narrowing)', () => {
+  // each entry is the label segment that follows "-----BEGIN " (with its trailing space); '' = unlabeled
+  // (PKCS#8), ' ' = the malformed DOUBLE-space the narrowed (?:[A-Z ]+ )? form stopped matching.
+  const labelSegments = ['RSA ', 'DSA ', 'EC ', 'OPENSSH ', 'PGP ', 'ENCRYPTED ', '', ' '];
+  for (const seg of labelSegments) {
+    const header = `-----BEGIN ${seg}PRIVATE KEY-----`;
+    assert.equal(sidecar.secretScan(header), 'contains_secret', `must flag PEM header: ${JSON.stringify(header)}`);
+  }
+});
+
 // ── #38 F2: broaden redaction to common secret shapes the 5-pattern set missed ──────────
 // C2 is the slice that newly persists RAW prompt text (emit-event.cjs → .wrxn/events/<sid>.jsonl), so
 // redaction must also scrub bearer tokens, password=/pwd= assignments, URI connection strings with inline

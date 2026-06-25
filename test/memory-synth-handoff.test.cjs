@@ -294,6 +294,26 @@ test('redactSecrets resolves the issue-06 npm-token repro (bare + Bearer-wrapped
   assert.doesNotMatch(wrapped, /npm_[A-Za-z0-9]{20}/, 'the Bearer-wrapped npm token from the repro is redacted');
 });
 
+// #39: redaction joins the one canonical set — a lone/truncated PEM header (no END) is now scrubbed too
+// (the full-block shape alone left a headerless key exposed). Coverage rises, never falls.
+test('redactSecrets scrubs a lone PEM private-key header with no END (#39 canonical fallback)', () => {
+  const out = synth.redactSecrets('the file has -----BEGIN OPENSSH PRIVATE KEY-----');
+  assert.doesNotMatch(out, /BEGIN OPENSSH PRIVATE KEY/, 'the lone header is redacted');
+  assert.match(out, /\[REDACTED\]/, 'the redaction is marked');
+});
+
+// #39 security MEDIUM: the canonical JWT shape (#10) must keep its leading \b too — dropping it made
+// the redactor QUADRATIC on a repeated "ey" run, the same ReDoS class as the assignment shape and
+// reachable through the same uncapped transcript-blob sink. memory-synth carries the canonical set with
+// NO sidecar-only extras, so this isolates the JWT shape. A 100k-char pathological run completes fast.
+test('redactSecrets is linear on a pathological repeated-"ey" run (#39 JWT ReDoS guard)', () => {
+  const pathological = 'ey'.repeat(50000); // 100k chars, the JWT prefix repeated
+  const t = process.hrtime.bigint();
+  synth.redactSecrets(pathological);
+  const elapsedMs = Number(process.hrtime.bigint() - t) / 1e6;
+  assert.ok(elapsedMs < 1000, `redactSecrets over a 100k "ey" run must complete fast (JWT ReDoS guard); took ${elapsedMs.toFixed(0)}ms`);
+});
+
 test('runHandoff redacts secrets from the synthesized handoff before writing the baton', async () => {
   const root = tmp('wrxn-handoff-redact-');
   stageSession(root, REAL_SESSION);
