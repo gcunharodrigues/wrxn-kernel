@@ -22,6 +22,21 @@ The agent's deliberate query of the Brain — `recon_find` / `recon_explain` / `
 code intelligence lives; Recall never surfaces code.
 _Avoid_: recall (recall is automatic and prose-only).
 
+**Conversational log**:
+The raw, ephemeral, machine-local record of a session — the user-prompt events (`.wrxn/events/*.jsonl`)
+and the harness transcript (`~/.claude/projects/<slug>/*.jsonl`, the only source of **assistant** turns).
+**Not the Brain** (uncurated, undistilled), **not recalled** (never auto-surfaced), pruned (~90d). Durable
+memory is the wiki; the conversational log is scrollback. Read on-demand by **chat-search**, never indexed.
+_Avoid_: Brain, memory, history (those name the curated/durable tiers, not this raw log).
+
+**chat-search**:
+The deliberate, on-demand retrieval of an exact past moment from the **Conversational log**, invoked two
+ways — the operator types it, or the agent reaches for it mid-reasoning (like `recon_find`). **Never an
+automatic per-prompt hook** (ADR 0002 keeps raw chat off the auto-surface). Keyword/exact, read-only, no
+embeddings. Sibling to **On-demand retrieval** (which queries the **Brain**); chat-search queries the
+conversational log instead.
+_Avoid_: recall (recall is automatic, prose-only, Brain-sourced).
+
 **Abstain**:
 The Recall gate's silent outcome — when no candidate clears the semantic floor / consensus, the hook
 injects nothing. Silence is the default, not a failure.
