@@ -16,7 +16,11 @@ const PKG_ROOT = path.join(__dirname, '..');
 const { init, RECEIPT } = require('../lib/install.cjs');
 const { loadManifest } = require('../lib/manifest.cjs');
 
-const RECON_VERSION = '6.0.0-wrxn.9';
+// The pinned recon-wrxn version is SINGLE-SOURCED from package.json (#42): a re-pin is a deliberate edit
+// there, and the lockfile + .mcp.json are asserted to MATCH it below — no version literal in this test to
+// re-bump in lockstep (the footgun that bit the wrxn.8→wrxn.9 re-pin).
+const PKG = JSON.parse(fs.readFileSync(path.join(PKG_ROOT, 'package.json'), 'utf8'));
+const RECON_VERSION = PKG.dependencies && PKG.dependencies['recon-wrxn'];
 
 function tmp(p) {
   return fs.mkdtempSync(path.join(os.tmpdir(), p));
@@ -24,10 +28,12 @@ function tmp(p) {
 
 // ── AC-1: wrxn pins recon-wrxn at a known version and the lockfile resolved it ──
 
-test('package.json pins recon-wrxn at the known version', () => {
-  const pkg = JSON.parse(fs.readFileSync(path.join(PKG_ROOT, 'package.json'), 'utf8'));
-  assert.ok(pkg.dependencies, 'package.json declares dependencies');
-  assert.equal(pkg.dependencies['recon-wrxn'], RECON_VERSION, 'recon-wrxn pinned at the known version');
+test('package.json pins recon-wrxn at a concrete version (the single source of truth)', () => {
+  assert.ok(PKG.dependencies, 'package.json declares dependencies');
+  assert.ok(RECON_VERSION, 'recon-wrxn is pinned in dependencies');
+  // an EXACT pin — never a floating range (^/~/x) or dist-tag (latest); the lockfile + .mcp.json are
+  // asserted against THIS value, so a non-exact pin would make the drift checks meaningless.
+  assert.match(RECON_VERSION, /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/, 'pinned at an exact version, not a range or tag');
 });
 
 test('the lockfile resolved recon-wrxn (npm install ran)', () => {
@@ -37,7 +43,7 @@ test('the lockfile resolved recon-wrxn (npm install ran)', () => {
   const resolved = (lock.packages && lock.packages['node_modules/recon-wrxn'])
     || (lock.dependencies && lock.dependencies['recon-wrxn']);
   assert.ok(resolved, 'recon-wrxn resolved in the lockfile');
-  assert.equal(resolved.version, RECON_VERSION, 'lockfile pins the same version');
+  assert.equal(resolved.version, RECON_VERSION, 'lockfile matches the package.json pin (no drift)');
 });
 
 // ── AC-3: .recon-wrxn.json matches recon-wrxn's initConfig shape (No-Invention) ──
@@ -92,7 +98,7 @@ test('init lays .mcp.json with a recon-wrxn server launching the recon-wrxn bin'
   const launch = [server.command, ...(server.args || [])].join(' ');
   assert.match(launch, /recon-wrxn/, 'launches recon-wrxn');
   assert.match(launch, /serve/, 'runs the serve subcommand');
-  assert.match(launch, new RegExp(RECON_VERSION.replace(/\./g, '\\.')), 'pins the known version');
+  assert.match(launch, new RegExp(RECON_VERSION.replace(/\./g, '\\.')), 'pins the package.json version (no drift)');
 });
 
 test('brownfield .mcp.json merge: operator servers preserved, recon-wrxn added', () => {
