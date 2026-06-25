@@ -7,7 +7,8 @@
 // daemon (ADR 0008); never wired as a per-prompt hook (ADR 0002 boundary).
 //
 // Fixtures are written straight into a temp dir's .wrxn/events/ — the same fixture-then-assert style as
-// test/intelligence-surface.test.cjs — and records mirror emit-event.cjs's real shape byte-for-byte:
+// test/intelligence-surface.test.cjs — and records carry emit-event.cjs's real field shape (the engine
+// reads fields by name, so key order is irrelevant):
 //   prompt → { ts, sid, kind: 'prompt', text }   tool → { ts, sid, kind: 'tool', tool, target }
 // Only prompt records carry text, so only they can match in this arm (assistant turns are #84).
 
@@ -16,7 +17,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { execFileSync } = require('child_process');
+const { execFileSync, spawnSync } = require('child_process');
 
 const PKG_ROOT = path.join(__dirname, '..');
 const ENGINE = path.join(PKG_ROOT, 'payload', '.wrxn', 'chat-search.cjs');
@@ -217,4 +218,39 @@ test('the engine requires only node fs + path (no recon/serve/embeddings/daemon/
     ['fs', 'path'],
     'the engine depends only on fs + path — no recon/serve/http(s)/net/child_process/embedding import',
   );
+});
+
+// ── F1 regression: an unreadable .jsonl entry must not crash the scan (the never-crash AC) ──
+// A directory whose name ends in `.jsonl` passes the listEventFiles filter, and readFileSync on it
+// throws EISDIR — a permission-independent stand-in for a chmod-000 file / TOCTOU-deleted / broken
+// symlink entry. The scan must skip that one entry (fail-closed on it) and still return the good hits.
+
+test('an unreadable .jsonl entry is skipped — the scan returns the good hits and never throws', () => {
+  const root = tmp('wrxn-chatsearch-badfile-');
+  writeEvents(root, 'sid-a', [prompt('2026-06-25T10:00:00.000Z', 'keep the baton echo line')]);
+  fs.mkdirSync(path.join(root, '.wrxn', 'events', 'bad.jsonl')); // a dir entry → readFileSync throws EISDIR
+
+  let res;
+  assert.doesNotThrow(() => {
+    res = searchConversationalLog('baton echo', {}, root);
+  }, 'an unreadable entry must not crash the scan mid-flight');
+
+  assert.equal(res.total, 1, 'the good file still yields its hit');
+  assert.equal(res.hits[0].session, 'sid-a', 'the hit comes from the readable session');
+});
+
+// ── F1 regression (CLI boundary): an unreadable entry must not crash or leak a stack/paths ──
+// The entrypoint hardening's behavioral guarantee: the operator never sees a Node trace or an absolute
+// path on stderr — the CLI skips the bad entry, prints the good hit, and exits 0 with stderr clean.
+
+test('the CLI skips an unreadable entry — exits 0 with the good hit and no stack/paths on stderr', () => {
+  const root = tmp('wrxn-chatsearch-cli-badfile-');
+  writeEvents(root, 'sid-a', [prompt('2026-06-25T10:00:00.000Z', 'keep the baton echo line')]);
+  fs.mkdirSync(path.join(root, '.wrxn', 'events', 'bad.jsonl'));
+
+  const res = spawnSync('node', [ENGINE, 'baton echo', '--root', root], { encoding: 'utf8' });
+
+  assert.equal(res.status, 0, 'the CLI exits 0 (skips the bad entry, never crashes)');
+  assert.match(res.stdout, /baton echo/, 'the good hit is printed to stdout');
+  assert.equal(res.stderr.trim(), '', 'nothing leaks to stderr — no Node stack trace, no absolute path');
 });

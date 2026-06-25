@@ -75,7 +75,12 @@ function searchConversationalLog(query, opts, roots) {
 
   for (const root of normalizeRoots(roots)) {
     for (const file of listEventFiles(eventsDirOf(root))) {
-      const lines = fs.readFileSync(file, 'utf8').split('\n');
+      let lines;
+      try {
+        lines = fs.readFileSync(file, 'utf8').split('\n');
+      } catch {
+        continue; // an unreadable entry (EISDIR dir, EACCES, ENOENT/TOCTOU, broken symlink) → skip it, keep scanning
+      }
       for (const line of lines) {
         if (!line.trim()) continue;
         let rec;
@@ -145,11 +150,24 @@ function main() {
     process.stderr.write('chat-search: cannot resolve the install root — run inside a wrxn install or pass --root <dir>\n');
     process.exit(2);
   }
+  // opts is empty here: the live current-session id (which the renderer collapses to "this session") has
+  // no CLI source yet — it arrives with the transcript arm (#84). Not wired in this slice.
   const result = searchConversationalLog(terms.join(' '), {}, root);
   process.stdout.write(result.rendered + '\n');
   process.exit(0);
 }
 
-if (require.main === module) main();
+// Belt-and-suspenders fail-loud (mirrors emit-event.cjs's entrypoint wrap): the per-file read and root
+// resolution are already guarded, so main() should not throw — but if any residual fault escapes, exit
+// with a clean ONE-LINE diagnostic (a path-free error code only — never a Node stack or absolute path).
+if (require.main === module) {
+  try {
+    main();
+  } catch (err) {
+    const code = err && err.code ? ` (${err.code})` : '';
+    process.stderr.write(`chat-search: search failed unexpectedly${code}\n`);
+    process.exit(1);
+  }
+}
 
 module.exports = { searchConversationalLog, renderHit };
