@@ -16,6 +16,7 @@ const PKG_ROOT = path.join(__dirname, '..');
 const { init } = require('../lib/install.cjs');
 const { loadManifest } = require('../lib/manifest.cjs');
 const { stampImportance, stampLineage, stampEvidence, resolveEvidence, sha256, resolveRevert } = require('../payload/.wrxn/dream.cjs'); // pure stamp + revert seams
+const fake = require('./helpers/fake-secrets.cjs'); // runtime-assembled secret-shaped fixtures (#70)
 
 const DREAM = '.wrxn/dream.cjs';
 const WIKI = '.wrxn/wiki.cjs';
@@ -183,7 +184,7 @@ test('a proposal with no title → missing_title', () => {
 
 test('SECURITY (secret-scan): a body containing an AWS key → contains_secret', () => {
   const t = freshInstall('dream-secret-aws-');
-  const v = checkOne(t, validProposal({ body: '# Creds\n\nThe access key is AKIAIOSFODNN7EXAMPLE, keep it safe.' }));
+  const v = checkOne(t, validProposal({ body: '# Creds\n\nThe access key is ' + fake.aws() + ', keep it safe.' }));
   assert.equal(v.ok, false);
   assert.equal(v.reason, 'contains_secret');
 });

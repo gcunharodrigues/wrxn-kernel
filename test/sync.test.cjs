@@ -32,6 +32,7 @@ const { loadManifest } = require('../lib/manifest.cjs');
 const SYNC_REL = '.wrxn/sync.cjs';
 const SYNC = path.join(PKG_ROOT, 'payload', SYNC_REL);
 const sync = require('../payload/.wrxn/sync.cjs');
+const fake = require('./helpers/fake-secrets.cjs'); // runtime-assembled secret-shaped fixtures (#70)
 
 function tmp(prefix) {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -382,7 +383,7 @@ test('restampDoc: a doc with no frontmatter cannot be re-stamped → null (defen
 });
 
 test('secretScan: flags an AWS key, passes clean prose (AC4 primitive, reused from dream)', () => {
-  assert.equal(sync.secretScan('# Notes\n\nThe key is AKIAIOSFODNN7EXAMPLE in here'), 'contains_secret');
+  assert.equal(sync.secretScan('# Notes\n\nThe key is ' + fake.aws() + ' in here'), 'contains_secret');
   assert.equal(sync.secretScan('# Notes\n\nplain reconciling prose, no secrets'), null);
 });
 
@@ -390,12 +391,12 @@ test('secretScan: flags an AWS key, passes clean prose (AC4 primitive, reused fr
 // set missed (Slack / Google / Stripe / GitHub-PAT / OpenAI-project / JWT) must now be flagged.
 test('secretScan: flags the consolidated canonical shapes the stale set missed (#39)', () => {
   const cases = [
-    'slack token xoxb-1234567890-abcdefABCDEF0987 here',
-    'google key AIzaSyA1B2C3D4E5F6G7H8I9J0kLmNoPqRsTu here',
-    'stripe sk_live_0123456789abcdefghijABCDEFGHIJ here',
-    'github_pat_11ABCDEFG0abcdefghijkl_AbCdEf1234567890AbCdEf1234567890 here',
-    'openai sk-proj-0123456789abcdef_ABCDEFGHIJ-klmno here',
-    'jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.dummysignature here',
+    'slack token ' + fake.slack() + ' here',
+    'google key ' + fake.google() + ' here',
+    'stripe ' + fake.stripe() + ' here',
+    fake.githubPat() + ' here',
+    'openai ' + fake.openaiProj() + ' here',
+    'jwt ' + fake.jwt() + ' here',
   ];
   for (const s of cases) assert.equal(sync.secretScan(s), 'contains_secret', `must flag: ${s}`);
 });
@@ -433,7 +434,7 @@ test('propose: a drafted edit containing a secret is REFUSED before staging (AC4
   const before = fs.readFileSync(doc, 'utf8');
   let err;
   try {
-    runCli(t, ['propose', writeJson(t, 'p.json', proseProposal({ body: '# Auth flow\n\nthe token is AKIAIOSFODNN7EXAMPLE keep it safe' }))]);
+    runCli(t, ['propose', writeJson(t, 'p.json', proseProposal({ body: '# Auth flow\n\nthe token is ' + fake.aws() + ' keep it safe' }))]);
   } catch (e) { err = e; }
   assert.ok(err, 'propose exited non-zero on a secret');
   assert.match(String(err.stderr || ''), /contains_secret|credential|secret/i);
@@ -481,7 +482,7 @@ test('confirm: a staged proposal carrying a secret (valid hash) is re-scanned an
   const doc = writeStaleDoc(t, '.wrxn/wiki/concepts/auth-flow.md', { synced_to: 'a1b2c3d4' });
   const before = fs.readFileSync(doc, 'utf8');
   const docRel = '.wrxn/wiki/concepts/auth-flow.md';
-  const body = '# Auth flow\n\ntoken AKIAIOSFODNN7EXAMPLE slipped into the draft';
+  const body = '# Auth flow\n\ntoken ' + fake.aws() + ' slipped into the draft';
   seedStaged(t, [{ ts: 'x', op: 'propose', doc: docRel, synced_to: 'a1b2c3d4', current: 'e5f6a7b8', body, hash: sync.proposalHash({ doc: docRel, current: 'e5f6a7b8', body }) }]);
 
   const out = confirm(t, [docRel]);
@@ -561,7 +562,7 @@ test('M1 propose: a secret in "current" is REFUSED before staging — current is
   let err;
   try {
     // AKIA… is a clean fingerprint SHAPE that is also an AWS key — it must be caught by the secret-scan.
-    runCli(t, ['propose', writeJson(t, 'p.json', proseProposal({ current: 'AKIAIOSFODNN7EXAMPLE' }))]);
+    runCli(t, ['propose', writeJson(t, 'p.json', proseProposal({ current: fake.aws() }))]);
   } catch (e) { err = e; }
   assert.ok(err, 'propose exited non-zero on a secret in current');
   assert.match(String(err.stderr || ''), /credential|secret/i);
@@ -593,7 +594,7 @@ test('M1 confirm: a seeded staged record with a secret in "current" is re-scanne
   const before = fs.readFileSync(doc, 'utf8');
   const docRel = '.wrxn/wiki/concepts/auth-flow.md';
   const body = '# Auth flow\n\nclean reconciling prose';
-  const current = 'AKIAIOSFODNN7EXAMPLE'; // clean shape, but an AWS key
+  const current = fake.aws(); // clean shape, but an AWS key
   seedStaged(t, [{ ts: 'x', op: 'propose', doc: docRel, synced_to: 'a1b2c3d4', current, body, hash: sync.proposalHash({ doc: docRel, current, body }) }]);
   const out = confirm(t, [docRel]);
   assert.equal(out.written.length, 0, 'the secret in current blocked the write at the boundary');
@@ -609,7 +610,7 @@ test('M1 confirm: a seeded staged record with a newline-injecting "current" is r
   const before = fs.readFileSync(doc, 'utf8');
   const docRel = '.wrxn/wiki/concepts/auth-flow.md';
   const body = '# Auth flow\n\nclean prose';
-  const current = 'FP\nINJECTED_KEY: AKIAIOSFODNN7EXAMPLE'; // the security-record exploit: a 2nd frontmatter line
+  const current = 'FP\nINJECTED_KEY: ' + fake.aws(); // the security-record exploit: a 2nd frontmatter line
   seedStaged(t, [{ ts: 'x', op: 'propose', doc: docRel, synced_to: 'a1b2c3d4', current, body, hash: sync.proposalHash({ doc: docRel, current, body }) }]);
   const out = confirm(t, [docRel]);
   assert.equal(out.written.length, 0, 'the malformed current blocked the write');

@@ -16,6 +16,7 @@ const path = require('path');
 const PKG_ROOT = path.join(__dirname, '..');
 const SIDECAR = path.join(PKG_ROOT, 'payload', '.claude', 'hooks', 'sidecar.cjs');
 const sidecar = require('../payload/.claude/hooks/sidecar.cjs');
+const fake = require('./helpers/fake-secrets.cjs'); // runtime-assembled secret-shaped fixtures (#70)
 const { loadManifest } = require('../lib/manifest.cjs');
 const { init } = require('../lib/install.cjs');
 
@@ -101,7 +102,7 @@ test('coalesceSidecar: a mutate that injects a secret-shaped value is NOT writte
   let wrote;
   assert.doesNotThrow(() => {
     wrote = sidecar.coalesceSidecar(file, (map) => {
-      map['leak'] = 'npm_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'; // an npm token shape (36 base62 chars)
+      map['leak'] = fake.npm(); // an npm token shape (36 base62 chars)
       return true;
     });
   });
@@ -127,8 +128,8 @@ test('coalesceSidecar: a clean map writes even when a sibling secret-free value 
 // secretScan already detects (one source of truth), replacing every match in place while preserving the
 // surrounding text — so a recalled prompt stays useful but never hardens a credential onto disk.
 
-const FAKE_NPM = 'npm_' + 'a'.repeat(36); // matches the npm-token shape; fabricated (all 'a') — never a real token
-const FAKE_AWS = 'AKIA' + 'A'.repeat(16); // matches the AWS access-key-id shape; fabricated
+const FAKE_NPM = fake.npm(); // npm-token shape, assembled at runtime (test/helpers/fake-secrets.cjs)
+const FAKE_AWS = fake.aws(); // AWS access-key-id shape, assembled at runtime
 
 test('redactSecrets scrubs a known secret shape but preserves the surrounding text', () => {
   const out = sidecar.redactSecrets(`before ${FAKE_NPM} after`);
@@ -158,11 +159,11 @@ test('redactSecrets leaves secret-free text byte-identical and coerces non-strin
 // Stripe / GitHub-PAT / OpenAI-project), on TOP of its own broader extras (kept, asserted elsewhere).
 test('secretScan + redactSecrets gain the consolidated canonical shapes sidecar lacked (#39)', () => {
   const cases = [
-    'xoxb-1234567890-abcdefABCDEF0987',
-    'AIzaSyA1B2C3D4E5F6G7H8I9J0kLmNoPqRsTu',
-    'sk_live_0123456789abcdefghijABCDEFGHIJ',
-    'github_pat_11ABCDEFG0abcdefghijkl_AbCdEf1234567890AbCdEf1234567890',
-    'sk-proj-0123456789abcdef_ABCDEFGHIJ-klmno',
+    fake.slack(),
+    fake.google(),
+    fake.stripe(),
+    fake.githubPat(),
+    fake.openaiProj(),
   ];
   for (const s of cases) {
     assert.equal(sidecar.secretScan(s), 'contains_secret', `gate flags: ${s}`);
@@ -249,7 +250,7 @@ test('redactSecrets scrubs a URI connection string with inline creds (#38 F2)', 
 });
 
 test('redactSecrets scrubs a JWT (three base64url parts) (#38 F2)', () => {
-  const FAKE_JWT = 'eyJ' + 'a'.repeat(20) + '.' + 'b'.repeat(20) + '.' + 'c'.repeat(20); // fabricated, not signed
+  const FAKE_JWT = fake.jwt(); // JWT shape, assembled at runtime
   const out = sidecar.redactSecrets(`token=${FAKE_JWT} end`);
   assert.ok(!out.includes(FAKE_JWT), 'the JWT is redacted');
   assert.match(out, / end$/, 'the surrounding text is preserved');
@@ -257,20 +258,15 @@ test('redactSecrets scrubs a JWT (three base64url parts) (#38 F2)', () => {
 });
 
 test('redactSecrets scrubs the FULL PEM private-key block, not just the header line (#38 F2)', () => {
-  const block = [
-    '-----BEGIN RSA PRIVATE KEY-----',
-    'FAKEKEYBODYLINEONEnotarealkeymaterial',
-    'FAKEKEYBODYLINETWOnotarealkeymaterial',
-    '-----END RSA PRIVATE KEY-----',
-  ].join('\n');
+  const block = fake.pemBlock();
   const out = sidecar.redactSecrets(`before\n${block}\nafter`);
-  assert.ok(!out.includes('FAKEKEYBODYLINEONE'), 'the key BODY is redacted, not left exposed below a redacted header');
-  assert.ok(!out.includes('-----END RSA PRIVATE KEY-----'), 'the END boundary is consumed too');
+  assert.ok(!out.includes(fake.PEM_BLOCK_BODY), 'the key BODY is redacted, not left exposed below a redacted header');
+  assert.ok(!out.includes(fake.PEM_BLOCK_END), 'the END boundary is consumed too');
   assert.match(out, /^before/, 'leading text preserved');
   assert.match(out, /after$/, 'trailing text preserved');
 
   // a lone/truncated header (no END) still trips the gate via the retained header-line fallback
-  assert.equal(sidecar.secretScan('-----BEGIN OPENSSH PRIVATE KEY-----'), 'contains_secret', 'a lone PEM header is still detected');
+  assert.equal(sidecar.secretScan(fake.pemHeader()), 'contains_secret', 'a lone PEM header is still detected');
 });
 
 // blast-radius: secretScan is ALSO the coalesceSidecar write GATE (reinforce/surfaced/reward). Broadening

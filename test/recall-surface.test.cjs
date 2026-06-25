@@ -22,6 +22,7 @@ const PKG_ROOT = path.join(__dirname, '..');
 const RECALL = path.join(PKG_ROOT, 'payload', '.claude', 'hooks', 'recall-surface.cjs');
 const recall = require('../payload/.claude/hooks/recall-surface.cjs');
 const reward = require('../payload/.claude/hooks/reward.cjs');
+const fake = require('./helpers/fake-secrets.cjs'); // runtime-assembled secret-shaped fixtures (#70)
 
 function tmp(prefix) {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -660,7 +661,7 @@ test('surfacedLog: a secret-shaped page path is never written (no-secret via the
   // A wiki-rel key should never carry a secret, but the no-secret guarantee must hold structurally:
   // if a session id or path ever embedded a token shape, the helper refuses the whole write.
   const root = installRoot('wrxn-surfaced-secret-');
-  recall.surfacedLog(root, 'npm_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', recall.qualifyingHits([hit({ file: '.wrxn/wiki/concepts/a.md', sources: ['bm25', 'semantic'], semanticScore: 0.7 })]));
+  recall.surfacedLog(root, fake.npm(), recall.qualifyingHits([hit({ file: '.wrxn/wiki/concepts/a.md', sources: ['bm25', 'semantic'], semanticScore: 0.7 })]));
   assert.equal(fs.existsSync(path.join(root, SURFACED_REL)), false, 'a record carrying a secret-shaped value is refused, not written');
 });
 

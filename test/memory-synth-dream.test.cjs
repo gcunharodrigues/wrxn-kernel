@@ -21,6 +21,7 @@ const path = require('path');
 const PKG_ROOT = path.join(__dirname, '..');
 const { init } = require('../lib/install.cjs');
 const synth = require('../payload/.wrxn/memory-synth.cjs');
+const fake = require('./helpers/fake-secrets.cjs'); // runtime-assembled secret-shaped fixtures (#70)
 
 function batonPath(root) {
   return path.join(root, '.wrxn', 'continuity', 'latest.md');
@@ -188,7 +189,7 @@ test('runDream honors the secret-scan: a proposal whose body contains a credenti
   const leaky = proposal({
     slug: 'leaked-credential',
     title: 'Leaked credential',
-    body: '# Leaked credential\n\nThe access key is AKIAIOSFODNN7EXAMPLE, do not lose it.',
+    body: '# Leaked credential\n\nThe access key is ' + fake.aws() + ', do not lose it.',
     evidence: [{ quote: 'we decided to log with pino for structured logs' }],
   });
   const { invoke } = fakeInvoke({ claude: { ok: true, text: dreamText([leaky]) } });

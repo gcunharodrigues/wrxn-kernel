@@ -17,6 +17,7 @@ const os = require('os');
 const path = require('path');
 
 const synth = require('../payload/.wrxn/memory-synth.cjs');
+const fake = require('./helpers/fake-secrets.cjs'); // runtime-assembled secret-shaped fixtures (#70)
 
 function tmp(prefix) {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -242,10 +243,13 @@ test('run --from-spawn on a trivial stash exits 0, writes no baton, clears marke
 
 test('redactSecrets scrubs common credential shapes from a body', () => {
   const dirty = [
-    'export GEMINI_API_KEY=AIzaSyД-not-real-key-1234567890abcd',
-    'a github token ghp' + '_0123456789abcdefghijklmnopqrstuvwxyz lives here',
-    'Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload.sig',
-    'aws AKIAIOSFODNN7EXAMPLE key',
+    // A Google-prefix value the AIza shape MISSES (the Cyrillic Д breaks the class) — exercised via the
+    // KEY=value path, not the Google shape. Split through "AIza" + the non-ASCII Д keep it unscannable
+    // while the runtime value still reads as a GEMINI_API_KEY= assignment. (An anti-shape, not a builder.)
+    'export GEMINI_API_KEY=AIza' + 'SyД-not-real-key-1234567890abcd',
+    'a github token ' + fake.github() + ' lives here',
+    'Authorization: Bearer ' + fake.jwt(),
+    'aws ' + fake.aws() + ' key',
     'a normal line about wiring SessionStart that must survive',
   ].join('\n');
 
@@ -265,12 +269,14 @@ test('redactSecrets scrubs common credential shapes from a body', () => {
 // shapes have appeared in-chat in this project, so the synth must scrub them from the handoff body.
 test('redactSecrets scrubs bare-in-prose vendor token shapes (npm/github-pat/stripe/pem/bearer)', () => {
   const dirty = [
-    'publish with npm' + '_abcdefghij1234567890abcdefghij123456 now', // npm_ + exactly 36 chars (real shape)
-    'use github_pat' + '_11ABCDEFG0abcdefghijkl_AbCdEf1234567890AbCdEf1234567890 for ci',
-    'stripe live key sk_live' + '_0123456789abcdefghijABCDEFGHIJ here',
-    'openai project key sk-proj' + '-0123456789abcdef_ABCDEFGHIJ-klmno here',
+    'publish with ' + fake.npm() + ' now',
+    'use ' + fake.githubPat() + ' for ci',
+    'stripe live key ' + fake.stripe() + ' here',
+    'openai project key ' + fake.openaiProj() + ' here',
+    // PEM variant: no vendor in the BEGIN line + a DER body — distinct from fake.pemBlock()'s RSA shape, so it
+    // stays inline (split through PRIV+ATE → unscannable) to keep the /BEGIN PRIVATE KEY/ assertion below exact.
     '-----BEGIN PRIV' + 'ATE KEY-----\nMIIBVwIBADANBgkqhkiG9w0BAQEFAASCAUEw\n-----END PRIVATE KEY-----',
-    'Authorization: Bearer abc123DEF456ghi789JKL012mno345',
+    'Authorization: ' + fake.bearer(),
     'a normal sentence about the SessionStart hold that must survive',
   ].join('\n');
 
@@ -288,16 +294,16 @@ test('redactSecrets scrubs bare-in-prose vendor token shapes (npm/github-pat/str
 // Resolves qa-walk finding acceptance/auto-memory/issues/06-npm-token-missing-from-redactions.md —
 // the documented repro is a bare 40-char npm token in prose (and the same token in a Bearer context).
 test('redactSecrets resolves the issue-06 npm-token repro (bare + Bearer-wrapped)', () => {
-  const bare = synth.redactSecrets('npm' + '_abcdefghij1234567890abcdefghij1234567890 token here');
+  const bare = synth.redactSecrets(fake.npm() + ' token here');
   assert.doesNotMatch(bare, /npm_[A-Za-z0-9]{20}/, 'the bare npm token from the repro is redacted');
-  const wrapped = synth.redactSecrets('Authorization: Bearer npm' + '_abcdefghij1234567890abcdefghij1234567890');
+  const wrapped = synth.redactSecrets('Authorization: Bearer ' + fake.npm());
   assert.doesNotMatch(wrapped, /npm_[A-Za-z0-9]{20}/, 'the Bearer-wrapped npm token from the repro is redacted');
 });
 
 // #39: redaction joins the one canonical set — a lone/truncated PEM header (no END) is now scrubbed too
 // (the full-block shape alone left a headerless key exposed). Coverage rises, never falls.
 test('redactSecrets scrubs a lone PEM private-key header with no END (#39 canonical fallback)', () => {
-  const out = synth.redactSecrets('the file has -----BEGIN OPENSSH PRIVATE KEY-----');
+  const out = synth.redactSecrets('the file has ' + fake.pemHeader());
   assert.doesNotMatch(out, /BEGIN OPENSSH PRIVATE KEY/, 'the lone header is redacted');
   assert.match(out, /\[REDACTED\]/, 'the redaction is marked');
 });

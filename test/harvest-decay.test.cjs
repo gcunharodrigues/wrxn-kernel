@@ -29,6 +29,7 @@ const { init } = require('../lib/install.cjs');
 
 const HARVEST_REL = '.wrxn/harvest.cjs';
 const harvest = require('../payload/.wrxn/harvest.cjs');
+const fake = require('./helpers/fake-secrets.cjs'); // runtime-assembled secret-shaped fixtures (#70)
 
 function tmp(prefix) {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -139,7 +140,7 @@ test('annotationValueProblem: rejects newline-injection, a secret, empty, oversi
   assert.equal(harvest.annotationValueProblem('a: b'), 'malformed_value', 'a colon (YAML mapping ambiguity) is refused');
   assert.equal(harvest.annotationValueProblem(''), 'malformed_value', 'empty is refused');
   assert.equal(harvest.annotationValueProblem('x'.repeat(500)), 'malformed_value', 'oversize is refused');
-  assert.equal(harvest.annotationValueProblem('AKIAIOSFODNN7EXAMPLE'), 'contains_secret', 'a credential in the value is refused');
+  assert.equal(harvest.annotationValueProblem(fake.aws()), 'contains_secret', 'a credential in the value is refused');
 });
 
 // ── PURE: decayHash — integrity over (page, key, value) ──
@@ -359,7 +360,7 @@ test('AC2 secret re-scan: a seeded staged record carrying a secret value (valid 
   const pageRel = '.wrxn/wiki/concepts/victim.md';
   writePage(t, 'concepts', 'victim', {}, '# victim\n\nbody');
   const before = read(t, pageRel);
-  const value = 'AKIAIOSFODNN7EXAMPLE';
+  const value = fake.aws();
   seedDecayStaged(t, [{ ts: 'x', op: 'decay-propose', page: pageRel, tier: 'concepts', slug: 'victim', key: 'stale', value, reason: 'r', hash: harvest.decayHash({ page: pageRel, key: 'stale', value }) }]);
 
   const out = decayConfirm(t, [pageRel]);
