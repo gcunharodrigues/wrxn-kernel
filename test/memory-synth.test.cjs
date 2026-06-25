@@ -370,6 +370,57 @@ test('run() exits 1 and prints nothing when no engine produces output (fail-safe
   assert.match(errd, /no engine produced output/);
 });
 
+// ── #63: the MANUAL CLI path redacts the blob BEFORE it egresses to the engine ──
+// runHandoff (:729) and runDream (:866) scrub the transcript blob before it reaches the external model;
+// the manual `run()` --task demo path (:972) fed readTranscriptBlob(file) RAW to synthesize, egressing
+// any credential in the transcript un-redacted (the baton-output redaction is too late — the secret has
+// already left the box in the request). Parity: no entry point may egress an un-redacted blob. The
+// load-bearing assertion is what the injected invoker RECEIVES (calls[0].input — the `claude -p` stdin /
+// the gemini POST body on fallback), not just what is printed.
+
+test('run() (manual CLI) redacts the transcript blob BEFORE it egresses to the engine (#63)', async () => {
+  const root = tmp('wrxn-synth-cli-egress-');
+  const tx = path.join(root, 'session.jsonl');
+  // the transcript itself carries a planted credential (a shape already in REDACTIONS, split so it never
+  // lands as a literal token — this isolates the EGRESS-TIMING fix, not a pattern gap).
+  const secret = 'ghp' + '_0123456789abcdefghijklmnopqrstuvwxyz';
+  fs.writeFileSync(tx, [
+    JSON.stringify({ type: 'user', message: { role: 'user', content: `deploy with token ${secret} then ship` } }),
+    JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'wiring the manual synth demo path' }] } }),
+  ].join('\n') + '\n');
+
+  const { invoke, calls } = fakeInvoke({ claude: { ok: true, text: '**TL;DR** shipped' } });
+  const sink = { write: () => {} };
+  const code = await synth.run(['--task', 'handoff', tx, '--root', root], { invoke, out: sink, err: sink });
+
+  assert.equal(code, 0, 'a successful synthesis');
+  assert.equal(calls.length, 1, 'the engine was invoked once');
+  const sent = calls[0].input; // what reaches `claude -p` (and would POST off-box to gemini on fallback)
+  assert.doesNotMatch(sent, /ghp_[A-Za-z0-9]{20}/, 'the github token is scrubbed BEFORE egress to the model');
+  assert.match(sent, /\[REDACTED\]/, 'the blob the engine received was redacted');
+  assert.match(sent, /wiring the manual synth demo path/, 'ordinary transcript content still reaches the engine');
+});
+
+// #63 (no-regression): a CLEAN transcript (no credential shapes) egresses byte-identical to
+// readTranscriptBlob(file) — redactSecrets is pure/credential-shapes-only, so ordinary prose is never
+// over-redacted and the handoff synthesis is unchanged (no quality regression).
+test('run() (manual CLI) leaves a clean transcript blob byte-identical before egress — no over-redaction (#63)', async () => {
+  const root = tmp('wrxn-synth-cli-clean-');
+  const tx = path.join(root, 'session.jsonl');
+  fs.writeFileSync(tx, [
+    JSON.stringify({ type: 'user', message: { role: 'user', content: 'refactor the parser and add a regression test' } }),
+    JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'no credentials here, just ordinary prose' }] } }),
+  ].join('\n') + '\n');
+
+  const { invoke, calls } = fakeInvoke({ claude: { ok: true, text: '**TL;DR** done' } });
+  const sink = { write: () => {} };
+  await synth.run(['--task', 'handoff', tx, '--root', root], { invoke, out: sink, err: sink });
+
+  const sent = calls[0].input; // what reaches the engine
+  assert.doesNotMatch(sent, /\[REDACTED\]/, 'a clean transcript is never marked — no over-redaction of ordinary prose');
+  assert.ok(sent.includes(synth.readTranscriptBlob(tx)), 'the egressed blob is byte-identical to readTranscriptBlob(file)');
+});
+
 // ── seeded config + manifest registration (managed-integrity stays consistent) ──
 
 test('the seeded payload memory.config.json parses to the default tiering', () => {
