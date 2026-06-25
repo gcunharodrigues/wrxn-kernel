@@ -1014,7 +1014,7 @@ async function run(args, { invoke = defaultInvoke, out = process.stdout, err = p
     return 2;
   }
   const root = rootArg || findInstallRoot(path.dirname(path.resolve(file))) || process.cwd();
-  const blob = readTranscriptBlob(file);
+  const blob = redactSecrets(readTranscriptBlob(file)); // scrub BEFORE the blob egresses to the external model — parity with runHandoff:729 / runDream:866 (#63).
   const config = loadConfig(root);
   const apiKey = loadEnv(root).GEMINI_API_KEY;
   const text = await synthesize({ task, prompt, blob, config, apiKey, invoke });
