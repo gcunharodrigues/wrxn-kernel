@@ -165,6 +165,43 @@ test('runHandoff with an empty/missing transcript path also skips and clears (no
   assert.ok(!fs.existsSync(pendingPath(root)));
 });
 
+// ── #62: hook-injected framework context must NOT mass the blob into a non-trivial session ──
+// A resume session whose ONLY content is the SessionStart <wrxn-orientation> (which embeds the entire
+// prior baton) + the per-turn <synapse-rules>/<recall-surface> injections did NO real work. Before #62
+// that injected text out-massed the (empty) real turns → blob > the trivial floor → the engine was
+// called → it faithfully re-emitted the embedded prior baton (fresh `wrote`, frozen content). The blob
+// builder must strip the framework sentinels so an orientation-ONLY session resolves `trivial`: no
+// model call, no baton rewrite.
+test('runHandoff treats an orientation-only session (injected baton, no real work) as trivial — no model call, no echo', async () => {
+  const root = tmp('wrxn-handoff-orient-only-');
+  const orientation = [
+    '<wrxn-orientation>',
+    'Resume — prior handoff:',
+    '**TL;DR** Shipped kernel 0.15.0; next step is #45 (gemini-primary default).',
+    '**Gemini-primary default** lands the engine order flip.',
+    '</wrxn-orientation>',
+  ].join('\n');
+  const synapseRules = '<synapse-rules>\nLayer 2: prefer the kernel build loop; one slice at a time.\n</synapse-rules>';
+  // a resume session: the injected orientation (embedding the whole 0.15.0-era baton) + an injected
+  // rules block, and NOTHING else. No user prompt, no assistant work, no tool calls.
+  stageSession(
+    root,
+    [
+      JSON.stringify({ type: 'user', message: { role: 'user', content: orientation } }),
+      JSON.stringify({ type: 'user', message: { role: 'user', content: synapseRules } }),
+    ].join('\n')
+  );
+  const { invoke, calls } = fakeInvoke({ claude: { ok: true, text: 'SHOULD NEVER BE CALLED' } });
+
+  const res = await synth.runHandoff({ root, invoke });
+
+  assert.equal(res.reason, 'trivial', 'an orientation-only session is trivial once the injected context is stripped');
+  assert.equal(res.wrote, false, 'no baton is rewritten for an orientation-only session');
+  assert.equal(calls.length, 0, 'the engine is NEVER invoked — no model spend, no re-echo of the prior baton');
+  assert.ok(!fs.existsSync(batonPath(root)), 'no frozen-content baton is produced');
+  assert.ok(!fs.existsSync(handoffMarker(root)), 'the handoff marker is still cleared (start is released)');
+});
+
 // ── the detached child's entry: `--from-spawn` routes to runHandoff (integration glue) ──
 // The spawn hook launches `node memory-synth.cjs --from-spawn --root <root>`. That invocation MUST
 // drive the handoff path (read the stash → baton), not the manual transcript-file CLI. Proven through
