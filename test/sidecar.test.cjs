@@ -170,6 +170,32 @@ test('secretScan + redactSecrets gain the consolidated canonical shapes sidecar 
   }
 });
 
+// #39 security MEDIUM: the canonical assignment shape (#14) must keep its leading \b — dropping it made
+// it QUADRATIC (~12.7s @100k word chars), reachable through the uncapped raw-prompt sink
+// emit-event.cjs → sidecar.redactSecrets. A pathological 100k run of '_' isolates the canonical
+// assignment shape — '_' is in its [A-Za-z0-9_] class but matches no other canonical shape nor any
+// sidecar extra — so this guards #14 specifically and must complete fast, never hang.
+test('redactSecrets handles the assignment-shape pathological run in linear time (#39 ReDoS guard)', () => {
+  const pathological = '_'.repeat(100000);
+  const t = process.hrtime.bigint();
+  sidecar.redactSecrets(pathological);
+  const elapsedMs = Number(process.hrtime.bigint() - t) / 1e6;
+  assert.ok(elapsedMs < 1000, `the assignment shape over 100k word chars must stay linear (ReDoS guard); took ${elapsedMs.toFixed(0)}ms`);
+});
+
+// #39 security LOW: the PEM label was narrowed from [A-Z ]* to (?:[A-Z ]+ )?, which stops matching a
+// malformed double-space label. AC1 says no existing match may weaken — the broadest [A-Z ]* form must
+// still flag every standard descriptor AND the malformed double-space / unlabeled forms.
+test('secretScan flags every PEM private-key label incl. malformed double-space (#39 no narrowing)', () => {
+  // each entry is the label segment that follows "-----BEGIN " (with its trailing space); '' = unlabeled
+  // (PKCS#8), ' ' = the malformed DOUBLE-space the narrowed (?:[A-Z ]+ )? form stopped matching.
+  const labelSegments = ['RSA ', 'DSA ', 'EC ', 'OPENSSH ', 'PGP ', 'ENCRYPTED ', '', ' '];
+  for (const seg of labelSegments) {
+    const header = `-----BEGIN ${seg}PRIVATE KEY-----`;
+    assert.equal(sidecar.secretScan(header), 'contains_secret', `must flag PEM header: ${JSON.stringify(header)}`);
+  }
+});
+
 // ── #38 F2: broaden redaction to common secret shapes the 5-pattern set missed ──────────
 // C2 is the slice that newly persists RAW prompt text (emit-event.cjs → .wrxn/events/<sid>.jsonl), so
 // redaction must also scrub bearer tokens, password=/pwd= assignments, URI connection strings with inline

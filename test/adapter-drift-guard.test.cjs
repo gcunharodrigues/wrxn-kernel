@@ -217,7 +217,7 @@ test('#39 the canonical SECRET_PATTERNS set is byte-identical across dream/sync/
 test('#39 the PEM full-block shape precedes the header-only fallback (redaction must eat the key body)', () => {
   const ref = sliceArrayBody(fs.readFileSync(CANON_SITES.dream.file, 'utf8'), 'SECRET_PATTERNS');
   const full = ref.indexOf('-----END'); // only the FULL-block shape carries an END boundary
-  const headerOnly = ref.indexOf('/-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----/,'); // the lone-header fallback line
+  const headerOnly = ref.indexOf('/-----BEGIN [A-Z ]*PRIVATE KEY-----/,'); // the lone-header fallback line
   assert.ok(full !== -1 && headerOnly !== -1, 'both PEM shapes are present');
   assert.ok(full < headerOnly, 'the FULL PEM block must appear BEFORE the header-only fallback so redaction consumes the body, not just the header');
 });

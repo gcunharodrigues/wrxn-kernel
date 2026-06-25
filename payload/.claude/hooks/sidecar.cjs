@@ -29,11 +29,11 @@ const SECRET_PATTERNS_CANON = [
   /AIza[0-9A-Za-z._-]{10,}/, // Google / Gemini API key
   /sk_(?:live|test)_[A-Za-z0-9]{20,}/, // Stripe live/test secret key
   /npm_[A-Za-z0-9]{20,}/, // npm publish / automation token
-  /ey[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{3,}/, // JWT (incl. Bearer payloads); the eyJ… header gates it
-  /-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z ]+ )?PRIVATE KEY-----/, // PEM block (FULL — must precede the header fallback so redaction eats the body)
-  /-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----/, // PEM header (fallback: a lone/truncated header with no END)
+  /\bey[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{3,}\b/, // JWT (incl. Bearer payloads); the eyJ… header gates it
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/, // PEM block (FULL — must precede the header fallback so redaction eats the body)
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----/, // PEM header (fallback: a lone/truncated header with no END)
   /Bearer\s+[A-Za-z0-9._~+/=-]{20,}/, // opaque Bearer token (non-JWT)
-  /[A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD)\s*[:=]\s*\S+/i, // KEY/TOKEN/SECRET/PASSWORD = value
+  /\b[A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD)\b\s*[:=]\s*\S+/i, // KEY/TOKEN/SECRET/PASSWORD = value
 ];
 // sidecar-LOCAL extras (#38) the canonical set does not subsume — broader / hooks-layer-specific, so they
 // are NOT part of the drift-pinned core. Kept so sidecar never weakens (no pre-existing match is lost).
