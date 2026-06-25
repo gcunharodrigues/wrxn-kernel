@@ -65,6 +65,27 @@ function pageBody(text) {
   return end < 0 ? '' : src.slice(end + 4);
 }
 
+// Fenced code blocks (``` or ~~~) hold ILLUSTRATIVE text — a [[slug]] written there as example syntax is
+// not a navigable wikilink, so it must not be checked for a dead target (#28). Strip whole fenced regions
+// before the scan. Line-based + anchored (`^\s{0,3}` … `{3,}`) so it stays linear — no backtracking,
+// mirroring wikilinkTargets' own ReDoS discipline. A fence closes only on the SAME marker char with no
+// trailing info; an unclosed fence runs to end-of-body (CommonMark), so its content stays stripped.
+function stripFencedCode(body) {
+  const kept = [];
+  let fence = ''; // '`' or '~' while inside a fenced block; '' when outside
+  for (const line of String(body || '').split('\n')) {
+    const m = /^\s{0,3}(`{3,}|~{3,})/.exec(line);
+    if (!fence) {
+      if (m) fence = m[1][0]; // open: drop the fence line, enter the block
+      else kept.push(line);
+    } else if (m && m[1][0] === fence && line.slice(m[0].length).trim() === '') {
+      fence = ''; // close: drop the fence line, leave the block
+    }
+    // a line inside a block (including the fences) is dropped
+  }
+  return kept.join('\n');
+}
+
 // Wikilinks are written `[[slug]]` (Obsidian style), where slug equals a target page's `name:`. An
 // optional `|alias` or `#anchor` is stripped to the bare target slug. Returns the distinct slugs.
 // The inner class excludes BOTH `]` and `[`: a real `[[slug]]` target never contains `[`, and the
@@ -74,7 +95,8 @@ function wikilinkTargets(body) {
   const out = new Set();
   const re = /\[\[([^\]\[]+)\]\]/g;
   let m;
-  while ((m = re.exec(String(body || '')))) {
+  const scannable = stripFencedCode(body); // code-block [[slug]] is illustrative, not navigable (#28)
+  while ((m = re.exec(scannable))) {
     const slug = m[1].split('|')[0].split('#')[0].trim();
     if (slug) out.add(slug);
   }

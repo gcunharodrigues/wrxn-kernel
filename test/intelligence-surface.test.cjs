@@ -147,6 +147,39 @@ test('wiki-lint is silent on a [[wikilink]] whose target page exists', () => {
   assert.deepEqual(env, {}, 'a resolvable wikilink → no flag');
 });
 
+// ── AC: wiki-lint ignores [[wikilinks]] inside fenced code blocks (#28) ────────
+// A [[slug]] shown as example syntax inside a ``` fence is illustrative, not navigable — it must not be
+// flagged dead even when no page matches it. The live [[target-page]] outside the fence still resolves.
+test('wiki-lint ignores a [[wikilink]] inside a fenced code block (#28)', () => {
+  const target = freshInstall('wrxn-lint-fenced-');
+  writePage(
+    target,
+    'concepts',
+    'doc-page',
+    ['real prose linking [[target-page]] outside the fence', '', '```md', 'syntax: write [[nonexistent-page]] to link a page', '```', '', 'more prose'].join('\n')
+  );
+  writePage(target, 'gotchas', 'target-page', 'the destination');
+  const env = runHook(LINT, { session_id: 'sid-fenced', reason: 'clear' }, target);
+  assert.deepEqual(env, {}, 'the in-fence [[nonexistent-page]] is illustrative → no flag; the live link resolves');
+});
+
+// the fence strip must be SURGICAL — a real dead link in prose outside the fence still flags, and the
+// in-fence example is the only thing suppressed (guards against blinding the linter to the whole page).
+test('wiki-lint still flags a dead [[wikilink]] in prose beside a fenced code block (#28)', () => {
+  const target = freshInstall('wrxn-lint-fenced-live-');
+  writePage(
+    target,
+    'concepts',
+    'doc-page2',
+    ['see [[ghost-page]] for more', '', '```', 'example: [[also-not-real]] inside code', '```'].join('\n')
+  );
+  const env = runHook(LINT, { session_id: 'sid-fenced2', reason: 'clear' }, target);
+  const c = ctx(env);
+  assert.ok(c, 'the out-of-fence dead link still flags');
+  assert.match(c, /ghost-page/, 'names the real dead link outside the fence');
+  assert.ok(!/also-not-real/.test(c), 'the in-fence example is NOT flagged');
+});
+
 // ── AC: wiki-lint flags duplicate page titles (S2 #21) ────────────────────────
 
 test('wiki-lint flags two pages that share the same title', () => {
