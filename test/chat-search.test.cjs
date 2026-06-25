@@ -254,3 +254,21 @@ test('the CLI skips an unreadable entry — exits 0 with the good hit and no sta
   assert.match(res.stdout, /baton echo/, 'the good hit is printed to stdout');
   assert.equal(res.stderr.trim(), '', 'nothing leaks to stderr — no Node stack trace, no absolute path');
 });
+
+// ── #87 regression: a tool record must never surface, even with a stray `text` field ──
+// The documented invariant is "only prompt records can match". The guard must key on kind === 'prompt',
+// not merely on the presence of a text field — so a (today hypothetical) tool record carrying text is
+// skipped regardless, and a schema drift cannot silently surface tool rows with role 'tool'.
+
+test('a kind:"tool" record carrying a text field never surfaces (only prompts match)', () => {
+  const root = tmp('wrxn-chatsearch-toolguard-');
+  writeEvents(root, 'sid-a', [
+    { ts: '2026-06-25T10:00:00.000Z', kind: 'tool', tool: 'Bash', target: '', text: 'baton echo inside a tool record' },
+  ]);
+
+  const res = searchConversationalLog('baton echo', {}, root);
+
+  assert.equal(res.total, 0, 'a non-prompt record is not eligible to match, even with a stray text field');
+  assert.equal(res.found, false, 'the result is nothing-found, not a tool hit');
+  assert.ok(!res.hits.some((h) => h.role === 'tool'), 'no tool-role hit is ever returned');
+});

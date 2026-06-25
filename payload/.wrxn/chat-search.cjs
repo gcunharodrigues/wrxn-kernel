@@ -89,7 +89,7 @@ function searchConversationalLog(query, opts, roots) {
         } catch {
           continue; // skip a malformed line, never crash the scan
         }
-        if (!rec || typeof rec.text !== 'string') continue; // only text-bearing records can match
+        if (!rec || rec.kind !== 'prompt' || typeof rec.text !== 'string') continue; // ONLY prompt records match — a non-prompt (e.g. tool) record is skipped even if it carries a stray text field (#87)
         if (!rec.text.toLowerCase().includes(needle)) continue;
         hits.push({ ts: rec.ts, session: rec.sid, role: roleFromKind(rec.kind), snippet: snippetFor(rec.text, needle) });
       }
