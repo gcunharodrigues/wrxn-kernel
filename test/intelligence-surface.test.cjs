@@ -180,6 +180,25 @@ test('wiki-lint still flags a dead [[wikilink]] in prose beside a fenced code bl
   assert.ok(!/also-not-real/.test(c), 'the in-fence example is NOT flagged');
 });
 
+// ── AC: wiki-lint ignores [[wikilinks]] inside INLINE code spans (#28 follow-up) ──
+// stripFencedCode strips ``` / ~~~ fences; a [[slug]] inside an inline `code span` is illustrative example
+// syntax too, so it must not flag — while a real dead link in the same prose still flags (the inline strip
+// stays surgical, the same guarantee the fenced strip carries). One page proves both at once.
+test('wiki-lint ignores a [[wikilink]] inside an inline code span yet still flags a dead link beside it', () => {
+  const target = freshInstall('wrxn-lint-inline-');
+  writePage(
+    target,
+    'concepts',
+    'doc-page3',
+    ['see [[ghost-page]] for more', '', 'illustrative `[[also-not-real]]` syntax stays silent'].join('\n')
+  );
+  const env = runHook(LINT, { session_id: 'sid-inline', reason: 'clear' }, target);
+  const c = ctx(env);
+  assert.ok(c, 'the prose dead link still flags');
+  assert.match(c, /ghost-page/, 'names the real dead link outside the code span');
+  assert.ok(!/also-not-real/.test(c), 'the inline-span example is NOT flagged');
+});
+
 // ── AC: wiki-lint flags duplicate page titles (S2 #21) ────────────────────────
 
 test('wiki-lint flags two pages that share the same title', () => {
