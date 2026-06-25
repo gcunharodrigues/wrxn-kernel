@@ -134,6 +134,118 @@ test('buildTranscriptBlob truncates a long thinking block to keep tokens bounded
   assert.ok(!blob.includes('A'.repeat(601)), 'thinking is truncated at 600 chars');
 });
 
+// ── #62: strip hook-injected framework context (SessionStart orientation, UserPromptSubmit rules) ──
+// SessionStart injects <wrxn-orientation> embedding the ENTIRE prior baton; UserPromptSubmit injects
+// <synapse-rules>/<recall-surface>/etc. Left in the blob, the prior baton echoes forward (fresh `wrote`,
+// frozen content — #62). The builder strips known sentinels per text part BEFORE chunking, while the
+// real user/assistant work survives. The builder is the ONE shared surface (claude + gemini paths).
+
+test('buildTranscriptBlob strips closed framework-sentinel blocks (orientation, rules, recall) but keeps the real work', () => {
+  const orientation = '<wrxn-orientation>\nResume — prior handoff:\n**TL;DR** Shipped kernel 0.15.0; next step #45\n**Gemini-primary default** is live\n</wrxn-orientation>';
+  const jsonl = [
+    JSON.stringify({ type: 'user', message: { role: 'user', content: orientation } }),
+    JSON.stringify({ type: 'user', message: { role: 'user', content: '<synapse-rules>\nLayer 2 build loop\n</synapse-rules>\nfix the parser off-by-one' } }),
+    JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: '<recall-surface>\nrelated: parser slice\n</recall-surface>patched the slice index and added a test' }] } }),
+  ].join('\n');
+
+  const blob = synth.buildTranscriptBlob(jsonl);
+
+  assert.ok(!blob.includes('Shipped kernel 0.15.0'), 'the prior baton embedded in the orientation is stripped');
+  assert.ok(!blob.includes('Gemini-primary default'), 'no orientation span survives');
+  assert.ok(!blob.includes('wrxn-orientation'), 'the orientation sentinel tags are gone');
+  assert.ok(!blob.includes('synapse-rules') && !blob.includes('Layer 2 build loop'), 'the injected synapse-rules block is stripped');
+  assert.ok(!blob.includes('recall-surface') && !blob.includes('related: parser slice'), 'the injected recall-surface block is stripped');
+  assert.ok(blob.includes('fix the parser off-by-one'), 'the real user prompt (after the injected rules) survives');
+  assert.ok(blob.includes('patched the slice index'), 'the real assistant work survives');
+});
+
+test('buildTranscriptBlob strips an UNCLOSED/truncated sentinel block to the role boundary, never throwing', () => {
+  // the transcript was truncated mid-orientation: the block opens but never closes (no </wrxn-orientation>).
+  const jsonl = [
+    JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'real work: refactored the parser' }] } }),
+    JSON.stringify({ type: 'user', message: { role: 'user', content: '<wrxn-orientation>\n**TL;DR** Shipped kernel 0.15.0; next step #45\nGemini-primary default' } }),
+  ].join('\n');
+
+  let blob;
+  assert.doesNotThrow(() => {
+    blob = synth.buildTranscriptBlob(jsonl);
+  }, 'a truncated sentinel block must never throw — the synth is fail-open');
+  assert.ok(!blob.includes('Shipped kernel 0.15.0'), 'the unclosed orientation content is stripped to end-of-part');
+  assert.ok(!blob.includes('wrxn-orientation'), 'the dangling open tag is gone');
+  assert.ok(blob.includes('refactored the parser'), 'real work in a prior turn (a different role boundary) survives');
+});
+
+test('buildTranscriptBlob still skips malformed JSONL while stripping sentinels and keeping a heavy session intact', () => {
+  // a malformed line, an injected orientation, and three real turns (user prompt, assistant text + tool_use,
+  // tool_result) coexist: malformed → skipped, orientation → stripped, the real work → all captured.
+  const jsonl = [
+    'not json at all',
+    JSON.stringify({ type: 'user', message: { role: 'user', content: '<wrxn-orientation>\n**TL;DR** Shipped kernel 0.15.0\n</wrxn-orientation>' } }),
+    JSON.stringify({ type: 'user', message: { role: 'user', content: 'add a retry to the uploader' } }),
+    JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'added exponential backoff' }, { type: 'tool_use', name: 'Bash', input: { command: 'npm test' } }] } }),
+    JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', content: [{ type: 'text', text: 'all green' }] }] } }),
+  ].join('\n');
+
+  const blob = synth.buildTranscriptBlob(jsonl);
+  const chunks = blob.split('\n').filter(Boolean);
+
+  assert.ok(!blob.includes('not json at all'), 'the malformed line is skipped, never thrown on');
+  assert.ok(!blob.includes('Shipped kernel 0.15.0'), 'the injected orientation is stripped from the heavy session too');
+  assert.equal(chunks.length, 3, 'three real turns are captured (orientation-only chunk dropped, malformed skipped)');
+  assert.ok(blob.includes('add a retry to the uploader'), 'the real user prompt survives');
+  assert.ok(blob.includes('added exponential backoff') && blob.includes('[tool_use Bash]'), 'assistant text + tool_use survive');
+  assert.ok(blob.includes('[tool_result] all green'), 'the tool_result survives');
+});
+
+// ── #62 correction: the unclosed-tag strip must not over-strip real prose (Finding A) ──
+// The truncation strip cuts to end-of-part, so an UNANCHORED match would nuke everything after a sentinel
+// that a human merely MENTIONS mid-sentence. Real framework injections are always part-leading, so the
+// strip is anchored there — a mid-prose mention keeps its trailing text.
+test('buildTranscriptBlob keeps real prose that mentions a sentinel mid-text (no tail-drop)', () => {
+  const jsonl = JSON.stringify({
+    type: 'assistant',
+    message: { role: 'assistant', content: [{ type: 'text', text: 'the <synapse-rules> block is double-counted, then add a retry to the uploader' }] },
+  });
+
+  const blob = synth.buildTranscriptBlob(jsonl);
+
+  assert.ok(blob.includes('then add a retry to the uploader'), 'a mid-prose sentinel mention must not nuke the trailing text');
+  assert.ok(blob.includes('the '), 'the leading prose survives too');
+});
+
+// ── #62 correction: the strip must not hang on a large transcript part (Finding B — ReDoS) ──
+// The global closed-block regex is ~quadratic on a pathological part (many opens, no closes); the
+// fail-open try/catch covers a throw but NOT a multi-second hang. A length guard keeps it effectively
+// linear — a part far larger than any real injected block is ordinary content with nothing to strip.
+test('buildTranscriptBlob bounds a very large text part — completes fast and never throws (no ReDoS hang)', () => {
+  const huge = '<synapse-rules>'.repeat(34000); // ~510 KB of sentinel opens with no closes — the quadratic shape
+  const jsonl = JSON.stringify({ type: 'user', message: { role: 'user', content: huge + ' tail work' } });
+
+  const start = Date.now();
+  let blob;
+  assert.doesNotThrow(() => {
+    blob = synth.buildTranscriptBlob(jsonl);
+  }, 'a huge part never throws (fail-open)');
+  const elapsedMs = Date.now() - start;
+  assert.ok(elapsedMs < 1000, `the strip must stay bounded on a large part (took ${elapsedMs}ms)`);
+  assert.equal(typeof blob, 'string', 'the builder still returns a blob');
+});
+
+// ── #62 correction: SEQUENTIAL part-leading injected blocks all strip, trailing work survives ──
+// A single injected part can hold one block immediately followed by another (synapse-rules then
+// recall-surface) before the real prompt. Both are stripped; the trailing real work is kept.
+test('buildTranscriptBlob strips sequential part-leading injected blocks, keeping the trailing real work', () => {
+  const injected = '<synapse-rules>\nLayer 2 build loop\n</synapse-rules>\n<recall-surface>\nrelated: uploader slice\n</recall-surface>\nadd a retry to the uploader';
+  const jsonl = JSON.stringify({ type: 'user', message: { role: 'user', content: injected } });
+
+  const blob = synth.buildTranscriptBlob(jsonl);
+
+  assert.ok(!blob.includes('Layer 2 build loop'), 'the first injected block is stripped');
+  assert.ok(!blob.includes('related: uploader slice'), 'the second sequential injected block is stripped');
+  assert.ok(!blob.includes('synapse-rules') && !blob.includes('recall-surface'), 'no injected sentinel tags survive');
+  assert.ok(blob.includes('add a retry to the uploader'), 'the trailing real work survives');
+});
+
 // ── claude engine: arg construction (pure spec) ─────────────────────────────────
 // `claude -p --model <id>`, the prompt+blob on stdin, WRXN_MEMORY_SYNTH=1 in env (the recursion
 // sentinel), a bounded timeout, the operator's CLI auth (NO key). The spec is pure so the contract is
@@ -368,6 +480,57 @@ test('run() exits 1 and prints nothing when no engine produces output (fail-safe
   assert.equal(code, 1);
   assert.equal(printed, '', 'nothing is written to stdout when synthesis yields nothing');
   assert.match(errd, /no engine produced output/);
+});
+
+// ── #63: the MANUAL CLI path redacts the blob BEFORE it egresses to the engine ──
+// runHandoff (:729) and runDream (:866) scrub the transcript blob before it reaches the external model;
+// the manual `run()` --task demo path (:972) fed readTranscriptBlob(file) RAW to synthesize, egressing
+// any credential in the transcript un-redacted (the baton-output redaction is too late — the secret has
+// already left the box in the request). Parity: no entry point may egress an un-redacted blob. The
+// load-bearing assertion is what the injected invoker RECEIVES (calls[0].input — the `claude -p` stdin /
+// the gemini POST body on fallback), not just what is printed.
+
+test('run() (manual CLI) redacts the transcript blob BEFORE it egresses to the engine (#63)', async () => {
+  const root = tmp('wrxn-synth-cli-egress-');
+  const tx = path.join(root, 'session.jsonl');
+  // the transcript itself carries a planted credential (a shape already in REDACTIONS, split so it never
+  // lands as a literal token — this isolates the EGRESS-TIMING fix, not a pattern gap).
+  const secret = 'ghp' + '_0123456789abcdefghijklmnopqrstuvwxyz';
+  fs.writeFileSync(tx, [
+    JSON.stringify({ type: 'user', message: { role: 'user', content: `deploy with token ${secret} then ship` } }),
+    JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'wiring the manual synth demo path' }] } }),
+  ].join('\n') + '\n');
+
+  const { invoke, calls } = fakeInvoke({ claude: { ok: true, text: '**TL;DR** shipped' } });
+  const sink = { write: () => {} };
+  const code = await synth.run(['--task', 'handoff', tx, '--root', root], { invoke, out: sink, err: sink });
+
+  assert.equal(code, 0, 'a successful synthesis');
+  assert.equal(calls.length, 1, 'the engine was invoked once');
+  const sent = calls[0].input; // what reaches `claude -p` (and would POST off-box to gemini on fallback)
+  assert.doesNotMatch(sent, /ghp_[A-Za-z0-9]{20}/, 'the github token is scrubbed BEFORE egress to the model');
+  assert.match(sent, /\[REDACTED\]/, 'the blob the engine received was redacted');
+  assert.match(sent, /wiring the manual synth demo path/, 'ordinary transcript content still reaches the engine');
+});
+
+// #63 (no-regression): a CLEAN transcript (no credential shapes) egresses byte-identical to
+// readTranscriptBlob(file) — redactSecrets is pure/credential-shapes-only, so ordinary prose is never
+// over-redacted and the handoff synthesis is unchanged (no quality regression).
+test('run() (manual CLI) leaves a clean transcript blob byte-identical before egress — no over-redaction (#63)', async () => {
+  const root = tmp('wrxn-synth-cli-clean-');
+  const tx = path.join(root, 'session.jsonl');
+  fs.writeFileSync(tx, [
+    JSON.stringify({ type: 'user', message: { role: 'user', content: 'refactor the parser and add a regression test' } }),
+    JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'no credentials here, just ordinary prose' }] } }),
+  ].join('\n') + '\n');
+
+  const { invoke, calls } = fakeInvoke({ claude: { ok: true, text: '**TL;DR** done' } });
+  const sink = { write: () => {} };
+  await synth.run(['--task', 'handoff', tx, '--root', root], { invoke, out: sink, err: sink });
+
+  const sent = calls[0].input; // what reaches the engine
+  assert.doesNotMatch(sent, /\[REDACTED\]/, 'a clean transcript is never marked — no over-redaction of ordinary prose');
+  assert.ok(sent.includes(synth.readTranscriptBlob(tx)), 'the egressed blob is byte-identical to readTranscriptBlob(file)');
 });
 
 // ── seeded config + manifest registration (managed-integrity stays consistent) ──
