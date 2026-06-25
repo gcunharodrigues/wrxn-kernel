@@ -184,6 +184,19 @@ test('redactSecrets handles the assignment-shape pathological run in linear time
   assert.ok(elapsedMs < 1000, `the assignment shape over 100k word chars must stay linear (ReDoS guard); took ${elapsedMs.toFixed(0)}ms`);
 });
 
+// #66 security: SIDECAR_EXTRA E3 — the URI/connection-string shape /[a-z][a-z0-9+.\-]+:\/\/…/i — had an
+// UNBOUNDED protocol segment; with /i a long letter-run drove O(n²) backtracking (~8.8s @100k) through the
+// SAME uncapped emit-event → redactSecrets sink as the #39 findings. 'A'×100k has no '://', so it isolates
+// E3 (no canonical shape nor other extra matches a bare letter-run). Bounding the scheme to {1,19} makes
+// each start position fail fast — must stay well under 1s, never hang.
+test('redactSecrets handles the URI/connection-string pathological letter-run in linear time (#66 ReDoS guard)', () => {
+  const pathological = 'A'.repeat(100000);
+  const t = process.hrtime.bigint();
+  sidecar.redactSecrets(pathological);
+  const elapsedMs = Number(process.hrtime.bigint() - t) / 1e6;
+  assert.ok(elapsedMs < 1000, `the URI/connection-string shape over 100k letters must stay linear (ReDoS guard); took ${elapsedMs.toFixed(0)}ms`);
+});
+
 // #39 security LOW: the PEM label was narrowed from [A-Z ]* to (?:[A-Z ]+ )?, which stops matching a
 // malformed double-space label. AC1 says no existing match may weaken — the broadest [A-Z ]* form must
 // still flag every standard descriptor AND the malformed double-space / unlabeled forms.
@@ -238,6 +251,7 @@ test('redactSecrets scrubs a URI connection string with inline creds (#38 F2)', 
   const cases = [
     'postgres://dbuser:notrealdbpass@db.example.com:5432/app',
     'mongodb://admin:notrealmongo@cluster.example.net/db',
+    'mongodb+srv://admin:notrealsrv@cluster0.example.net/db', // longest real scheme (11 chars) — guards the {1,19} bound (#66)
     'redis://user:notrealredis@127.0.0.1:6379',
   ];
   for (const dirty of cases) {
