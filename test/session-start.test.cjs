@@ -372,6 +372,64 @@ test('session-start does NOT warn on the SAME-session double-spawn (no false ala
   assert.doesNotMatch(ctx, /stale/i, 'same session that wrote the baton → no false staleness alarm');
 });
 
+// ── #104 CORE: SessionStart releases the SessionEnd synth's once-per-session claim ──────────────
+// The SessionEnd spawn hook dedups via a PERSISTENT per-session marker .wrxn/continuity/.spawned-<sid>.
+// But SessionEnd fires once per PROCESS instance, not per session id — a resume reopens the SAME id in a
+// new process, so the resumed session's later (content-rich) end hits the existing marker, is swallowed
+// fail-open, and never re-synths: the baton freezes at the first end. SessionStart releases (deletes) the
+// marker on EVERY start, so the next SessionEnd for this id is free to synth again. A fresh id (startup /
+// clear) has no marker → no-op. Fail-open: any delete fault → false, never throws (orientation must not
+// block on the release). The marker name is keyed by safeId, byte-identical to the spawn hook's writer.
+
+const { releaseSpawnClaim } = sessionStart;
+const continuityDir = (target) => path.join(target, '.wrxn', 'continuity');
+const spawnMarker = (target, safeSid) => path.join(continuityDir(target), `.spawned-${safeSid}`);
+
+test('releaseSpawnClaim deletes a present .spawned-<sid> marker and returns true (#104)', () => {
+  const target = freshInstall('wrxn-release-present-');
+  fs.mkdirSync(continuityDir(target), { recursive: true });
+  const marker = spawnMarker(target, 'sid-resume'); // an already-canonical id (safeId is identity here)
+  fs.writeFileSync(marker, '');
+  const released = releaseSpawnClaim(target, 'sid-resume');
+  assert.equal(released, true, 'a present claim marker is released');
+  assert.equal(fs.existsSync(marker), false, 'the marker is deleted (the synth is re-armed for this id)');
+});
+
+test('releaseSpawnClaim on an ABSENT marker is a no-op: returns false, never throws (#104)', () => {
+  const target = freshInstall('wrxn-release-absent-');
+  // a fresh id (startup / clear) never had a claim marker → nothing to release.
+  let released;
+  assert.doesNotThrow(() => { released = releaseSpawnClaim(target, 'sid-fresh'); });
+  assert.equal(released, false, 'no marker → no-op (false), and orientation is never blocked');
+});
+
+test('releaseSpawnClaim is fail-open on a delete fault: returns false, never throws (#104, unwritable AC)', () => {
+  const target = freshInstall('wrxn-release-fault-');
+  fs.mkdirSync(continuityDir(target), { recursive: true });
+  // Induce a deterministic, uid-independent delete fault: the marker path is a DIRECTORY, so unlinkSync
+  // throws (EISDIR/EPERM) — the same fail-open arm an unwritable parent would take (chmod is root-sensitive,
+  // so a structural fault proves the contract robustly even under a root CI). Any fault → false, never throws.
+  const marker = spawnMarker(target, 'sid-fault');
+  fs.mkdirSync(marker, { recursive: true });
+  let released;
+  assert.doesNotThrow(() => { released = releaseSpawnClaim(target, 'sid-fault'); });
+  assert.equal(released, false, 'a delete fault degrades to false (fail-open)');
+  assert.equal(fs.existsSync(marker), true, 'the un-deletable path is left untouched (no partial damage)');
+});
+
+test('releaseSpawnClaim keys the marker by safeId — a traversal id cannot escape .wrxn/continuity (#104 sec)', () => {
+  const target = freshInstall('wrxn-release-traversal-');
+  fs.mkdirSync(continuityDir(target), { recursive: true });
+  // safeId('../../evil') canonicalizes to 'evil' — the exact name the spawn hook claims (round-trip). The
+  // raw id must never be concatenated into the path (which would resolve UP and out of the markers dir).
+  const inside = spawnMarker(target, 'evil');
+  fs.writeFileSync(inside, '');
+  const released = releaseSpawnClaim(target, '../../evil');
+  assert.equal(released, true, 'the canonicalized claim marker is released');
+  assert.equal(fs.existsSync(inside), false, 'the marker INSIDE .wrxn/continuity is the one deleted');
+  assert.equal(fs.existsSync(path.join(target, 'evil')), false, 'nothing outside the markers dir is touched');
+});
+
 test('session-start sanitizes the echoed outcome so a crafted error row cannot break the orientation block (F1)', () => {
   const target = freshInstall('wrxn-sess-f1-');
   const realNow = Date.now();

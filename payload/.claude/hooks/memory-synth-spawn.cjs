@@ -49,6 +49,42 @@ function findInstallRoot(startDir) {
   return null;
 }
 
+// ── skip-log (#104) ──────────────────────────────────────────────────────────────
+// The #45 `wx` claim blocks a re-spawn SILENTLY, so a benign dedup skip is invisible in the synth log.
+// When a fire skips because the marker is already present, append ONE row to .wrxn/continuity/.synth.log so
+// the dedup is diagnosable. The row matches memory-synth.cjs's writeSynthLog shape EXACTLY — tab-separated
+// six fields: ISO timestamp, session id, task `handoff`, engine `-`, `attempts=0`, outcome `skip`. The
+// session id is sanitized via the same idiom as memory-synth's sanitizeLogField (strip C0/C1 control chars —
+// which INCLUDES tab \x09 and newline \x0a — then length-cap) so a hostile id can't forge extra rows. `skip`
+// is a NON-failure token (the #51 staleness guard treats only no-engine/error as rot), so a dedup never
+// false-warns. Self-contained — node stdlib only, NO kernel import; sanitizeLogField is duplicated by design
+// (every install-only hook is standalone, exactly as safeId is replicated across the hooks).
+const SYNTH_LOG = '.synth.log';
+const LOG_FIELD_MAX = 64;
+
+function sanitizeLogField(v) {
+  // eslint-disable-next-line no-control-regex
+  return String(v == null ? '' : v).replace(/[\x00-\x1f\x7f-\x9f]/g, '').slice(0, LOG_FIELD_MAX);
+}
+
+// Append exactly one tab-separated `skip` row for a marker-present dedup. Best-effort + FAIL-OPEN: a logging
+// fault is swallowed so it can NEVER affect the dedup (the diagnosability log must not become a failure mode).
+function appendSkipLog(dir, sessionId) {
+  try {
+    const line = [
+      new Date().toISOString(),
+      sanitizeLogField(sessionId) || '-', // untrusted stash value — strip control chars, cap length.
+      'handoff',
+      '-',
+      'attempts=0',
+      'skip',
+    ].join('\t');
+    fs.appendFileSync(path.join(dir, SYNTH_LOG), line + '\n');
+  } catch {
+    /* the skip log is best-effort — a write fault must never affect the dedup */
+  }
+}
+
 /**
  * The testable core. Given the SessionEnd payload, the install root, the env (for the recursion guard),
  * and an injectable `spawn`, it stashes the payload + writes the pending markers and launches the synth
@@ -75,7 +111,18 @@ function run({ payload, root, env = process.env, spawn: spawnFn = spawn }) {
     // cannot be deduped → preserve today's spawn-every-time behavior for that path.
     const sid = payload && payload.session_id;
     if (sid) {
-      fs.closeSync(fs.openSync(path.join(dir, `.spawned-${safeId(sid)}`), 'wx'));
+      try {
+        fs.closeSync(fs.openSync(path.join(dir, `.spawned-${safeId(sid)}`), 'wx'));
+      } catch (err) {
+        if (err && err.code === 'EEXIST') {
+          // The session is already claimed — a same-instance double-fire (#45) OR a resume's later end before
+          // SessionStart released the marker. This is the dedup skip: log ONE benign `skip` row so the dedup
+          // is diagnosable (#104), then no-op (spawn nothing, write no pending markers) — today's behavior.
+          appendSkipLog(dir, sid);
+          return {};
+        }
+        throw err; // any OTHER claim fault → fail-open via the outer catch (not a dedup → no skip row)
+      }
     }
 
     // Stash the payload as .pending (the synth reads it for transcript_path) and raise the handoff gate.

@@ -93,6 +93,38 @@ function stampStartHead(root, sessionId, opts = {}) {
   }
 }
 
+// ── re-arm the SessionEnd synth on resume (#104) ─────────────────────────────────
+// The SessionEnd spawn hook (memory-synth-spawn.cjs) dedups via a PERSISTENT per-session marker
+// .wrxn/continuity/.spawned-<sid>. But SessionEnd fires once per PROCESS instance, not per session id — a
+// resume reopens the SAME id in a NEW process, so the resumed session's later (content-rich) end hits the
+// existing marker, is swallowed fail-open, and never re-synths: the baton FREEZES at the first end. The
+// fix: SessionStart releases (deletes) the marker on EVERY start, so the next SessionEnd for this id is free
+// to synth again. A fresh id (startup / clear) has no marker → no-op. The spawn hook's WITHIN-instance `wx`
+// claim (the same-process #45 guard) is untouched — only this cross-process persistent marker is released
+// between sessions. The marker name is keyed by safeId, byte-identical to the spawn hook's writer, so the
+// release deletes EXACTLY what that hook wrote.
+
+const CONTINUITY_DIR_REL = ['.wrxn', 'continuity'];
+
+/**
+ * Release (delete) the session's once-per-session synth claim marker at
+ * <root>/.wrxn/continuity/.spawned-<safeId(sessionId)>, re-arming the SessionEnd synth for a resumed
+ * session id (#104). Returns true when a marker was removed; false on any fail-open path (no root/session,
+ * absent marker, unwritable / any fault). NEVER throws — orientation must never block on the release.
+ * @param {string} root  install root
+ * @param {string} sessionId  the session id (marker key)
+ * @returns {boolean}
+ */
+function releaseSpawnClaim(root, sessionId) {
+  try {
+    if (!root || !sessionId) return false;
+    fs.unlinkSync(path.join(root, ...CONTINUITY_DIR_REL, `.spawned-${safeId(sessionId)}`));
+    return true;
+  } catch {
+    return false; // absent marker (no-op) / unwritable / any delete fault → fail-open, never blocks orientation
+  }
+}
+
 // Walk up from CLAUDE_PROJECT_DIR (or cwd) to the install root carrying wrxn.install.json.
 function findInstallRoot(startDir) {
   let dir = startDir || process.env.CLAUDE_PROJECT_DIR || process.cwd();
@@ -348,6 +380,15 @@ function main() {
     /* never block orientation on the baseline stamp */
   }
 
+  // #104: release the SessionEnd synth's once-per-session claim so a RESUMED session (same id, new process)
+  // re-synths its later, content-rich end instead of freezing the baton at the first end. A fresh id
+  // (startup / clear) has no marker → no-op. Fail-open: any fault is swallowed and orientation proceeds.
+  try {
+    if (event && event.session_id) releaseSpawnClaim(root, event.session_id);
+  } catch {
+    /* never block orientation on the claim release */
+  }
+
   // Hold for an in-flight SessionEnd synth (auto-memory-03) so a back-to-back /clear resumes on the
   // FRESH baton, bounded by the crash safety-cap. Fail-open: any fault here must not block orientation.
   try {
@@ -399,4 +440,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { holdDecision, holdForHandoff, HOLD_CAP_MS, stampStartHead, resolveGitHead, BASELINE_DIR_REL, batonStaleness, parseSynthLog, readSynthLogTail, SYNTH_LOG_TAIL_BYTES };
+module.exports = { holdDecision, holdForHandoff, HOLD_CAP_MS, stampStartHead, releaseSpawnClaim, resolveGitHead, BASELINE_DIR_REL, batonStaleness, parseSynthLog, readSynthLogTail, SYNTH_LOG_TAIL_BYTES };
