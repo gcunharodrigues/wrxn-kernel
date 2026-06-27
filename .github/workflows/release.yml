@@ -78,6 +78,15 @@ jobs:
           echo "version_on_npm=$VERSION_ON_NPM" >> "$GITHUB_OUTPUT"
           echo "$PKG@$VER on npm: $VERSION_ON_NPM (type-release: ${{ steps.decide.outputs.release }})"
 
+      # #103: surface the silent release skip. decidePublish proceeds when there are releasable commits
+      # (typeRelease), but if package.json.version is already on npm the publish step skips the
+      # already-published version and nothing ships — silently. decideWarn = typeRelease && versionOnNpm
+      # (lib/release.cjs `decideWarn`, unit-tested) pins exactly that case. Emit a NON-BLOCKING
+      # ::warning:: (echo exits 0 → the run stays green) telling the author to run `wrxn release`.
+      - name: warn when releasable commits merged but the version was not bumped (#103)
+        if: steps.decide.outputs.release == 'true' && steps.gate.outputs.version_on_npm == 'true'
+        run: echo '::warning::releasable commits merged but package.json not bumped — run `wrxn release` to publish.'
+
       - name: upgrade npm (OIDC trusted publishing needs npm >= 11.5.1)
         if: steps.decide.outputs.release == 'true' || steps.gate.outputs.version_on_npm == 'false'
         run: npm install -g npm@latest
