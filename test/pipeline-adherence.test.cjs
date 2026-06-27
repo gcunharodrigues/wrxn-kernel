@@ -249,6 +249,46 @@ test('decideBash fails open (allow) when the current branch cannot be resolved',
   assert.equal(decideBash({ command: 'git push', resolveBranch: () => null }).action, 'allow');
 });
 
+// security S2 / reviewer N3: force (`+`) and fully-qualified (`refs/heads/`) refspecs must NOT evade
+// the trunk catch. Normalize the push target (strip `+`, take the post-`:` remote side, strip
+// `refs/heads/`) before the trunk compare.
+test('decideBash catches a force trunk push `git push origin +main`', () => {
+  assert.equal(decideBash({ command: 'git push origin +main' }).action, 'warn');
+});
+
+test('decideBash catches a fully-qualified trunk push `git push origin refs/heads/main`', () => {
+  assert.equal(decideBash({ command: 'git push origin refs/heads/main' }).action, 'warn');
+});
+
+test('decideBash catches a force fully-qualified trunk push `git push origin +refs/heads/main`', () => {
+  assert.equal(decideBash({ command: 'git push origin +refs/heads/main' }).action, 'warn');
+});
+
+test('decideBash still allows a force push to a NON-trunk branch `git push origin +feature/x`', () => {
+  assert.equal(decideBash({ command: 'git push origin +feature/x' }).action, 'allow');
+});
+
+// security S1 ReDoS: the catch regexes must be LINEAR (bounded), not O(n^2). A pathological command
+// must never hang the every-Bash hot path. Old unbounded `[\s\S]*?` was quadratic (measured 3.7s on a
+// 352KB input); bounded `[\s\S]{0,N}` ranges keep it flat (~ms). These guard against a re-introduction.
+test('decideBash stays linear on a pathological gh command (ReDoS guard) [S1]', () => {
+  const huge = 'gh ' + 'pr issue '.repeat(40000); // ~352KB; many pr/issue tokens, NO create/merge verb
+  const t0 = process.hrtime.bigint();
+  const action = decideBash({ command: huge }).action;
+  const elapsedMs = Number(process.hrtime.bigint() - t0) / 1e6;
+  assert.equal(action, 'allow'); // no create/merge -> not a catch
+  assert.ok(elapsedMs < 1000, `expected linear (<1000ms); took ${elapsedMs.toFixed(0)}ms — quadratic regression?`);
+});
+
+test('decideBash stays linear on a pathological git command (ReDoS guard) [S1]', () => {
+  const huge = 'git '.repeat(80000); // ~313KB; many `git` tokens, NO `push`
+  const t0 = process.hrtime.bigint();
+  const action = decideBash({ command: huge, resolveBranch: () => 'feature/x' }).action;
+  const elapsedMs = Number(process.hrtime.bigint() - t0) / 1e6;
+  assert.equal(action, 'allow'); // no `push` -> not a git push -> allow
+  assert.ok(elapsedMs < 1000, `expected linear (<1000ms); took ${elapsedMs.toFixed(0)}ms — quadratic regression?`);
+});
+
 // Posture knob `off` disables the Bash arm entirely (kill switch) — even a catch command passes.
 test('decideBash off kill-switch allows a catch command (`gh pr create`)', () => {
   assert.equal(decideBash({ command: 'gh pr create --title x', level: 'off' }).action, 'allow');

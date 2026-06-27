@@ -112,6 +112,17 @@ function isTrunk(name) {
   return name === 'main' || name === 'master';
 }
 
+// Normalize a `git push` target to a bare branch name before the trunk compare. Handles the refspec
+// forms that would otherwise evade the catch: a colon refspec (local:remote) targets the REMOTE side
+// (after the last ':'); a leading `+` is the force marker; `refs/heads/` is the fully-qualified prefix.
+// So `+main`, `refs/heads/main`, `+refs/heads/main`, `HEAD:main` all normalize to `main`. (security S2.)
+function normalizeRef(token) {
+  let ref = token.includes(':') ? token.split(':').pop() : token;
+  ref = ref.replace(/^\+/, ''); // strip a leading force marker
+  ref = ref.replace(/^refs\/heads\//, ''); // strip a fully-qualified branch prefix
+  return ref;
+}
+
 // Guarded, READ-ONLY shell-out: resolve the current branch for an argless / remote-only `git push`.
 // Any failure -> null, and the caller fails open to allow. This is the only side-effecting path; it
 // is injected into `decideBash` (default below) so every unit test drives it without spawning git.
@@ -129,12 +140,12 @@ function currentBranch() {
 
 // Does this `git push` land on the trunk? Only a trunk push is a skip; feature-branch work is normal.
 function pushesToTrunk(cmd, resolveBranch) {
-  const m = cmd.match(/\bgit\b[\s\S]*?\bpush\b([\s\S]*)/);
+  // Bounded ranges (not unbounded `[\s\S]*?`) keep this linear on the hot path. (security S1.)
+  const m = cmd.match(/\bgit\b[\s\S]{0,80}\bpush\b([\s\S]*)/);
   const rest = m ? m[1] : '';
   const positionals = rest.split(/\s+/).filter((t) => t && !t.startsWith('-'));
-  // a colon refspec (local:remote) targets the REMOTE side -> take the part after ':'.
-  const refs = positionals.map((p) => (p.includes(':') ? p.split(':').pop() : p));
-  if (refs.some(isTrunk)) return true; // an explicit main/master ref
+  const refs = positionals.map(normalizeRef); // normalize force / fully-qualified / colon refspecs
+  if (refs.some(isTrunk)) return true; // an explicit main/master ref (any refspec form)
   if (positionals.length >= 2) return false; // an explicit non-trunk branch was named
   // no branch named (argless or remote-only) -> resolve the current branch
   let branch = null;
@@ -170,21 +181,21 @@ function decideBash({ command, agentId, level, resolveBranch = currentBranch } =
 
   // `gh issue create` is LOCKED to warn under every level (incl. block): to-prd/to-issues/triage
   // run it themselves in the main thread, so a block would wedge the redirect skills. (ADR 0009 §4.)
-  if (/\bgh\b[\s\S]*?\bissue\b[\s\S]*?\bcreate\b/.test(cmd)) {
+  if (/\bgh\b[\s\S]{0,80}\bissue\b[\s\S]{0,80}\bcreate\b/.test(cmd)) {
     return { action: 'warn', skill: SKILL_SPEC, message: bashMessage('gh issue create', SKILL_SPEC) };
   }
 
-  if (/\bgh\b[\s\S]*?\bpr\b[\s\S]*?\bcreate\b/.test(cmd)) {
+  if (/\bgh\b[\s\S]{0,80}\bpr\b[\s\S]{0,80}\bcreate\b/.test(cmd)) {
     return catchAction('gh pr create', SKILL_SHIP);
   }
 
   // A PR merges into its base (the trunk); promotion is a `wrxn ship` PR gated by CI, not a manual merge.
-  if (/\bgh\b[\s\S]*?\bpr\b[\s\S]*?\bmerge\b/.test(cmd)) {
+  if (/\bgh\b[\s\S]{0,80}\bpr\b[\s\S]{0,80}\bmerge\b/.test(cmd)) {
     return catchAction('gh pr merge', SKILL_SHIP);
   }
 
   // Only a TRUNK push is a skip — promotion is a `wrxn ship` PR, not a direct push to main/master.
-  if (/\bgit\b[\s\S]*?\bpush\b/.test(cmd) && pushesToTrunk(cmd, resolveBranch)) {
+  if (/\bgit\b[\s\S]{0,80}\bpush\b/.test(cmd) && pushesToTrunk(cmd, resolveBranch)) {
     return catchAction('git push', SKILL_SHIP);
   }
 
