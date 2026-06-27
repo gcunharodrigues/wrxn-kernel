@@ -60,7 +60,7 @@ node .wrxn/chat-search.cjs "gate.*decision" --regex --since today
 node .wrxn/chat-search.cjs baton echo --session 9dc65f19-65fb-43cb-81fa-0340353f1cc5
 ```
 
-> **`--regex` safety (ReDoS).** The pattern is user-supplied and runs over whole transcripts, so it is bounded: it is **length-capped** (≤ 200 chars) and **statically screened** for catastrophic-backtracking shapes — a quantified group whose body holds a nested quantifier or alternation (`(a+)+`, `(a*)*`, `(.*)+`, `(a|a)+`, …). A rejected, malformed, or unparseable value fails loud. The screen is deliberately conservative: it also refuses the rare-but-safe `(foo|bar)+` (drop the outer quantifier to search it).
+> **`--regex` safety (ReDoS).** The pattern is user-supplied and runs over whole transcripts, so it is bounded at compile (before any input is matched): it is **length-capped** (≤ 200 chars) and runs through a **nesting-aware static screen** that rejects a quantified group whose body repeats or alternates through **any** nesting depth — both flat shapes (`(a+)+`, `(a|a)+`, `(?:a*)*`) and nested ones a flat check misses (`((a)+)+`, `((\w)+)+$`, `((a+))+`, `(a(b+)c)+`) — plus **backreferences** (`\1`…`\9`). A rejected, malformed, or unparseable value fails loud. The screen is deliberately conservative (it also refuses the rare-but-safe `(foo|bar)+` — drop the outer quantifier), but does not over-reject ordinary grouping: `(foo|bar)`, `(ab)+`, `([a+])+`, `(?:ab)+`, `a{1,5}`, `\d{4}-\d{2}-\d{2}` are all fine. **Residual:** a static screen models structure, not match semantics, so under the no-timeout / `fs`-`os`-`path`-only constraint it refuses the known catastrophic shapes rather than proving a pattern safe; an exotic construct outside those shapes is not modelled.
 
 ## Output
 

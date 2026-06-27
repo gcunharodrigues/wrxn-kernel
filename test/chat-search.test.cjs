@@ -617,15 +617,26 @@ test('an invalid opts.regex pattern fails loud with a clear, user-facing message
 
 // ── SECURITY: a catastrophic-backtracking --regex (ReDoS) is rejected at COMPILE, before any matching ──
 // The headline risk: --regex compiles a user-supplied pattern and runs it over whole transcripts. Node has
-// no native regex timeout and ADR-0008 forbids a worker/child to bound it, so the defense is STATIC — the
-// classic catastrophic family ((a+)+, (a*)*, (.*)*, overlapping alternation under a quantifier) is screened
-// out before it can ever touch input. Rejection happens at compile, so NO input can trigger the blowup.
+// no native regex timeout and ADR-0008 forbids a worker/child to bound it, so the defense is a STATIC,
+// nesting-aware screen. It must catch BOTH the flat family ((a+)+, (a|a)+) AND the star-height-2 family
+// where a quantifier hides behind an extra paren level (((a)+)+, ((\w)+)+$ — the canonical OWASP form and
+// the security-confirmed CLI hang) — a flat regex screen misses the latter. Rejection is at compile, so no
+// input can trigger the blowup; and it must NOT over-reject ordinary grouped patterns.
 
 test('a catastrophic-backtracking --regex pattern is rejected loud and fast (ReDoS defense)', () => {
   const root = tmp('wrxn-cs-redos-');
   writeEvents(root, 'sid-a', [prompt('2026-06-26T10:00:00.000Z', 'deploy the gate today')]);
 
-  for (const evil of ['(a+)+$', '(a*)*', '(.*)*', '(a|a)+']) {
+  const evilPatterns = [
+    // flat family
+    '(a+)+$', '(a*)*', '(.*)*', '(a|a)+', '(?:a*)*',
+    // NESTED family — a quantifier shielded by an extra paren level (the star-height-2 hole a flat screen
+    // misses; ((a)+)+ is the canonical OWASP example, ((\\w)+)+$ the security-confirmed CLI hang).
+    '((a)+)+$', '((\\w)+)+$', '((a+))+', '((a*))*', '(a(b+)c)+', '(?:(a)+)+', '(a{1,5})+',
+    // backreferences (the cheap residual the static screen closes outright)
+    '(\\w+)\\1', '(a)\\1',
+  ];
+  for (const evil of evilPatterns) {
     const t0 = Date.now();
     assert.throws(
       () => searchConversationalLog(evil, { regex: true }, root),
@@ -645,8 +656,11 @@ test('a catastrophic-backtracking --regex pattern is rejected loud and fast (ReD
   // a length-capped pattern is also rejected loud (bounds adversarial pattern complexity).
   assert.throws(() => searchConversationalLog('a'.repeat(300), { regex: true }, root), /too long/i, 'an over-long pattern is rejected');
 
-  // …but a safe pattern (alternation with no outer quantifier) is still allowed and matches.
-  assert.doesNotThrow(() => searchConversationalLog('(deploy|ship)', { regex: true }, root), 'a safe alternation is not over-rejected');
+  // …but safe patterns must NOT be over-rejected: alternation with no outer quantifier, a quantified group
+  // with a literal body, a quantified char-class, a non-capturing literal group — all linear, all allowed.
+  for (const safe of ['(deploy|ship)', '(ab)+', '([a+])+', '(?:ab)+', '(deploy|ship).*gate', '\\d{4}-\\d{2}-\\d{2}']) {
+    assert.doesNotThrow(() => searchConversationalLog(safe, { regex: true }, root), `${safe}: a safe pattern must not be over-rejected`);
+  }
   assert.equal(searchConversationalLog('(deploy|ship)', { regex: true }, root).total, 1, 'the safe pattern still matches');
 });
 
@@ -742,6 +756,29 @@ test('the CLI fails loud on a bad regex / catastrophic regex / unparseable --sin
   const badSince = spawnSync('node', [ENGINE, 'deploy', '--root', root, '--since', 'not-a-date'], { encoding: 'utf8' });
   assertClean(badSince, 'bad since');
   assert.match(badSince.stderr, /--since/, 'bad since: names the flag');
+});
+
+// ── SECURITY (regression): a NESTED ReDoS pattern must not hang the real CLI, even over pathological input ──
+// ((\w)+)+$ over a long run of word chars pegs a core for many seconds under a flat screen (security observed
+// >6s; a flat-regex screen lets it through). The nesting-aware screen rejects it at compile, before the
+// pathological input is ever scanned — so the CLI returns near-instantly with a clean error, not a hang.
+
+test('a nested ReDoS --regex does not hang the CLI even on pathological input (rejected fast at compile)', () => {
+  const root = tmp('wrxn-cs-redos-cli-');
+  // a transcript line that is a long run of word chars then a non-word tail — the catastrophic trigger.
+  const pathological = 'a'.repeat(40) + ' !';
+  writeEvents(root, 'sid-a', [prompt('2026-06-26T10:00:00.000Z', pathological)]);
+
+  for (const evil of ['((\\w)+)+$', '((a)+)+$', '((a+))+']) {
+    const t0 = Date.now();
+    const res = spawnSync('node', [ENGINE, evil, '--root', root, '--regex'], { encoding: 'utf8', timeout: 8000 });
+    const elapsed = Date.now() - t0;
+    assert.equal(res.signal, null, `${evil}: the CLI was not killed by the 8s timeout (no hang)`);
+    assert.ok(elapsed < 5000, `${evil}: rejected fast (${elapsed}ms) — backtracking never reached the matcher`);
+    assert.notEqual(res.status, 0, `${evil}: exits non-zero (rejected)`);
+    assert.ok(res.stderr.trim().startsWith('chat-search:'), `${evil}: clean one-line error, no stack`);
+    assert.match(res.stderr, /reject|backtrack/i, `${evil}: the error explains the ReDoS rejection`);
+  }
 });
 
 // ── SECURITY: --session is sanitized to a safe id charset — it can never widen scope or traverse a path ──

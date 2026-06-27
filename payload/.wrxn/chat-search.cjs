@@ -236,16 +236,65 @@ function parseSince(raw) {
 // STATIC and applied at COMPILE (before any input is matched):
 //   (1) PATTERN-LENGTH CAP — a legitimate search pattern is short ("(deploy|ship).*gate", "\\bbaton\\b"); 200
 //       chars is generous for real use yet bounds how much quantifier nesting an adversarial pattern can pack.
-//   (2) CATASTROPHIC-SHAPE SCREEN — reject a quantified group whose body itself contains a quantifier or an
-//       alternation (star-height ≥ 2 / overlapping-alternation-under-a-quantifier). This is the canonical
-//       catastrophic-backtracking family — (a+)+, (a*)*, (.*)+, (a|a)+ — incl. the (a+)+$ probe. It is a
-//       deliberately conservative screen: it also rejects the rare-but-safe (foo|bar)+, which has the clear
-//       workaround of dropping the outer quantifier; erring toward refusal is correct for a security bound.
-// RESIDUAL (stated honestly): a pattern that is catastrophic ONLY via constructs this static screen does not
-// model (e.g. backreference-driven blowup) could still backtrack. Given no runtime timeout is available, this
-// is the proportionate defense; the common ReDoS families and the security probe are all refused.
+//   (2) NESTING-AWARE CATASTROPHIC-SHAPE SCREEN (isCatastrophicRegex) — reject a *quantified group* whose
+//       body, through ANY nesting depth, repeats or alternates (a quantifier + * { ? or an alternation |).
+//       This is the catastrophic-backtracking (star-height ≥ 2 / overlapping-alternation-under-a-quantifier)
+//       family — both FLAT (a+)+, (a|a)+, (?:a*)* AND the NESTED forms a flat regex screen misses because it
+//       cannot cross an inner paren: ((a)+)+ (the OWASP example), ((a+))+, ((\w)+)+$, (a(b+)c)+, (a{1,5})+.
+//       Plus backreferences (\1..\9), which can backtrack catastrophically — refused outright.
+// It is deliberately CONSERVATIVE: it also rejects the rare-but-safe outer-quantified alternation (foo|bar)+
+// (drop the outer quantifier to search it). It does NOT over-reject ordinary grouping — (foo|bar), (ab)+,
+// ([a+])+, (?:ab)+, a{1,5}, \d{4}-\d{2}-\d{2} all pass.
+// RESIDUAL (stated honestly): a STATIC screen cannot be airtight under the no-timeout/ADR-0008 constraint —
+// it models group/quantifier structure, not match semantics, so it cannot prove a pattern safe, only refuse
+// the known-dangerous shapes. The catastrophic families that actually occur (flat + nested star-height-2,
+// overlapping alternation under a quantifier, backreferences — incl. every reviewed probe) are refused at
+// compile before any input is matched; an exotic construct outside these structural shapes is not modelled.
 const REGEX_PATTERN_MAX = 200;
-const CATASTROPHIC_REGEX = /\([^()]*[+*|][^()]*\)\s*[+*{]/; // group containing +,*,or | that is itself quantified
+
+// Linear (O(pattern length)) structural scan: does `p` contain a quantified group whose body repeats or
+// alternates at any nesting depth, or a backreference? Tracks one frame per open group; `complex` = the
+// group's body holds a quantifier/alternation (bubbled up from descendants), so a quantifier on the group's
+// `)` makes it catastrophic. Skips escapes (\w, \(, …) and char-class interiors ([a+]) where metachars are
+// literal, and the `?` of a group prefix ((?:, (?=, (?<…), which is not a quantifier.
+function isCatastrophicRegex(p) {
+  const stack = [];
+  for (let i = 0; i < p.length; i++) {
+    const c = p[i];
+    if (c === '\\') {
+      const n = p[i + 1];
+      if (n >= '1' && n <= '9') return true; // backreference → refuse
+      i++; // skip the escaped atom — never structural
+      continue;
+    }
+    if (c === '[') { // character class: every metachar inside is a literal
+      i++;
+      if (p[i] === '^') i++;
+      if (p[i] === ']') i++; // a leading ] is a literal member
+      while (i < p.length && p[i] !== ']') {
+        if (p[i] === '\\') i++;
+        i++;
+      }
+      continue;
+    }
+    if (c === '(') {
+      stack.push({ complex: false });
+      if (p[i + 1] === '?') i++; // group prefix ((?:, (?=, (?<…) — its ? is not a quantifier
+      continue;
+    }
+    if (c === ')') {
+      const f = stack.pop() || { complex: false };
+      const q = p[i + 1];
+      if ((q === '+' || q === '*' || q === '?' || q === '{') && f.complex) return true; // quantified group, repeating body
+      if (stack.length) stack[stack.length - 1].complex = stack[stack.length - 1].complex || f.complex; // bubble up any depth
+      continue;
+    }
+    if ((c === '|' || c === '+' || c === '*' || c === '?' || c === '{') && stack.length) {
+      stack[stack.length - 1].complex = true; // a quantifier/alternation token in the current group's body
+    }
+  }
+  return false;
+}
 
 // Compile a user-supplied --regex pattern. Case-sensitive, no g/y flag, so .test() is stateless across the
 // thousands of calls the scan makes. A too-long / catastrophic / malformed pattern fails LOUD (the AC's
@@ -255,8 +304,8 @@ function compileUserRegex(pattern) {
   if (p.length > REGEX_PATTERN_MAX) {
     throw inputError(`chat-search: --regex pattern too long (max ${REGEX_PATTERN_MAX} chars)`);
   }
-  if (CATASTROPHIC_REGEX.test(p)) {
-    throw inputError('chat-search: --regex pattern rejected — a quantified group with a nested quantifier or alternation risks catastrophic backtracking (ReDoS); simplify the pattern');
+  if (isCatastrophicRegex(p)) {
+    throw inputError('chat-search: --regex pattern rejected — a quantified group whose body repeats or alternates (or a backreference) risks catastrophic backtracking (ReDoS); simplify the pattern');
   }
   try {
     return new RegExp(p);
