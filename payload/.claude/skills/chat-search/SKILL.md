@@ -19,7 +19,7 @@ user-invocable: true
 
 A prompt that appears in **both** arms is de-duplicated — by `(session, timestamp, text)` — so it surfaces once. If the transcript dir is **missing or unreadable**, the search **degrades loudly to events-only** and says so in the output (it never crashes).
 
-The `--session` / `--since` / `--regex` flags are a follow-on slice (#85).
+Three optional flags refine a search — `--session` (scope to one session), `--since` (a time floor), and `--regex` (pattern match instead of substring). They compose with each other and with both arms. See **Scoping & match flags** below.
 
 ### Transcript hygiene (so a hit is real conversation, not framework noise)
 
@@ -38,14 +38,29 @@ The `--session` / `--since` / `--regex` flags are a follow-on slice (#85).
 ### Engine (what the skill runs)
 
 ```bash
-node .wrxn/chat-search.cjs <search-term...> [--root <dir>]
+node .wrxn/chat-search.cjs <search-term...> [--root <dir>] [--session <id>] [--since <when>] [--regex]
 ```
 
-The engine resolves the install root by walking up to the `wrxn.install.json` receipt, so it runs from anywhere inside an install. Pass `--root <dir>` to override (mainly for tests). It prints the rendered result and exits 0 — a nothing-found result is a normal outcome, never an error exit.
+The engine resolves the install root by walking up to the `wrxn.install.json` receipt, so it runs from anywhere inside an install. Pass `--root <dir>` to override (mainly for tests). Flags follow the search term(s). It prints the rendered result and exits 0 — a nothing-found result is a normal outcome, never an error exit. **Invalid flag input** (a malformed/catastrophic `--regex`, an unparseable `--since`, an unsafe `--session`) fails **loud**: one clear line on stderr and a non-zero exit — never a stack trace or a hang.
 
 ### Agent (self-invocation)
 
 When the operator references an earlier moment ("like we discussed", "the decision from this morning") and you need the **exact** wording rather than a guess, run the engine and ground on what was actually said. Reach for it the same way you reach for `recon_find` — deliberately, when a past moment is needed.
+
+## Scoping & match flags
+
+All three are optional, compose with each other, and apply across **both arms** (so scoping/filtering also covers assistant turns), preserving recency order and cross-arm dedup.
+
+- **`--session <id>`** — scope results to a single session (exact match on the session id). The id is the harness/event session id (letters, digits, `-`, `_`); a malformed id is rejected. Scoped rows render as `this session`.
+- **`--since <when>`** — keep only hits at or after a timestamp floor. `<when>` is either `today` (from 00:00 **UTC** of the current day — record stamps are UTC) or an ISO-8601 date/datetime (e.g. `2026-06-26` or `2026-06-26T12:00:00Z`). An undatable hit is excluded.
+- **`--regex`** — match the search term as a **regular expression** instead of a case-insensitive substring. Regex mode is **case-sensitive** (the universal regex default; the substring default stays case-insensitive).
+
+```bash
+node .wrxn/chat-search.cjs "gate.*decision" --regex --since today
+node .wrxn/chat-search.cjs baton echo --session 9dc65f19-65fb-43cb-81fa-0340353f1cc5
+```
+
+> **`--regex` safety (ReDoS).** The pattern is user-supplied and runs over whole transcripts, so it is bounded: it is **length-capped** (≤ 200 chars) and **statically screened** for catastrophic-backtracking shapes — a quantified group whose body holds a nested quantifier or alternation (`(a+)+`, `(a*)*`, `(.*)+`, `(a|a)+`, …). A rejected, malformed, or unparseable value fails loud. The screen is deliberately conservative: it also refuses the rare-but-safe `(foo|bar)+` (drop the outer quantifier to search it).
 
 ## Output
 
@@ -69,4 +84,4 @@ Hits are **most-recent-first**, one per line:
 
 ## Source
 
-WRXN Kernel issues #83 (slice 1 — event-log arm) + #84 (slice 2 — harness-transcript arm + hygiene), under PRD #82. Engine: `.wrxn/chat-search.cjs`. Grounded by `docs/adr/0008-chat-search-ondemand-grep-outside-brain.md` and the `CONTEXT.md` terms **Conversational log** / **chat-search**.
+WRXN Kernel issues #83 (slice 1 — event-log arm) + #84 (slice 2 — harness-transcript arm + hygiene) + #85 (slice 3 — scoping + match flags), under PRD #82. Engine: `.wrxn/chat-search.cjs`. Grounded by `docs/adr/0008-chat-search-ondemand-grep-outside-brain.md` and the `CONTEXT.md` terms **Conversational log** / **chat-search**.

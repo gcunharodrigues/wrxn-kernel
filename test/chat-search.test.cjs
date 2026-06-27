@@ -498,3 +498,273 @@ test('a malformed transcript line and a drifted message.content are skipped — 
   assert.equal(res.total, 1, 'only the well-formed assistant turn surfaces');
   assert.equal(res.degraded, false, 'the dir was readable — per-line drift is not a full arm degrade');
 });
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// Slice 3 (#85) — scoping + match flags: --session (one session), --since/today (time filter), and
+// --regex (pattern match instead of case-insensitive substring). A thin layer over the established
+// engine: every filter is an opts field applied during the scan, so it composes with BOTH arms,
+// recency order, and dedup. Invalid flag input (bad regex / unparseable --since) fails LOUD — a clear
+// one-line message, never a Node crash. --regex is the headline ReDoS risk (user-supplied pattern over
+// whole transcripts), so it is length-capped + statically screened for catastrophic-backtracking shapes.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+
+// ── AC: --session <id> scopes results to a single session (opts.session, both arms) ──
+
+test('opts.session scopes the scan to a single session — other sessions are excluded', () => {
+  const root = tmp('wrxn-cs-scope-');
+  writeEvents(root, 'sid-a', [prompt('2026-06-26T10:00:00.000Z', 'deploy plan in session a')]);
+  writeEvents(root, 'sid-b', [prompt('2026-06-26T11:00:00.000Z', 'deploy plan in session b')]);
+
+  const all = searchConversationalLog('deploy plan', {}, root);
+  assert.equal(all.total, 2, 'unscoped, both sessions match (baseline)');
+
+  const scoped = searchConversationalLog('deploy plan', { session: 'sid-a' }, root);
+  assert.equal(scoped.total, 1, '--session narrows the result set to the one session');
+  assert.equal(scoped.hits[0].session, 'sid-a', 'the surviving hit is from the scoped session');
+  assert.ok(!scoped.hits.some((h) => h.session === 'sid-b'), 'the other session is excluded');
+});
+
+// ── AC: --since <ISO date> drops hits older than the threshold (inclusive of the threshold instant) ──
+
+test('opts.since with an ISO-8601 date filters out hits before that day', () => {
+  const root = tmp('wrxn-cs-since-iso-');
+  writeEvents(root, 'sid-a', [
+    prompt('2026-06-25T23:59:59.000Z', 'deploy plan the day before'),
+    prompt('2026-06-26T00:00:00.000Z', 'deploy plan exactly at the threshold'),
+    prompt('2026-06-27T09:00:00.000Z', 'deploy plan the day after'),
+  ]);
+
+  const res = searchConversationalLog('deploy plan', { since: '2026-06-26' }, root);
+
+  assert.equal(res.total, 2, 'only hits on/after the since date survive');
+  const stamps = res.hits.map((h) => h.ts);
+  assert.ok(stamps.includes('2026-06-26T00:00:00.000Z'), 'the threshold instant is inclusive');
+  assert.ok(stamps.includes('2026-06-27T09:00:00.000Z'), 'a later hit survives');
+  assert.ok(!stamps.includes('2026-06-25T23:59:59.000Z'), 'an earlier hit is dropped');
+});
+
+// ── AC: --since today keeps only hits from UTC midnight today onward ──────────────
+
+test('opts.since "today" keeps only hits from the start of the current UTC day', () => {
+  const root = tmp('wrxn-cs-since-today-');
+  const now = new Date().toISOString(); // always >= the start of today → survives the filter
+  writeEvents(root, 'sid-a', [
+    prompt('2020-01-01T00:00:00.000Z', 'deploy plan long ago'),
+    prompt(now, 'deploy plan just now'),
+  ]);
+
+  const res = searchConversationalLog('deploy plan', { since: 'today' }, root);
+
+  assert.equal(res.total, 1, 'only the hit from today survives "today"');
+  assert.equal(res.hits[0].ts, now, 'the surviving hit is the recent one');
+});
+
+// ── AC: an unparseable --since fails LOUD (a clear thrown message), never a silent empty result ──
+
+test('an unparseable opts.since fails loud with a clear message (not a silent empty result)', () => {
+  const root = tmp('wrxn-cs-since-bad-');
+  writeEvents(root, 'sid-a', [prompt('2026-06-26T10:00:00.000Z', 'deploy plan today')]);
+
+  assert.throws(
+    () => searchConversationalLog('deploy plan', { since: 'not-a-real-date' }, root),
+    (err) => {
+      assert.match(err.message, /--since/, 'the error names the offending flag');
+      assert.match(err.message, /date/i, 'the error explains a date was expected');
+      assert.equal(err.userFacing, true, 'the error is flagged user-facing so the CLI prints it cleanly');
+      return true;
+    },
+    'a garbage --since must fail loud, not silently drop every hit',
+  );
+});
+
+// ── AC: --regex switches matching from case-insensitive substring to a regex pattern ──
+
+test('opts.regex matches a regular expression instead of a case-insensitive substring', () => {
+  const root = tmp('wrxn-cs-regex-');
+  writeEvents(root, 'sid-a', [prompt('2026-06-26T10:00:00.000Z', 'the gate decision shipped via OIDC')]);
+
+  // a pattern with regex metacharacters: as a literal substring it matches nothing…
+  assert.equal(searchConversationalLog('gate.*decision', {}, root).total, 0, 'substring mode treats .* literally → no match');
+
+  // …but in regex mode it matches across the gap.
+  const res = searchConversationalLog('gate.*decision', { regex: true }, root);
+  assert.equal(res.total, 1, 'regex mode matches the pattern');
+  assert.match(res.hits[0].snippet, /gate decision/, 'the snippet carries the matched line');
+
+  // regex is case-SENSITIVE (the default substring mode is case-insensitive; switching to regex is a power
+  // tool where case-sensitivity is the universal regex default — grep/ripgrep/sed all behave this way).
+  assert.equal(searchConversationalLog('GATE', { regex: true }, root).total, 0, 'regex mode is case-sensitive');
+  assert.equal(searchConversationalLog('GATE', {}, root).total, 1, 'substring mode stays case-insensitive');
+});
+
+// ── AC: an invalid --regex pattern fails LOUD with a clear message (never a raw Node SyntaxError/crash) ──
+
+test('an invalid opts.regex pattern fails loud with a clear, user-facing message', () => {
+  const root = tmp('wrxn-cs-regex-bad-');
+  writeEvents(root, 'sid-a', [prompt('2026-06-26T10:00:00.000Z', 'deploy plan today')]);
+
+  assert.throws(
+    () => searchConversationalLog('(unterminated', { regex: true }, root),
+    (err) => {
+      assert.match(err.message, /--regex/, 'the error names the offending flag');
+      assert.match(err.message, /pattern/i, 'the error explains the pattern is the problem');
+      assert.equal(err.userFacing, true, 'the error is user-facing so the CLI prints it cleanly (no raw stack)');
+      return true;
+    },
+    'a malformed regex must fail loud, not surface a raw Node SyntaxError',
+  );
+});
+
+// ── SECURITY: a catastrophic-backtracking --regex (ReDoS) is rejected at COMPILE, before any matching ──
+// The headline risk: --regex compiles a user-supplied pattern and runs it over whole transcripts. Node has
+// no native regex timeout and ADR-0008 forbids a worker/child to bound it, so the defense is STATIC — the
+// classic catastrophic family ((a+)+, (a*)*, (.*)*, overlapping alternation under a quantifier) is screened
+// out before it can ever touch input. Rejection happens at compile, so NO input can trigger the blowup.
+
+test('a catastrophic-backtracking --regex pattern is rejected loud and fast (ReDoS defense)', () => {
+  const root = tmp('wrxn-cs-redos-');
+  writeEvents(root, 'sid-a', [prompt('2026-06-26T10:00:00.000Z', 'deploy the gate today')]);
+
+  for (const evil of ['(a+)+$', '(a*)*', '(.*)*', '(a|a)+']) {
+    const t0 = Date.now();
+    assert.throws(
+      () => searchConversationalLog(evil, { regex: true }, root),
+      (err) => {
+        assert.match(err.message, /--regex/, `${evil}: the error names the flag`);
+        assert.match(err.message, /reject|backtrack/i, `${evil}: the error explains the rejection`);
+        assert.equal(err.userFacing, true, `${evil}: the error is user-facing`);
+        return true;
+      },
+      `${evil} must be rejected as a catastrophic pattern`,
+    );
+    // rejection is at compile (O(pattern length)), so it returns near-instantly — a hang here would mean the
+    // pattern reached the matcher. A generous bound proves the short-circuit without being clock-flaky.
+    assert.ok(Date.now() - t0 < 1000, `${evil}: rejection must be fast (no backtracking reached the matcher)`);
+  }
+
+  // a length-capped pattern is also rejected loud (bounds adversarial pattern complexity).
+  assert.throws(() => searchConversationalLog('a'.repeat(300), { regex: true }, root), /too long/i, 'an over-long pattern is rejected');
+
+  // …but a safe pattern (alternation with no outer quantifier) is still allowed and matches.
+  assert.doesNotThrow(() => searchConversationalLog('(deploy|ship)', { regex: true }, root), 'a safe alternation is not over-rejected');
+  assert.equal(searchConversationalLog('(deploy|ship)', { regex: true }, root).total, 1, 'the safe pattern still matches');
+});
+
+// ── AC: the flags compose with BOTH arms, the recency sort, and the cross-arm dedup, all at once ──
+// The filters live inside consider(), which both arms feed, so composition is emergent: --session + --since
+// applied together must scope by session AND time across the event arm AND the transcript arm, the cross-arm
+// duplicate must still collapse to one, and the survivors must stay newest-first.
+
+test('--session + --since compose across both arms — scope, time-filter, dedup, and recency hold together', () => {
+  const home = tmp('wrxn-cs-home-');
+  const root = tmp('wrxn-cs-compose-');
+
+  // sid-keep: a cross-arm duplicate (alpha, in BOTH arms), an OLD event (before --since), and an
+  // assistant-only transcript turn (beta, the newest). sid-other: a recent event that --session excludes.
+  writeEvents(root, 'sid-keep', [
+    prompt('2026-06-26T10:00:00.000Z', 'deploy plan alpha'), // dup of the transcript turn below
+    prompt('2026-06-24T09:00:00.000Z', 'deploy plan OLD before the since floor'),
+  ]);
+  writeEvents(root, 'sid-other', [prompt('2026-06-26T11:00:00.000Z', 'deploy plan gamma in another session')]);
+  writeTranscript(home, root, 'sid-keep', [
+    turn('user', '2026-06-26T10:00:00.000Z', 'deploy plan alpha', 'sid-keep'), // dup of the event above
+    turn('assistant', '2026-06-26T12:00:00.000Z', 'deploy plan beta from the assistant', 'sid-keep'),
+  ]);
+
+  const res = searchConversationalLog('deploy plan', { transcriptsHome: home, session: 'sid-keep', since: '2026-06-25' }, root);
+
+  assert.equal(res.total, 2, 'scope + since + dedup leave exactly two hits');
+  assert.equal(res.degraded, false, 'the transcript arm was reachable — no degrade');
+  assert.ok(res.hits.every((h) => h.session === 'sid-keep'), '--session excluded the other session (gamma)');
+  assert.ok(!res.hits.some((h) => h.ts === '2026-06-24T09:00:00.000Z'), '--since dropped the OLD hit');
+
+  // recency: the assistant turn (12:00) on top, then the deduped alpha (10:00).
+  assert.deepEqual(res.hits.map((h) => h.ts), ['2026-06-26T12:00:00.000Z', '2026-06-26T10:00:00.000Z'], 'survivors stay newest-first');
+  assert.equal(res.hits[0].role, 'assistant', 'the newest survivor is the assistant turn (transcript-only)');
+  assert.equal(res.hits[1].role, 'user', 'the cross-arm duplicate collapsed to the one user hit');
+
+  // --regex composes with --session through the same per-record gate.
+  const rx = searchConversationalLog('alpha|beta', { transcriptsHome: home, session: 'sid-keep', regex: true }, root);
+  assert.ok(rx.total >= 1 && rx.hits.every((h) => h.session === 'sid-keep'), 'a regex search still respects --session scope');
+});
+
+// ── AC: the CLI wires --session and --regex through to the engine (exit 0) ──────
+
+test('the CLI honors --session (scopes) and --regex (pattern match)', () => {
+  const root = tmp('wrxn-cs-cli-flags-');
+  writeEvents(root, 'sid-a', [prompt('2026-06-26T10:00:00.000Z', 'alpha keyword in session a')]);
+  writeEvents(root, 'sid-b', [prompt('2026-06-26T11:00:00.000Z', 'beta keyword in session b')]);
+
+  // --session scopes: only sid-a's content surfaces (asserted by content, since scoped rows render "this session").
+  const scoped = spawnSync('node', [ENGINE, 'keyword', '--root', root, '--session', 'sid-a'], { encoding: 'utf8' });
+  assert.equal(scoped.status, 0, '--session exits 0');
+  assert.match(scoped.stdout, /alpha keyword/, 'the scoped session content is printed');
+  assert.ok(!/beta keyword/.test(scoped.stdout), 'the other session is excluded by --session');
+
+  // --regex: a metacharacter pattern matches only with the flag.
+  writeEvents(root, 'sid-c', [prompt('2026-06-26T12:00:00.000Z', 'the gate decision shipped')]);
+  const plain = spawnSync('node', [ENGINE, 'gate.*decision', '--root', root], { encoding: 'utf8' });
+  assert.match(plain.stdout, /nothing found/i, 'without --regex the metacharacters are literal → nothing found');
+  const rx = spawnSync('node', [ENGINE, 'gate.*decision', '--root', root, '--regex'], { encoding: 'utf8' });
+  assert.equal(rx.status, 0, '--regex exits 0');
+  assert.match(rx.stdout, /gate decision/, 'with --regex the pattern matches');
+});
+
+// ── AC + SECURITY: invalid flag input fails LOUD at the CLI boundary — a clean one-line stderr, no stack ──
+// "Never a crash": the operator sees one actionable line and a non-zero exit, never a Node stack trace or an
+// absolute path. Covers a bad regex, a catastrophic (ReDoS) regex, and an unparseable --since.
+
+test('the CLI fails loud on a bad regex / catastrophic regex / unparseable --since (clean stderr, non-zero exit)', () => {
+  const root = tmp('wrxn-cs-cli-bad-');
+  writeEvents(root, 'sid-a', [prompt('2026-06-26T10:00:00.000Z', 'deploy plan today')]);
+
+  // a clean, user-facing failure: non-zero exit, a single chat-search: line, no Node stack, no absolute path.
+  const assertClean = (res, label) => {
+    assert.notEqual(res.status, 0, `${label}: exits non-zero`);
+    assert.equal(res.stdout.trim(), '', `${label}: nothing on stdout`);
+    const err = res.stderr.trim();
+    assert.ok(err.startsWith('chat-search:'), `${label}: stderr is a clean chat-search line`);
+    assert.equal(err.split('\n').length, 1, `${label}: exactly one line on stderr`);
+    assert.ok(!/\n?\s+at\s/.test(res.stderr), `${label}: no Node stack frame leaks`);
+    assert.ok(!res.stderr.includes(ENGINE), `${label}: no absolute engine path leaks`);
+  };
+
+  const badRegex = spawnSync('node', [ENGINE, '(unterminated', '--root', root, '--regex'], { encoding: 'utf8' });
+  assertClean(badRegex, 'bad regex');
+  assert.match(badRegex.stderr, /--regex/, 'bad regex: names the flag');
+
+  const t0 = Date.now();
+  const redos = spawnSync('node', [ENGINE, '(a+)+$', '--root', root, '--regex'], { encoding: 'utf8' });
+  assertClean(redos, 'catastrophic regex');
+  assert.match(redos.stderr, /reject|backtrack/i, 'catastrophic regex: explains the rejection');
+  assert.ok(Date.now() - t0 < 5000, 'catastrophic regex: rejected fast, never hung the CLI');
+
+  const badSince = spawnSync('node', [ENGINE, 'deploy', '--root', root, '--since', 'not-a-date'], { encoding: 'utf8' });
+  assertClean(badSince, 'bad since');
+  assert.match(badSince.stderr, /--since/, 'bad since: names the flag');
+});
+
+// ── SECURITY: --session is sanitized to a safe id charset — it can never widen scope or traverse a path ──
+// The scope is a pure exact-match on each record's session field (the value is never used to build a path),
+// so traversal/widening are structurally impossible; this charset guard makes that explicit and fails loud
+// on a malformed id rather than silently matching nothing.
+
+test('an unsafe opts.session id is rejected loud (no path traversal, no scope widening)', () => {
+  const root = tmp('wrxn-cs-session-bad-');
+  writeEvents(root, 'sid-a', [prompt('2026-06-26T10:00:00.000Z', 'deploy plan today')]);
+
+  for (const bad of ['../../etc/passwd', 'sid a', 'sid/../b', '*', '']) {
+    assert.throws(
+      () => searchConversationalLog('deploy plan', { session: bad }, root),
+      (err) => {
+        assert.match(err.message, /--session/, `${JSON.stringify(bad)}: names the flag`);
+        assert.equal(err.userFacing, true, `${JSON.stringify(bad)}: user-facing`);
+        return true;
+      },
+      `${JSON.stringify(bad)} must be rejected as an unsafe session id`,
+    );
+  }
+
+  // a real session id (alnum + hyphen, like the harness UUIDs and the event sids) still scopes fine.
+  assert.equal(searchConversationalLog('deploy plan', { session: 'sid-a' }, root).total, 1, 'a valid session id still scopes');
+});

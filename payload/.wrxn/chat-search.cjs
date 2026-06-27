@@ -24,12 +24,13 @@ function roleFromKind(kind) {
   return kind === 'prompt' ? 'user' : String(kind || '');
 }
 
-// A snippet is the matching line plus ±1 line of context within the message text (`needle` is already
-// lowercased). A single-line prompt collapses to just that line. A match that only spans a line boundary
-// has no single matching line → fall back to the trimmed whole text (defensive; rare).
-function snippetFor(text, needle) {
+// A snippet is the matching line plus ±1 line of context within the message text. `matchesLine` is the
+// active matcher (case-insensitive substring by default, or the compiled --regex), so the snippet finds the
+// SAME line the scan matched on. A single-line prompt collapses to just that line. A match that only spans a
+// line boundary has no single matching line → fall back to the trimmed whole text (defensive; rare).
+function snippetFor(text, matchesLine) {
   const lines = String(text).split('\n');
-  const i = lines.findIndex((l) => l.toLowerCase().includes(needle));
+  const i = lines.findIndex((l) => matchesLine(l));
   if (i === -1) return String(text).trim();
   const from = Math.max(0, i - 1);
   const to = Math.min(lines.length - 1, i + 1);
@@ -189,10 +190,88 @@ function transcriptText(rec) {
   return '';
 }
 
+// ── slice-3 flags (#85): validation + parsing ──────────────────────────────────
+// A user-facing input error. The `userFacing` flag lets the CLI print this message cleanly (one line, no
+// Node stack/path) and exit non-zero — the AC's "invalid flag input fails LOUD, never a crash". Bad DATA
+// stays fail-soft (skipped, never thrown); only bad INPUT (a flag value) fails loud.
+function inputError(msg) {
+  const e = new Error(msg);
+  e.userFacing = true;
+  return e;
+}
+
+// Validate a --session id. Scoping is a pure exact-match on each record's session field — the value is NEVER
+// used to build a path — so traversal/widening are structurally impossible; this charset guard makes that
+// explicit (real session ids are the harness UUIDs + event sids: alnum, hyphen, underscore) and fails LOUD
+// on a malformed id rather than silently matching nothing.
+const SESSION_ID = /^[A-Za-z0-9_-]+$/;
+function validateSession(raw) {
+  const s = String(raw);
+  if (!SESSION_ID.test(s)) {
+    throw inputError(`chat-search: --session value "${raw}" is not a valid session id (expected letters, digits, '-' or '_')`);
+  }
+  return s;
+}
+
+// Parse a --since value into a threshold epoch-ms; a hit survives when its timestamp is >= the threshold.
+// Accepts the keyword `today` (start of the current UTC day — record stamps are UTC `…Z`) or an ISO-8601
+// date/datetime (via Date.parse). An unparseable value fails LOUD (the AC's invalid-input handling).
+function parseSince(raw) {
+  const s = String(raw).trim();
+  if (s.toLowerCase() === 'today') {
+    const d = new Date();
+    d.setUTCHours(0, 0, 0, 0);
+    return d.getTime();
+  }
+  const t = Date.parse(s);
+  if (Number.isNaN(t)) {
+    throw inputError(`chat-search: --since value "${raw}" is not a date — use "today" or an ISO-8601 date (e.g. 2026-06-26)`);
+  }
+  return t;
+}
+
+// ── --regex ReDoS bound ──────────────────────────────────────────────────────
+// --regex compiles a USER-supplied pattern and runs it over whole transcripts → classic ReDoS surface. Node
+// has no native regex timeout and ADR-0008 forbids a worker/child_process to bound runtime, so the defense is
+// STATIC and applied at COMPILE (before any input is matched):
+//   (1) PATTERN-LENGTH CAP — a legitimate search pattern is short ("(deploy|ship).*gate", "\\bbaton\\b"); 200
+//       chars is generous for real use yet bounds how much quantifier nesting an adversarial pattern can pack.
+//   (2) CATASTROPHIC-SHAPE SCREEN — reject a quantified group whose body itself contains a quantifier or an
+//       alternation (star-height ≥ 2 / overlapping-alternation-under-a-quantifier). This is the canonical
+//       catastrophic-backtracking family — (a+)+, (a*)*, (.*)+, (a|a)+ — incl. the (a+)+$ probe. It is a
+//       deliberately conservative screen: it also rejects the rare-but-safe (foo|bar)+, which has the clear
+//       workaround of dropping the outer quantifier; erring toward refusal is correct for a security bound.
+// RESIDUAL (stated honestly): a pattern that is catastrophic ONLY via constructs this static screen does not
+// model (e.g. backreference-driven blowup) could still backtrack. Given no runtime timeout is available, this
+// is the proportionate defense; the common ReDoS families and the security probe are all refused.
+const REGEX_PATTERN_MAX = 200;
+const CATASTROPHIC_REGEX = /\([^()]*[+*|][^()]*\)\s*[+*{]/; // group containing +,*,or | that is itself quantified
+
+// Compile a user-supplied --regex pattern. Case-sensitive, no g/y flag, so .test() is stateless across the
+// thousands of calls the scan makes. A too-long / catastrophic / malformed pattern fails LOUD (the AC's
+// invalid-input handling) — the operator sees one clean line, never a stack or a multi-second hang.
+function compileUserRegex(pattern) {
+  const p = String(pattern);
+  if (p.length > REGEX_PATTERN_MAX) {
+    throw inputError(`chat-search: --regex pattern too long (max ${REGEX_PATTERN_MAX} chars)`);
+  }
+  if (CATASTROPHIC_REGEX.test(p)) {
+    throw inputError('chat-search: --regex pattern rejected — a quantified group with a nested quantifier or alternation risks catastrophic backtracking (ReDoS); simplify the pattern');
+  }
+  try {
+    return new RegExp(p);
+  } catch (err) {
+    throw inputError(`chat-search: --regex pattern is not a valid regular expression (${err.message})`);
+  }
+}
+
 // ── the engine seam ───────────────────────────────────────────────────────────
-// searchConversationalLog(query, opts, roots): scan the event-log arm across the given roots' sessions
-// and return the prompts whose text contains `query` (case-insensitive substring). Each hit is a
-// structured record { ts, session, role, snippet }.
+// searchConversationalLog(query, opts, roots): scan BOTH arms across the given roots' sessions and return
+// the turns that match `query` — a case-insensitive substring by default, or (opts.regex) the compiled
+// pattern. opts also carries the slice-3 filters: opts.session scopes to one session, opts.since is a
+// timestamp floor; both are applied per-record so they compose with the arms, recency, and dedup. A bad
+// flag value (invalid/catastrophic regex, unparseable --since, unsafe --session) throws a user-facing
+// error (fail loud). Each hit is a structured record { ts, session, role, snippet }.
 function searchConversationalLog(query, opts, roots) {
   const q = String(query == null ? '' : query);
   const needle = q.toLowerCase();
@@ -200,15 +279,26 @@ function searchConversationalLog(query, opts, roots) {
   const seen = new Set(); // a prompt present in BOTH arms (same session+ts+text) must surface only once.
   let degraded = false; // set when the transcript arm could not be consulted → loud events-only degrade (#84).
 
+  // ── slice-3 filters (#85): each is an opts field applied per-record inside consider(), so it composes
+  // automatically with BOTH arms, the recency sort, and the cross-arm dedup. --session scopes to one session. ──
+  const sessionScope = opts && opts.session != null ? validateSession(opts.session) : null;
+  const sinceThreshold = opts && opts.since != null ? parseSince(opts.since) : null; // --since: epoch-ms floor
+  const useRegex = !!(opts && opts.regex);
+  const re = useRegex ? compileUserRegex(q) : null; // --regex: compile once (throws loud on a bad/dangerous pattern)
+  // The one matcher used for BOTH the whole-text scan gate and the per-line snippet — substring or regex.
+  const lineMatches = useRegex ? (s) => re.test(String(s)) : (s) => String(s).toLowerCase().includes(needle);
+
   // Push a hit when `text` contains the needle and this (session, timestamp, text) triple is new. `text` is
   // the FULL message text already made surface-safe by its arm (events are pre-redacted; transcript turns are
   // injected-stripped + secret-redacted before they reach here), so the snippet it yields is safe to render.
   function consider(ts, session, role, text) {
-    if (typeof text !== 'string' || !text.toLowerCase().includes(needle)) return;
+    if (sessionScope != null && session !== sessionScope) return; // --session: exact-match a single session
+    if (typeof text !== 'string' || !lineMatches(text)) return; // --regex pattern, else case-insensitive substring
+    if (sinceThreshold != null && !(Date.parse(ts) >= sinceThreshold)) return; // --since: drop hits before the floor (an undatable ts → NaN → dropped)
     const key = `${session} ${ts} ${text}`; // the AC dedup key — NUL-joined so the parts can't bleed.
     if (seen.has(key)) return;
     seen.add(key);
-    hits.push({ ts, session, role, snippet: snippetFor(text, needle) });
+    hits.push({ ts, session, role, snippet: snippetFor(text, lineMatches) });
   }
 
   for (const root of normalizeRoots(roots)) {
@@ -290,7 +380,7 @@ function searchConversationalLog(query, opts, roots) {
   return { query: q, total: hits.length, found, degraded, hits, rendered };
 }
 
-// ── CLI: node .wrxn/chat-search.cjs <term...> [--root <dir>] ──────────────────
+// ── CLI: node .wrxn/chat-search.cjs <term...> [--root <dir>] [--session <id>] [--since <when>] [--regex] ──
 // The operator-invocable surface (/chat-search <term>). Resolves the install root by walking up to the
 // wrxn.install.json receipt (mirrors wiki.cjs), or honors a --root override (tests). Prints the rendered
 // result and exits 0 — a nothing-found result is a normal outcome, never an error exit.
@@ -307,9 +397,18 @@ function findInstallRoot(start) {
   return null;
 }
 
+// Value of a --name <value> flag. A following token that is itself a --flag (or a missing value) is NOT
+// consumed as the value — so `--session --regex` can't silently swallow --regex as the session id.
 function flag(name) {
   const i = process.argv.indexOf(`--${name}`);
-  return i > -1 ? process.argv[i + 1] : undefined;
+  if (i < 0) return undefined;
+  const val = process.argv[i + 1];
+  return val == null || val.startsWith('--') ? undefined : val;
+}
+
+// Presence of a boolean --name flag (e.g. --regex), which carries no value.
+function hasFlag(name) {
+  return process.argv.includes(`--${name}`);
 }
 
 // Positional search terms: argv from index 2 up to the first --flag.
@@ -325,7 +424,7 @@ function positionals() {
 function main() {
   const terms = positionals();
   if (terms.length === 0) {
-    process.stdout.write('Usage: node .wrxn/chat-search.cjs <search-term...> [--root <dir>]\n');
+    process.stdout.write('Usage: node .wrxn/chat-search.cjs <search-term...> [--root <dir>] [--session <id>] [--since <when>] [--regex]\n');
     process.exit(2);
   }
   const root = flag('root') || findInstallRoot();
@@ -333,10 +432,27 @@ function main() {
     process.stderr.write('chat-search: cannot resolve the install root — run inside a wrxn install or pass --root <dir>\n');
     process.exit(2);
   }
-  // opts is empty here, so the transcript arm uses the default base (~/.claude/projects). The live
-  // current-session id (which the renderer collapses to "this session") still has no CLI source — it
-  // arrives with the --session flag (#85). Not wired in this slice.
-  const result = searchConversationalLog(terms.join(' '), {}, root);
+  // Wire the slice-3 flags (#85) into engine opts. The engine validates them (it throws a clean, user-facing
+  // error on a bad regex / unparseable --since); the CLI catch below prints that one line and exits non-zero.
+  const opts = {};
+  const session = flag('session');
+  if (session !== undefined) opts.session = session;
+  const since = flag('since');
+  if (since !== undefined) opts.since = since;
+  if (hasFlag('regex')) opts.regex = true;
+
+  let result;
+  try {
+    result = searchConversationalLog(terms.join(' '), opts, root);
+  } catch (err) {
+    if (err && err.userFacing) {
+      // invalid flag input (bad/catastrophic regex, unparseable --since): fail LOUD with the one clean line
+      // the engine already built — never a Node stack or path — and exit non-zero (usage error).
+      process.stderr.write(err.message + '\n');
+      process.exit(2);
+    }
+    throw err; // an unexpected fault → the entrypoint wrap turns it into a clean path-free diagnostic
+  }
   process.stdout.write(result.rendered + '\n');
   process.exit(0);
 }
