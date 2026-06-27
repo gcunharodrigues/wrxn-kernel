@@ -320,3 +320,146 @@ test('a skip-log write fault never affects the dedup (best-effort / fail-open) (
   assert.deepEqual(out, {}, 'the skip still returns {} despite the logging fault');
   assert.equal(sp.calls.length, 0, 'the dedup holds — a log fault never causes a (re)spawn');
 });
+
+// ── #105 CONTENT-VERSIONED CLAIM: the marker stamps the transcript byte size, and a marker-present end
+// re-arms the synth when the transcript GREW materially since the stamp (a missed-resume self-heal) ──────
+// Slice 1 (#104) made the .spawned-<sid> marker a zero-byte existence file released on SessionStart. If
+// that release is MISSED (e.g. a multi-terminal continuation whose new process never released the claim),
+// the baton stays frozen. Slice 2 makes the dedup CONTENT-AWARE: the marker is stamped with the session
+// transcript's byte size (+ a timestamp) at claim time; on a later marker-present end the hook compares the
+// CURRENT transcript size to the stamped size — growth past a small threshold (>1 KB) is a genuine
+// continuation → re-stamp + spawn; no material growth is a true same-end duplicate → skip (slice 1). Any
+// fault (absent/unreadable transcript path, stat fault, unparseable marker) falls back to the existence-only
+// claim and is fully fail-open: never throws, never double-fires on a fault.
+
+// A REAL transcript file whose byte size the stamp/growth logic stats. Bytes are filler — only the SIZE matters.
+function writeTranscript(root, bytes, name = 'session.jsonl') {
+  const p = path.join(root, name);
+  fs.writeFileSync(p, 'x'.repeat(bytes));
+  return p;
+}
+function growTranscript(p, extra) {
+  fs.appendFileSync(p, 'y'.repeat(extra));
+}
+function readMarker(root, sid) {
+  return JSON.parse(fs.readFileSync(path.join(continuityDir(root), `.spawned-${sid}`), 'utf8'));
+}
+
+test('the claim stamps the marker with the transcript byte size + an ISO timestamp (round-trips) (#105)', () => {
+  const root = freshInstall('wrxn-synth-spawn-stamp-');
+  const sp = fakeSpawner();
+  const transcript = writeTranscript(root, 4096);
+  runCore(root, { session_id: 'sid-stamp', transcript_path: transcript, cwd: root }, {}, sp);
+
+  assert.equal(sp.calls.length, 1, 'a fresh claim still spawns the synth');
+  const marker = readMarker(root, 'sid-stamp');
+  assert.equal(marker.size, 4096, 'the marker carries the transcript byte size measured at claim time');
+  assert.ok(Number.isFinite(Date.parse(marker.at)), 'the marker carries an ISO timestamp (write → read round-trips)');
+});
+
+test('marker present + transcript grew past the threshold → re-arm: the synth re-spawns and the marker re-stamps (#105)', () => {
+  const root = freshInstall('wrxn-synth-spawn-rearm105-');
+  const sp = fakeSpawner();
+  const transcript = writeTranscript(root, 2000);
+  const payload = { session_id: 'sid-grow', transcript_path: transcript, cwd: root };
+
+  runCore(root, payload, {}, sp); // 1st end: claims + stamps size=2000 + spawns
+  assert.equal(sp.calls.length, 1, 'the first end claims and spawns');
+
+  growTranscript(transcript, 5000); // the resumed session did real work: +5000 bytes (> 1 KiB threshold)
+  runCore(root, payload, {}, sp); // 2nd end, marker present, transcript GREW → genuine continuation → re-arm
+
+  assert.equal(sp.calls.length, 2, 'the marker-present end RE-SPAWNS the synth because the transcript grew materially');
+  assert.equal(readMarker(root, 'sid-grow').size, 7000, 'the marker is re-stamped to the new transcript size');
+});
+
+test('marker present + no material growth → no re-spawn; one `skip` row is logged (slice 1 preserved) (#105)', () => {
+  const root = freshInstall('wrxn-synth-spawn-flat105-');
+  const sp = fakeSpawner();
+  const transcript = writeTranscript(root, 3000);
+  const payload = { session_id: 'sid-flat', transcript_path: transcript, cwd: root };
+
+  runCore(root, payload, {}, sp); // 1st end: claims + stamps size=3000 + spawns
+  runCore(root, payload, {}, sp); // 2nd end, marker present, transcript UNCHANGED → same-end duplicate → skip
+
+  assert.equal(sp.calls.length, 1, 'a flat transcript is a true same-end duplicate — it does NOT re-spawn');
+  const lines = fs.readFileSync(synthLog(root), 'utf8').split('\n').filter(Boolean);
+  assert.equal(lines.length, 1, 'the same-end duplicate appends exactly one `skip` row (#104 behavior preserved)');
+  assert.equal(lines[0].split('\t')[5], 'skip', 'the row outcome is the benign skip token');
+});
+
+test('threshold boundary: growth of EXACTLY 1 KiB does NOT re-arm (re-arm requires strictly more) (#105)', () => {
+  const root = freshInstall('wrxn-synth-spawn-boundary105-');
+  const sp = fakeSpawner();
+  const transcript = writeTranscript(root, 3000);
+  const payload = { session_id: 'sid-edge', transcript_path: transcript, cwd: root };
+
+  runCore(root, payload, {}, sp); // claims size=3000 + spawns
+  growTranscript(transcript, 1024); // grow by EXACTLY the threshold → 4024 (1024 is not > 1024)
+  runCore(root, payload, {}, sp); // marker present, growth == threshold → still a skip, no re-arm
+
+  assert.equal(sp.calls.length, 1, 'growth equal to the threshold is below the re-arm bar (strict greater-than)');
+  assert.equal(readMarker(root, 'sid-edge').size, 3000, 'the marker keeps its original stamp (no re-stamp on a skip)');
+});
+
+test('unreadable transcript path → existence-only fallback (slice 1): claim+spawn then skip, never throws (#105)', () => {
+  const root = freshInstall('wrxn-synth-spawn-badpath105-');
+  const sp = fakeSpawner();
+  // transcript_path points at a file that does not exist → statSync throws → size unknown at every step.
+  const payload = { session_id: 'sid-badpath', transcript_path: path.join(root, 'does-not-exist.jsonl'), cwd: root };
+
+  let out1;
+  assert.doesNotThrow(() => { out1 = runCore(root, payload, {}, sp); }); // marker absent → claim (size:null) + spawn
+  runCore(root, payload, {}, sp); // marker present, no usable baseline → existence-only skip (slice 1)
+
+  assert.deepEqual(out1, {}, 'the hook still returns {} on the unreadable-path claim');
+  assert.equal(sp.calls.length, 1, 'with no measurable size the dedup is existence-only — exactly one spawn');
+  assert.equal(readMarker(root, 'sid-badpath').size, null, 'an unreadable transcript stamps a null baseline');
+  const lines = fs.readFileSync(synthLog(root), 'utf8').split('\n').filter(Boolean);
+  assert.equal(lines.length, 1, 'the second fire falls back to a slice-1 skip (one row logged)');
+});
+
+test('absent transcript_path key → existence-only fallback, fail-open (#105)', () => {
+  const root = freshInstall('wrxn-synth-spawn-nopath105-');
+  const sp = fakeSpawner();
+  const payload = { session_id: 'sid-nopath', cwd: root }; // no transcript_path at all
+
+  assert.doesNotThrow(() => {
+    runCore(root, payload, {}, sp); // claim (size:null) + spawn
+    runCore(root, payload, {}, sp); // existence-only skip
+  });
+  assert.equal(sp.calls.length, 1, 'a missing transcript_path degrades to the existence-only claim (one spawn)');
+});
+
+test('a transcript that VANISHES between fires never double-fires the synth (fail-open) (#105)', () => {
+  const root = freshInstall('wrxn-synth-spawn-vanish105-');
+  const sp = fakeSpawner();
+  const transcript = writeTranscript(root, 5000);
+  const payload = { session_id: 'sid-vanish', transcript_path: transcript, cwd: root };
+
+  runCore(root, payload, {}, sp); // claims size=5000 + spawns
+  fs.rmSync(transcript); // the transcript disappears → the next fire cannot measure CURRENT size (stat fault)
+
+  let out2;
+  assert.doesNotThrow(() => { out2 = runCore(root, payload, {}, sp); });
+  assert.deepEqual(out2, {}, 'the stat fault degrades to {} (session close is never blocked)');
+  assert.equal(sp.calls.length, 1, 'an unmeasurable current size defaults to skip — the synth never double-fires');
+  const lines = fs.readFileSync(synthLog(root), 'utf8').split('\n').filter(Boolean);
+  assert.equal(lines.length, 1, 'the indeterminate fire logs a benign skip, not a re-arm');
+});
+
+test('a corrupt (unparseable) marker baseline → fallback skip, never re-arms on garbage (#105 fail-open)', () => {
+  const root = freshInstall('wrxn-synth-spawn-corrupt105-');
+  const dir = continuityDir(root);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, '.spawned-sid-corrupt'), 'not-json{{{'); // safeId is identity; garbage stamp
+  const transcript = writeTranscript(root, 9000); // a large CURRENT size that would re-arm IF the baseline parsed
+  const sp = fakeSpawner();
+
+  let out;
+  assert.doesNotThrow(() => {
+    out = runCore(root, { session_id: 'sid-corrupt', transcript_path: transcript, cwd: root }, {}, sp);
+  });
+  assert.deepEqual(out, {}, 'a corrupt baseline degrades to {}');
+  assert.equal(sp.calls.length, 0, 'no usable baseline → existence-only skip (a corrupt marker never triggers a re-arm)');
+});
