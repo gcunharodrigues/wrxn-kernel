@@ -109,8 +109,9 @@ function stripInjectedContext(text) {
 // The transcript arm derives output from RAW chat, which can echo a credential the operator/agent pasted.
 // Scrub it before any snippet leaves the engine (events are already pre-redacted upstream). The array body
 // below is the ONE canonical secret-shape set, kept BYTE-IDENTICAL to its dream/sync/harvest/memory-synth/
-// sidecar siblings (drift-pinned by adapter-drift-guard.test.cjs #39) — copied, not imported, for the same
-// self-containment reason as stripInjectedContext above. (#39, #84)
+// sidecar siblings. THIS copy is ENROLLED in adapter-drift-guard.test.cjs's #39 CANON_SITES, so the build
+// fails if it ever drifts from the others — copied, not imported, for the same self-containment reason as
+// stripInjectedContext above. (#39, #84)
 const SECRET_PATTERNS = [
   /AKIA[0-9A-Z]{16}/, // AWS access key id
   /gh[pousr]_[A-Za-z0-9]{20,}/, // GitHub token (ghp_/gho_/ghu_/ghs_/ghr_); {20,} covers the 36-char + CI forms

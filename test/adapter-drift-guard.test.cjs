@@ -175,18 +175,19 @@ test('each self-contained adapter imports node stdlib or a co-located payload si
 
 // ── #39 · the ONE canonical secret-pattern set, drift-pinned across every copy ──────────────
 // #39 consolidated the drifted SECRET_PATTERNS copies (three coverage levels) into a single canonical set.
-// The .wrxn detection adapters (dream/sync/harvest) and the memory-synth redactor carry it as
-// `const SECRET_PATTERNS = [ … ]`; the hooks-layer sidecar — which CANNOT import a .wrxn sibling (the
-// self-contained cross-layer doctrine) — replicates the set as `SECRET_PATTERNS_CANON`. This pins all five
-// copies BYTE-IDENTICAL: a future edit that broadens/narrows one shape in one file fails the build here,
-// so "drifted stale copies" becomes "one test-pinned set". (Same TEXT-slice idiom as AC1 — these arrays
-// are unexported, so we compare source text, not required values.)
+// The .wrxn detection adapters (dream/sync/harvest), the memory-synth redactor, and the chat-search engine's
+// transcript redactor (#84) carry it as `const SECRET_PATTERNS = [ … ]`; the hooks-layer sidecar — which
+// CANNOT import a .wrxn sibling (the self-contained cross-layer doctrine) — replicates the set as
+// `SECRET_PATTERNS_CANON`. This pins all SIX copies BYTE-IDENTICAL: a future edit that broadens/narrows one
+// shape in one file fails the build here, so "drifted stale copies" becomes "one test-pinned set". (Same
+// TEXT-slice idiom as AC1 — these arrays are unexported, so we compare source text, not required values.)
 const CANON_SITES = {
   dream: { file: path.join(PAYLOAD, '.wrxn', 'dream.cjs'), name: 'SECRET_PATTERNS' },
   sync: { file: path.join(PAYLOAD, '.wrxn', 'sync.cjs'), name: 'SECRET_PATTERNS' },
   harvest: { file: path.join(PAYLOAD, '.wrxn', 'harvest.cjs'), name: 'SECRET_PATTERNS' },
   memorySynth: { file: path.join(PAYLOAD, '.wrxn', 'memory-synth.cjs'), name: 'SECRET_PATTERNS' },
   sidecar: { file: path.join(PAYLOAD, '.claude', 'hooks', 'sidecar.cjs'), name: 'SECRET_PATTERNS_CANON' },
+  chatSearch: { file: path.join(PAYLOAD, '.wrxn', 'chat-search.cjs'), name: 'SECRET_PATTERNS' },
 };
 
 // Slice the `[ … ]` body of `const <name> = [` through the first column-0 `\n];` (indent-anchored, like
@@ -200,7 +201,7 @@ function sliceArrayBody(src, name) {
   return m ? m[0] : null;
 }
 
-test('#39 the canonical SECRET_PATTERNS set is byte-identical across dream/sync/harvest/memory-synth/sidecar', () => {
+test('#39 the canonical SECRET_PATTERNS set is byte-identical across dream/sync/harvest/memory-synth/sidecar/chat-search', () => {
   const ref = sliceArrayBody(fs.readFileSync(CANON_SITES.dream.file, 'utf8'), CANON_SITES.dream.name);
   assert.ok(ref && ref.includes('AKIA') && ref.includes('xox[baprs]') && ref.includes('PRIVATE KEY'), 'the canonical block is found in dream.cjs');
   for (const [site, { file, name }] of Object.entries(CANON_SITES)) {
