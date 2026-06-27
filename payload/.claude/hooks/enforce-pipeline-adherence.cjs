@@ -8,6 +8,12 @@
 // and skipped anyway — so this is the hard speedbump that points the orchestrator back to the
 // right main-thread skill.
 //
+// SLICE #90 adds a second arm: a PreToolUse:Bash guard that catches a MAIN-THREAD skip — a
+// pipeline-bypassing shell command (gh issue/pr create, gh pr merge, trunk git push) run directly
+// in the main thread — and warns (default) or blocks (env knob) with the same redirect-to-skill
+// intent. Caller context (the `agent_id` stdin field) separates a skip from the identical command
+// run legitimately inside a typed-executor subagent. (ADR 0009.)
+//
 // AC-1 — HOOK EVENT DETERMINATION: PreToolUse:Task.
 //   Claude Code matches PreToolUse matchers against the TOOL NAME, and `Task` (the subagent-spawn
 //   tool) is a matchable tool name, so a `PreToolUse` entry with matcher `Task` fires BEFORE a
@@ -19,10 +25,13 @@
 // Self-contained: ships into installs, MUST NOT import the kernel lib (node stdlib only).
 // Fail-open: any parse error / missing field emits {} — the hook NEVER wedges a session.
 //
-// Contract: PreToolUse event JSON on stdin -> decision JSON on stdout (exit 0).
-//   allow -> {}        block -> { "decision": "block", "reason": "..." }
+// Contract: PreToolUse event JSON on stdin -> decision JSON on stdout (exit 0). main() dispatches on
+// tool_name:
+//   Task (delegation skip): allow -> {}   block -> { "decision": "block", "reason": "..." }  (legacy)
+//   Bash (main-thread skip): allow -> {}   warn/block -> { "hookSpecificOutput": { ... } }    (modern)
 
 const fs = require('fs');
+const { execFileSync } = require('child_process');
 
 // The six typed executors (mirrors lib/executor.cjs EXECUTORS keys — hardcoded here because the hook
 // is self-contained and cannot import the kernel lib). These ARE the pipeline; they are always allowed
@@ -80,6 +89,123 @@ function decide({ subagent_type, prompt } = {}) {
   return { block: true, reason: reasonFor(skills) };
 }
 
+// ── Bash arm (slice #90) — main-thread pipeline-skip detection ─────────────────────────
+// The Task arm above catches a DELEGATION skip (a HITL step handed to a non-typed agent).
+// This arm catches a MAIN-THREAD skip: the operator/assistant running a pipeline-bypassing
+// command directly (no Task spawn to intercept). The discriminator is CALLER CONTEXT, not the
+// command text: every legitimate pipeline mechanic (devops -> `wrxn ship`; all AFK executors)
+// runs inside a typed-executor SUBAGENT and so carries `agent_id` on the PreToolUse stdin —
+// auto-allowed. Only main-thread ops (`agent_id` absent) are candidates. (ADR 0009.)
+
+const SKILL_SPEC = 'to-prd / to-issues'; // the issue-filing pipeline skills
+const SKILL_SHIP = 'wrxn ship / the devops executor'; // the promotion pipeline path
+
+function bashMessage(verb, skill) {
+  return (
+    `Pipeline guard: running \`${verb}\` directly in the main thread bypasses the build pipeline. ` +
+    `Use ${skill} instead — the pipeline (and the server-side CI ruleset) is the gate, ` +
+    `not a manual main-thread command.`
+  );
+}
+
+function isTrunk(name) {
+  return name === 'main' || name === 'master';
+}
+
+// Guarded, READ-ONLY shell-out: resolve the current branch for an argless / remote-only `git push`.
+// Any failure -> null, and the caller fails open to allow. This is the only side-effecting path; it
+// is injected into `decideBash` (default below) so every unit test drives it without spawning git.
+function currentBranch() {
+  try {
+    const out = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return out.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+// Does this `git push` land on the trunk? Only a trunk push is a skip; feature-branch work is normal.
+function pushesToTrunk(cmd, resolveBranch) {
+  const m = cmd.match(/\bgit\b[\s\S]*?\bpush\b([\s\S]*)/);
+  const rest = m ? m[1] : '';
+  const positionals = rest.split(/\s+/).filter((t) => t && !t.startsWith('-'));
+  // a colon refspec (local:remote) targets the REMOTE side -> take the part after ':'.
+  const refs = positionals.map((p) => (p.includes(':') ? p.split(':').pop() : p));
+  if (refs.some(isTrunk)) return true; // an explicit main/master ref
+  if (positionals.length >= 2) return false; // an explicit non-trunk branch was named
+  // no branch named (argless or remote-only) -> resolve the current branch
+  let branch = null;
+  try {
+    branch = resolveBranch();
+  } catch {
+    branch = null;
+  }
+  return branch ? isTrunk(branch) : false; // unresolvable -> fail open (allow)
+}
+
+// PURE: { command, agentId, level } -> { action: 'allow'|'warn'|'block', skill?, message? }.
+// Unit-tested apart from stdin (mirrors the Task arm's `decide()` seam). `resolveBranch` is an
+// injected boundary (defaults to a guarded `git rev-parse`) so the argless-push path stays testable.
+function decideBash({ command, agentId, level, resolveBranch = currentBranch } = {}) {
+  const cmd = typeof command === 'string' ? command : '';
+  if (!cmd.trim()) return { action: 'allow' }; // missing command -> fail open
+
+  if (agentId) return { action: 'allow' }; // spine: present = subagent = the pipeline -> allow
+
+  // Posture knob (default/unknown -> warn). `off` disables the Bash arm entirely (kill switch);
+  // the Task arm is never gated by the knob.
+  const raw = typeof level === 'string' ? level.trim().toLowerCase() : '';
+  const lvl = raw === 'block' || raw === 'off' ? raw : 'warn';
+  if (lvl === 'off') return { action: 'allow' };
+
+  // A catch command's action: `block` only under the block posture, else `warn`.
+  const catchAction = (verb, skill) => ({
+    action: lvl === 'block' ? 'block' : 'warn',
+    skill,
+    message: bashMessage(verb, skill),
+  });
+
+  // `gh issue create` is LOCKED to warn under every level (incl. block): to-prd/to-issues/triage
+  // run it themselves in the main thread, so a block would wedge the redirect skills. (ADR 0009 §4.)
+  if (/\bgh\b[\s\S]*?\bissue\b[\s\S]*?\bcreate\b/.test(cmd)) {
+    return { action: 'warn', skill: SKILL_SPEC, message: bashMessage('gh issue create', SKILL_SPEC) };
+  }
+
+  if (/\bgh\b[\s\S]*?\bpr\b[\s\S]*?\bcreate\b/.test(cmd)) {
+    return catchAction('gh pr create', SKILL_SHIP);
+  }
+
+  // A PR merges into its base (the trunk); promotion is a `wrxn ship` PR gated by CI, not a manual merge.
+  if (/\bgh\b[\s\S]*?\bpr\b[\s\S]*?\bmerge\b/.test(cmd)) {
+    return catchAction('gh pr merge', SKILL_SHIP);
+  }
+
+  // Only a TRUNK push is a skip — promotion is a `wrxn ship` PR, not a direct push to main/master.
+  if (/\bgit\b[\s\S]*?\bpush\b/.test(cmd) && pushesToTrunk(cmd, resolveBranch)) {
+    return catchAction('git push', SKILL_SHIP);
+  }
+
+  return { action: 'allow' };
+}
+
+// Modern PreToolUse output (AC#0-confirmed): a warn lets the tool run while nudging both the
+// assistant (additionalContext) and the operator (systemMessage); a block denies with a reason.
+function warnOutput(message) {
+  return {
+    hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow', additionalContext: message },
+    systemMessage: message,
+  };
+}
+
+function blockOutput(message) {
+  return {
+    hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: message },
+  };
+}
+
 function emit(decision) {
   process.stdout.write(JSON.stringify(decision));
   process.exit(0);
@@ -98,6 +224,20 @@ function main() {
   // reach event.tool_name and throw uncaught past the try. Guard it -> fail open. (gate-07 INFO)
   if (!event || typeof event !== 'object') return emit({});
 
+  // Bash arm (slice #90): catch a MAIN-THREAD pipeline skip. The discriminator is the snake_case
+  // `agent_id` stdin field (present only inside a subagent); the posture comes from process.env.
+  if (event.tool_name === 'Bash') {
+    const ti = event.tool_input || {};
+    const d = decideBash({
+      command: ti.command,
+      agentId: event.agent_id, // presence = subagent = the pipeline -> allow
+      level: process.env.WRXN_PIPELINE_GUARD,
+    });
+    if (d.action === 'warn') return emit(warnOutput(d.message));
+    if (d.action === 'block') return emit(blockOutput(d.message));
+    return emit({}); // allow
+  }
+
   // Only gate the Task (subagent-spawn) tool; anything else -> allow.
   if (event.tool_name && event.tool_name !== 'Task') return emit({});
 
@@ -113,4 +253,4 @@ if (require.main === module) {
   main();
 }
 
-module.exports = { decide };
+module.exports = { decide, decideBash };

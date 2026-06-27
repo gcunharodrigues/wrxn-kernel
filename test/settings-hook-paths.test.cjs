@@ -61,6 +61,16 @@ test('the retired push-gate hooks are absent from the settings wiring', () => {
   }
 });
 
+test('the pipeline-adherence guard is wired under the PreToolUse Bash matcher (slice #90)', () => {
+  const cfg = JSON.parse(fs.readFileSync(SETTINGS, 'utf8'));
+  const bashGroups = (cfg.hooks.PreToolUse || []).filter((g) => g.matcher === 'Bash');
+  const cmds = bashGroups.flatMap((g) => (g.hooks || []).map((h) => h.command));
+  assert.ok(
+    cmds.some((c) => /enforce-pipeline-adherence\.cjs/.test(c)),
+    'enforce-pipeline-adherence must be wired under the Bash matcher'
+  );
+});
+
 test('the surviving hook wiring is intact after the push-gate retirement', () => {
   const joined = hookCommands().join('\n');
   // session/intel + synapse + the demoted managed-advisory + the slice-07 adherence guard all stay.
