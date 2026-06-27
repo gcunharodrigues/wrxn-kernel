@@ -40,6 +40,8 @@ is **server-enforced** and **kernel-delivered**. Eight locked choices:
    `feat`/`fix`/`perf`/breaking → auto-bump + publish to npm; `chore`/`docs`/`refactor`/`test` → no publish.
    Reuse the existing npm **OIDC tokenless + provenance** publish; `concurrency`-locked so two merges can't
    double-publish. Published repos only (`wrxn-kernel`, `recon-wrxn`); non-published "release" = the merge.
+   **(The "auto-bump" half of this point is superseded by ADR 0010** — releases are deliberate `chore(release)`
+   PRs cut by `wrxn release`, not an auto-bump-commit-back on merge; CD still publishes on merge.)
 5. **Retire the local push-gates.** Delete `enforce-push-authority`, `enforce-review-marker`,
    `enforce-tests-on-push` (superseded by the ruleset + CI). Demote `enforce-managed-guard`/`-precommit` to a
    **non-blocking advisory** (drop `WRXN_MANAGED_CONFIRM`); managed-integrity is enforced in CI instead.
