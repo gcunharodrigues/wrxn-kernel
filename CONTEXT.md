@@ -161,3 +161,13 @@ The derived per-PRD gate board (`wrxn flow status`) — reconstructs each slice'
 (build/review/security/qa) from the durable gate **artifacts**, not a separate state store. compass
 renders it for "is the process running correctly."
 _Avoid_: dashboard, state machine (there is no separate state — the artifacts are the truth).
+
+**Pipeline-adherence guard**:
+The client-side speedbump that catches a build-flow skip and points back at the right skill, in two
+forms: a **delegation skip** — a HITL step handed to a non-typed agent, caught when a subagent is spawned
+(ADR 0007 §8) — and a **main-thread skip** — pipeline-bypassing ops run *directly* by the operator with no
+subagent to intercept, caught at the act (ADR 0009). It distinguishes a skip from a legitimate pipeline
+mechanic by **caller context** (a typed executor running the same command is allowed), not by the command
+text. A speedbump, not enforcement — the server CI ruleset is the only hard gate (ADR 0007).
+_Avoid_: gate (the CI ruleset is the gate; this is an advisory speedbump), linter, the SYNAPSE doctrine
+rule (passive text; the guard is an active interrupt — the distinction is the whole point).
