@@ -51,7 +51,7 @@ When the operator references an earlier moment ("like we discussed", "the decisi
 
 All three are optional, compose with each other, and apply across **both arms** (so scoping/filtering also covers assistant turns), preserving recency order and cross-arm dedup.
 
-- **`--session <id>`** — scope results to a single session (exact match on the session id). The id is the harness/event session id (letters, digits, `-`, `_`); a malformed id is rejected. Scoped rows render as `this session`.
+- **`--session <id>`** — scope results to a single session (exact match on the session id). The id is the harness/event session id (letters, digits, `-`, `_`); a malformed id is rejected. Scoping only *narrows* the rows — it does **not** relabel them: the `this session` label tracks the genuinely-live session (`CLAUDE_SESSION_ID`), so scoping to a **past** session shows its real id, not `this session`.
 - **`--since <when>`** — keep only hits at or after a timestamp floor. `<when>` is either `today` (from 00:00 **UTC** of the current day — record stamps are UTC) or an ISO-8601 date/datetime (e.g. `2026-06-26` or `2026-06-26T12:00:00Z`). An undatable hit is excluded.
 - **`--regex`** — match the search term as a **regular expression** instead of a case-insensitive substring. Regex mode is **case-sensitive** (the universal regex default; the substring default stays case-insensitive).
 
@@ -71,7 +71,7 @@ Hits are **most-recent-first**, one per line:
 ```
 
 - `role` is `user` (event log or a user transcript turn) or `assistant` (a transcript turn).
-- The session column collapses to `this session` for hits from the active session.
+- The session column collapses to `this session` for hits from the genuinely-live session (`CLAUDE_SESSION_ID`), independent of any `--session` scope.
 - No match → an explicit `chat-search: nothing found for "<term>" ...` line (never silence, never a crash).
 - If the transcript arm is unavailable, a trailing `chat-search: transcript arm unavailable — showing event-log results only.` line is appended (loud degrade).
 

@@ -111,14 +111,15 @@ test('a term that matches nothing yields an explicit nothing-found result, not a
 test('renderHit formats the hit line and substitutes "this session" for the active sid', () => {
   const hit = { ts: '2026-06-25T10:00:00.000Z', session: 'sid-live', role: 'user', snippet: 'the gate decision' };
 
-  const past = renderHit(hit, { session: 'sid-other' });
+  // the label source is opts.activeSession (the genuinely-live session), NOT the --session scope filter (#98).
+  const past = renderHit(hit, { activeSession: 'sid-other' });
   assert.equal(
     past,
     '2026-06-25T10:00:00.000Z · sid-live · user · the gate decision',
     'a hit from another session renders timestamp · session · role · snippet',
   );
 
-  const current = renderHit(hit, { session: 'sid-live' });
+  const current = renderHit(hit, { activeSession: 'sid-live' });
   assert.match(current, /this session/, 'a hit from the active session renders "this session"');
   assert.ok(!current.includes('sid-live'), 'the raw sid is replaced, not appended');
   assert.equal(current.split(' · ').length, 4, 'four middle-dot-separated fields');
@@ -709,7 +710,7 @@ test('the CLI honors --session (scopes) and --regex (pattern match)', () => {
   writeEvents(root, 'sid-a', [prompt('2026-06-26T10:00:00.000Z', 'alpha keyword in session a')]);
   writeEvents(root, 'sid-b', [prompt('2026-06-26T11:00:00.000Z', 'beta keyword in session b')]);
 
-  // --session scopes: only sid-a's content surfaces (asserted by content, since scoped rows render "this session").
+  // --session scopes: only sid-a's content surfaces (asserted by content — robust whether or not a session is live).
   const scoped = spawnSync('node', [ENGINE, 'keyword', '--root', root, '--session', 'sid-a'], { encoding: 'utf8' });
   assert.equal(scoped.status, 0, '--session exits 0');
   assert.match(scoped.stdout, /alpha keyword/, 'the scoped session content is printed');
@@ -901,4 +902,40 @@ test('a cross-arm duplicate (ms-skewed ts, whitespace-differing text) collapses 
     searchConversationalLog('ship it now', { transcriptsHome: emptyHome }, root3).total, 2,
     'the same text outside the window stays two hits (the window is tight, not a global text dedup)',
   );
+});
+
+// ── #98: --session scopes results but must NOT drive the "this session" render label ──
+// --session both SCOPED results and (slice-1) drove renderHit's "this session" label, so scoping to a PAST
+// session mislabeled its rows. The label source is now a SEPARATE opts.activeSession (the genuinely-live
+// session id, wired from CLAUDE_SESSION_ID at the CLI), decoupled from the --session scope filter.
+
+test('--session scoping to a PAST session does not mislabel rows "this session"; the active session still does (#98)', () => {
+  const root = tmp('wrxn-cs-label98-');
+  writeEvents(root, 'sid-past', [prompt('2026-06-26T10:00:00.000Z', 'the gate decision in a past session')]);
+  writeEvents(root, 'sid-live', [prompt('2026-06-26T11:00:00.000Z', 'the gate decision in the live session')]);
+
+  // scoping to a PAST session (NOT the active one) must NOT render its rows as "this session".
+  const scopedPast = searchConversationalLog('gate decision', { session: 'sid-past', activeSession: 'sid-live' }, root);
+  assert.equal(scopedPast.total, 1, 'the scope still narrows to the past session');
+  assert.equal(scopedPast.hits[0].session, 'sid-past', 'the scoped row is the past session');
+  assert.ok(!/this session/.test(scopedPast.rendered), 'a PAST scoped session is NOT mislabeled "this session"');
+  assert.match(scopedPast.rendered, /sid-past/, 'the past session renders its real id');
+
+  // rows from the genuinely-ACTIVE session ARE labeled "this session" (driven by activeSession, not scope).
+  const live = searchConversationalLog('gate decision', { activeSession: 'sid-live' }, root);
+  const liveRow = live.rendered.split('\n').find((l) => /11:00:00/.test(l));
+  assert.match(liveRow, /this session/, 'a row from the active session is labeled "this session"');
+  assert.ok(
+    !live.rendered.split('\n').some((l) => /10:00:00/.test(l) && /this session/.test(l)),
+    'a non-active row keeps its real id',
+  );
+
+  // CLI end-to-end: the label is driven by CLAUDE_SESSION_ID (the live session), decoupled from --session.
+  const cli = spawnSync('node', [ENGINE, 'gate decision', '--root', root, '--session', 'sid-past'], {
+    encoding: 'utf8',
+    env: { ...process.env, CLAUDE_SESSION_ID: 'sid-live' },
+  });
+  assert.equal(cli.status, 0, 'the CLI exits 0');
+  assert.match(cli.stdout, /sid-past/, 'the scoped past session renders its real id');
+  assert.ok(!/this session/.test(cli.stdout), 'scoping to a past session via --session does not mislabel it "this session" when a different session is live');
 });

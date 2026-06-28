@@ -38,10 +38,12 @@ function snippetFor(text, matchesLine) {
 }
 
 // ── render: one hit → "timestamp · session (or 'this session') · role · snippet" ──
-// The session column collapses to "this session" when the hit is from the caller's active session
-// (opts.session), so a result set reads as scrollback relative to where the operator stands now.
+// The session column collapses to "this session" when the hit is from the caller's genuinely-LIVE session
+// (opts.activeSession — the CLI wires it from CLAUDE_SESSION_ID), so a result set reads as scrollback relative
+// to where the operator stands now. This is DECOUPLED from the --session SCOPE filter (opts.session): scoping
+// to a PAST session narrows the rows but never relabels them "this session" (#98).
 function renderHit(hit, opts) {
-  const active = opts && opts.session;
+  const active = opts && opts.activeSession;
   const sessionLabel = active && hit.session === active ? 'this session' : hit.session;
   return `${hit.ts} · ${sessionLabel} · ${hit.role} · ${hit.snippet}`;
 }
@@ -539,6 +541,10 @@ function main() {
   const since = flag('since');
   if (since !== undefined) opts.since = since;
   if (hasFlag('regex')) opts.regex = true;
+  // The "this session" label tracks the genuinely-LIVE session (Claude Code exports CLAUDE_SESSION_ID), NOT
+  // the --session SCOPE filter — so scoping to a PAST session never relabels its rows "this session" (#98).
+  const activeSession = process.env.CLAUDE_SESSION_ID;
+  if (activeSession) opts.activeSession = activeSession;
 
   let result;
   try {
