@@ -91,7 +91,8 @@ const INJECTED_STRIP_MAX = 65536;
 // Strip hook-injected framework-context blocks from one text part BEFORE matching. Two phases: (1) every
 // well-delimited <tag>…</tag> block anywhere; (2) a part-LEADING unclosed <tag>… (transcript truncated
 // mid-block) to end-of-part — anchored so a sentinel merely MENTIONED mid-prose keeps its tail. PURE and
-// FAIL-OPEN: any fault returns the input unchanged. Byte-faithful copy of memory-synth.cjs (#62).
+// FAIL-OPEN: any fault returns the input unchanged. Logic-identical to memory-synth.cjs's stripInjectedContext
+// (#62) — same strip semantics, not a byte-for-byte copy (and the 64KB strip cap is the inherited #62 tradeoff).
 function stripInjectedContext(text) {
   try {
     let out = String(text || '');
@@ -225,7 +226,12 @@ function parseSince(raw) {
     d.setUTCHours(0, 0, 0, 0);
     return d.getTime();
   }
-  const t = Date.parse(s);
+  // N3 (#99): record stamps are UTC, but Date.parse reads an ISO datetime WITH a time component and NO zone
+  // designator ("2026-06-26T12:00:00") as MACHINE-LOCAL time — silently shifting the floor by the host offset.
+  // Normalize it to UTC by appending Z. A date-only form (no 'T') is already UTC under Date.parse, and an
+  // explicit zone (trailing Z or a ±HH[:MM] offset) is honored as written — both pass through untouched.
+  const normalized = /[tT]/.test(s) && !/[zZ]$/.test(s) && !/[+-]\d{2}(:?\d{2})?$/.test(s) ? `${s}Z` : s;
+  const t = Date.parse(normalized);
   if (Number.isNaN(t)) {
     throw inputError(`chat-search: --since value "${raw}" is not a date — use "today" or an ISO-8601 date (e.g. 2026-06-26)`);
   }
@@ -440,6 +446,7 @@ function searchConversationalLog(query, opts, roots) {
     if (!tfiles) {
       degraded = true;
     } else {
+      let recognizedTurns = 0; // user/assistant turns this dir yielded; zero across a non-empty dir = wholesale drift (#99 F3)
       for (const file of tfiles) {
         let lines;
         try {
@@ -456,12 +463,17 @@ function searchConversationalLog(query, opts, roots) {
             continue; // skip a malformed transcript line, never crash the scan
           }
           if (!rec || (rec.type !== 'user' && rec.type !== 'assistant')) continue; // only user/assistant turns; unknown line types (summary/system/…) skipped
+          recognizedTurns++; // a recognized turn (matchable or not) → this dir is NOT wholesale-drifted (#99 F3)
           // hygiene pipeline: flatten → strip injected framework context (a block holding the term is not a
           // hit) → redact secrets (raw chat can echo a credential; scrub BEFORE it can surface in a snippet).
           const text = redactSecrets(stripInjectedContext(transcriptText(rec)));
           consider(rec.timestamp, rec.sessionId, rec.type, text);
         }
       }
+      // F3 (#99): a present, readable dir whose EVERY line is an unknown type yielded zero usable turns — the
+      // arm is effectively unavailable → loud events-only degrade. Per-RECORD drift (some good turns) stays
+      // silent, and a present-but-empty dir ([]) is reachable-but-nothing and stays silent, both as before.
+      if (tfiles.length > 0 && recognizedTurns === 0) degraded = true;
     }
   }
 
@@ -498,13 +510,16 @@ function findInstallRoot(start) {
   return null;
 }
 
-// Value of a --name <value> flag. A following token that is itself a --flag (or a missing value) is NOT
-// consumed as the value — so `--session --regex` can't silently swallow --regex as the session id.
+// Value of a --name <value> flag, or undefined when the flag is ABSENT (optional). A PRESENT flag whose value
+// is missing or is itself a --flag fails LOUD (N2, #99) — parity with `--session ""`, never a silent
+// scope-widening drop: so `--session --regex` can't swallow --regex as the id and a trailing `--since` can't
+// vanish. The throw is userFacing, so main()'s catch prints one clean line and exits non-zero.
 function flag(name) {
   const i = process.argv.indexOf(`--${name}`);
   if (i < 0) return undefined;
   const val = process.argv[i + 1];
-  return val == null || val.startsWith('--') ? undefined : val;
+  if (val == null || val.startsWith('--')) throw inputError(`chat-search: --${name} requires a value`);
+  return val;
 }
 
 // Presence of a boolean --name flag (e.g. --regex), which carries no value.
@@ -528,38 +543,39 @@ function main() {
     process.stdout.write('Usage: node .wrxn/chat-search.cjs <search-term...> [--root <dir>] [--session <id>] [--since <when>] [--regex]\n');
     process.exit(2);
   }
-  const root = flag('root') || findInstallRoot();
-  if (!root) {
-    process.stderr.write('chat-search: cannot resolve the install root — run inside a wrxn install or pass --root <dir>\n');
-    process.exit(2);
-  }
-  // Wire the slice-3 flags (#85) into engine opts. The engine validates them (it throws a clean, user-facing
-  // error on a bad regex / unparseable --since); the CLI catch below prints that one line and exits non-zero.
-  const opts = {};
-  const session = flag('session');
-  if (session !== undefined) opts.session = session;
-  const since = flag('since');
-  if (since !== undefined) opts.since = since;
-  if (hasFlag('regex')) opts.regex = true;
-  // The "this session" label tracks the genuinely-LIVE session (Claude Code exports CLAUDE_SESSION_ID), NOT
-  // the --session SCOPE filter — so scoping to a PAST session never relabels its rows "this session" (#98).
-  const activeSession = process.env.CLAUDE_SESSION_ID;
-  if (activeSession) opts.activeSession = activeSession;
-
-  let result;
+  // Flag parsing AND the engine call live inside ONE user-facing try: a value-flag with a missing/--prefixed
+  // value (flag(), N2 #99) and a bad regex / unparseable --since (the engine) both throw a clean userFacing
+  // error → the catch prints that one line and exits non-zero (never a Node stack or absolute path).
   try {
-    result = searchConversationalLog(terms.join(' '), opts, root);
+    const root = flag('root') || findInstallRoot();
+    if (!root) {
+      process.stderr.write('chat-search: cannot resolve the install root — run inside a wrxn install or pass --root <dir>\n');
+      process.exit(2);
+    }
+    // Wire the slice-3 flags (#85) into engine opts.
+    const opts = {};
+    const session = flag('session');
+    if (session !== undefined) opts.session = session;
+    const since = flag('since');
+    if (since !== undefined) opts.since = since;
+    if (hasFlag('regex')) opts.regex = true;
+    // The "this session" label tracks the genuinely-LIVE session (Claude Code exports CLAUDE_SESSION_ID), NOT
+    // the --session SCOPE filter — so scoping to a PAST session never relabels its rows "this session" (#98).
+    const activeSession = process.env.CLAUDE_SESSION_ID;
+    if (activeSession) opts.activeSession = activeSession;
+
+    const result = searchConversationalLog(terms.join(' '), opts, root);
+    process.stdout.write(result.rendered + '\n');
+    process.exit(0);
   } catch (err) {
     if (err && err.userFacing) {
-      // invalid flag input (bad/catastrophic regex, unparseable --since): fail LOUD with the one clean line
-      // the engine already built — never a Node stack or path — and exit non-zero (usage error).
+      // invalid flag input (missing flag value, bad/catastrophic regex, unparseable --since): fail LOUD with
+      // the one clean line — never a Node stack or path — and exit non-zero (usage error).
       process.stderr.write(err.message + '\n');
       process.exit(2);
     }
     throw err; // an unexpected fault → the entrypoint wrap turns it into a clean path-free diagnostic
   }
-  process.stdout.write(result.rendered + '\n');
-  process.exit(0);
 }
 
 // Belt-and-suspenders fail-loud (mirrors emit-event.cjs's entrypoint wrap): the per-file read and root

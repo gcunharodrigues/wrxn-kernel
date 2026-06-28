@@ -939,3 +939,73 @@ test('--session scoping to a PAST session does not mislabel rows "this session";
   assert.match(cli.stdout, /sid-past/, 'the scoped past session renders its real id');
   assert.ok(!/this session/.test(cli.stdout), 'scoping to a past session via --session does not mislabel it "this session" when a different session is live');
 });
+
+// ── #99 N3: a --since datetime lacking a Z is normalized to UTC, not parsed as machine-local time ──
+// Record stamps are UTC (…Z). Date.parse treats a no-Z datetime ("2026-06-26T12:00:00") as LOCAL, so the
+// floor silently shifts by the machine offset. Forcing a non-UTC child TZ makes the bug deterministic: under
+// the bug the floor lands hours off and the 14:00Z hit is wrongly dropped; normalized to UTC it survives.
+
+test('a --since datetime lacking a Z is normalized to UTC, not parsed as local time (#99 N3)', () => {
+  const root = tmp('wrxn-cs-sinceutc-');
+  writeEvents(root, 'sid-a', [prompt('2026-06-26T14:00:00.000Z', 'deploy plan at two pm UTC')]);
+
+  // America/New_York is UTC-4/-5: if the no-Z floor "2026-06-26T12:00:00" were parsed as LOCAL, it would be
+  // 16:00–17:00 UTC > 14:00Z and the hit would be dropped (total 0). Normalized to UTC the floor is 12:00Z,
+  // so the 14:00Z hit survives. The child env forces TZ so the red is deterministic on any CI zone.
+  const cli = spawnSync('node', [ENGINE, 'deploy plan', '--root', root, '--since', '2026-06-26T12:00:00'], {
+    encoding: 'utf8',
+    env: { ...process.env, TZ: 'America/New_York' },
+  });
+  assert.equal(cli.status, 0, 'the CLI exits 0');
+  assert.match(cli.stdout, /deploy plan at two pm UTC/, 'a no-Z --since datetime is treated as UTC, so the 14:00Z hit survives a 12:00 floor');
+  assert.ok(!/nothing found/i.test(cli.stdout), 'the hit is not wrongly dropped by a local-time misparse of the floor');
+});
+
+// ── #99 F3: a WHOLESALE-drifted transcript dir (every line an unknown type) degrades loudly ──
+// A present, readable transcript dir whose every line is an unknown type (summary/system/…) yields zero
+// usable turns — the arm is effectively unavailable, so it earns the loud events-only note. Per-RECORD drift
+// (some lines unknown, some good) correctly stays silent (that path keeps its existing regression test).
+
+test('a wholesale-drifted transcript dir (every line an unknown type) degrades loudly (#99 F3)', () => {
+  const home = tmp('wrxn-cs-f3-home-');
+  const root = tmp('wrxn-cs-f3-');
+  const dir = path.join(home, slugForRoot(root));
+  fs.mkdirSync(dir, { recursive: true });
+  // EVERY line is an unknown type — not a single user/assistant turn.
+  const body = [
+    JSON.stringify({ type: 'summary', timestamp: '2026-06-26T10:00:00.000Z', sessionId: 'sid-d', summary: 'a recap line' }),
+    JSON.stringify({ type: 'system', timestamp: '2026-06-26T10:01:00.000Z', sessionId: 'sid-d', content: 'a system line' }),
+  ].join('\n') + '\n';
+  fs.writeFileSync(path.join(dir, 'sid-d.jsonl'), body);
+  writeEvents(root, 'sid-a', [prompt('2026-06-26T11:00:00.000Z', 'event arm baton echo only')]);
+
+  const res = searchConversationalLog('baton echo', { transcriptsHome: home }, root);
+  assert.equal(res.total, 1, 'the event-log hit still surfaces');
+  assert.equal(res.degraded, true, 'a wholesale-drifted transcript dir (no recognizable turn) triggers the loud degrade');
+  assert.match(res.rendered, /transcript arm unavailable/i, 'the loud events-only degrade note is emitted');
+});
+
+// ── #99 N2: a value-flag given with a missing or --prefixed value fails LOUD (parity with --session "") ──
+// `--session` with nothing after it (or a --flag as its "value") was silently dropped, not failed loud, while
+// `--session ""` fails loud. Close the parity: a present value-flag with a missing/--prefixed value is a clean,
+// one-line, non-zero failure naming the flag — never a silent scope-widening drop, never a Node stack.
+
+test('a value-flag with a missing or --prefixed value fails loud (parity with --session "") (#99 N2)', () => {
+  const root = tmp('wrxn-cs-n2-');
+  writeEvents(root, 'sid-a', [prompt('2026-06-26T10:00:00.000Z', 'deploy plan today')]);
+
+  const assertLoud = (res, flagName, label) => {
+    assert.notEqual(res.status, 0, `${label}: exits non-zero`);
+    assert.equal(res.stdout.trim(), '', `${label}: nothing on stdout`);
+    const err = res.stderr.trim();
+    assert.ok(err.startsWith('chat-search:'), `${label}: clean chat-search line on stderr`);
+    assert.equal(err.split('\n').length, 1, `${label}: exactly one line on stderr`);
+    assert.ok(!/\n?\s+at\s/.test(res.stderr), `${label}: no Node stack frame leaks`);
+    assert.match(res.stderr, new RegExp(`--${flagName}`), `${label}: names the offending flag`);
+  };
+
+  // (1) --session whose "value" is itself a --flag (the swallow guard) → loud, not a silent drop.
+  assertLoud(spawnSync('node', [ENGINE, 'deploy', '--root', root, '--session', '--regex'], { encoding: 'utf8' }), 'session', '--session --regex');
+  // (2) --since at the end of argv with no value at all → loud.
+  assertLoud(spawnSync('node', [ENGINE, 'deploy', '--root', root, '--since'], { encoding: 'utf8' }), 'since', '--since (no value)');
+});

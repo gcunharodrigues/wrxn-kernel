@@ -17,7 +17,7 @@ user-invocable: true
 - **Event log** — `.wrxn/events/*.jsonl`, the per-session, secret-redacted **user prompts** emit-event.cjs appends.
 - **Harness transcript** — `~/.claude/projects/<slug>/*.jsonl`, the only source of **assistant** turns and full user/assistant **message content**. The `<slug>` is the project's absolute path with every non-alphanumeric character replaced by `-` (how the harness names the dir). The transcript arm is **hygiene-cleaned** before matching (see below).
 
-A prompt that appears in **both** arms is de-duplicated — by `(session, timestamp, text)` — so it surfaces once. If the transcript dir is **missing or unreadable**, the search **degrades loudly to events-only** and says so in the output (it never crashes).
+A prompt that appears in **both** arms is de-duplicated — by `(session, whitespace-normalized text, timestamp within a tight window)` — so a single turn surfaces once even when its two arms stamp it ms apart or differ by whitespace. If the transcript dir is **missing, unreadable, or wholesale-drifted** (present but every line an unknown type, so it yields no usable turn), the search **degrades loudly to events-only** and says so in the output (it never crashes).
 
 Three optional flags refine a search — `--session` (scope to one session), `--since` (a time floor), and `--regex` (pattern match instead of substring). They compose with each other and with both arms. See **Scoping & match flags** below.
 
@@ -52,7 +52,7 @@ When the operator references an earlier moment ("like we discussed", "the decisi
 All three are optional, compose with each other, and apply across **both arms** (so scoping/filtering also covers assistant turns), preserving recency order and cross-arm dedup.
 
 - **`--session <id>`** — scope results to a single session (exact match on the session id). The id is the harness/event session id (letters, digits, `-`, `_`); a malformed id is rejected. Scoping only *narrows* the rows — it does **not** relabel them: the `this session` label tracks the genuinely-live session (`CLAUDE_SESSION_ID`), so scoping to a **past** session shows its real id, not `this session`.
-- **`--since <when>`** — keep only hits at or after a timestamp floor. `<when>` is either `today` (from 00:00 **UTC** of the current day — record stamps are UTC) or an ISO-8601 date/datetime (e.g. `2026-06-26` or `2026-06-26T12:00:00Z`). An undatable hit is excluded.
+- **`--since <when>`** — keep only hits at or after a timestamp floor. `<when>` is either `today` (from 00:00 **UTC** of the current day — record stamps are UTC) or an ISO-8601 date/datetime (e.g. `2026-06-26` or `2026-06-26T12:00:00Z`). A datetime **without an explicit zone** is read as **UTC** (matching the record stamps), not machine-local time. An undatable hit is excluded.
 - **`--regex`** — match the search term as a **regular expression** instead of a case-insensitive substring. Regex mode is **case-sensitive** (the universal regex default; the substring default stays case-insensitive).
 
 ```bash
@@ -73,7 +73,7 @@ Hits are **most-recent-first**, one per line:
 - `role` is `user` (event log or a user transcript turn) or `assistant` (a transcript turn).
 - The session column collapses to `this session` for hits from the genuinely-live session (`CLAUDE_SESSION_ID`), independent of any `--session` scope.
 - No match → an explicit `chat-search: nothing found for "<term>" ...` line (never silence, never a crash).
-- If the transcript arm is unavailable, a trailing `chat-search: transcript arm unavailable — showing event-log results only.` line is appended (loud degrade).
+- If the transcript arm is unavailable (missing, unreadable, or wholesale-drifted), a trailing `chat-search: transcript arm unavailable — showing event-log results only.` line is appended (loud degrade).
 
 ## Boundaries
 
