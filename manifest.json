@@ -559,6 +559,11 @@
       "profile": "project"
     },
     {
+      "path": ".wrxn/tracker-target.cjs",
+      "class": "managed",
+      "profile": "project"
+    },
+    {
       "path": ".wrxn/wiki.cjs",
       "class": "managed",
       "profile": "project"

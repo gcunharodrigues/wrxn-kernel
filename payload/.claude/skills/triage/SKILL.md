@@ -102,3 +102,27 @@ Capture everything resolved during grilling under "established so far" so the wo
 ## Resuming a previous session
 
 If prior triage notes exist on the issue, read them, check whether the reporter has answered any outstanding questions, and present an updated picture before continuing. Don't re-ask resolved questions.
+
+## `--repo` / cross-repo targeting
+
+By default this skill triages issues on the project's configured tracker (see
+`docs/agents/issue-tracker.md`). Passing **`--repo owner/repo`** instead targets a named **GitHub** repo
+for this one invocation (e.g. the kernel or `recon-wrxn`), so you can manage a sibling repo's backlog
+from this session without leaving the pipeline. Resolve the target through the ONE shared helper —
+`.wrxn/tracker-target.cjs` — never hand-roll the parsing:
+
+```bash
+node -e 'console.log(JSON.stringify(require("./.wrxn/tracker-target.cjs").resolveTarget(process.argv[1])))' "<owner/repo, or empty if no --repo>"
+```
+
+It returns `{ mechanism, repo, ghBaseArgs }` and **throws loud** on a malformed / empty / trailing
+`--repo` BEFORE any side-effect — let that refusal surface; never proceed on a bad target.
+
+- **`mechanism: "local"`** (no `--repo`) → triage exactly as today, editing the `Status:` line in
+  `.scratch/` — unchanged.
+- **`mechanism: "github"`** → manage via `gh`, prepending the returned **`ghBaseArgs`** (`-R owner/repo`)
+  to every `gh` call: relabel with `gh issue edit -R owner/repo --add-label … --remove-label …`, close
+  with `gh issue close -R owner/repo …`, comment with `gh issue comment -R owner/repo …`, and create with
+  the helper's `publishIssue({ target, title, body, label }, gh)`. Apply only labels from the shared wrxn
+  triage vocab (`ready-for-agent` / `backlog` / `epic`); `gh` fails loud if the target lacks a label — do
+  not work around it (no silent mis-label).
