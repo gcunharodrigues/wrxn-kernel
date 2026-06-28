@@ -1,6 +1,6 @@
 {
   "name": "@gcunharodrigues/wrxn",
-  "version": "0.20.2",
+  "version": "0.21.0",
   "description": "WRXN Kernel — installable AI operating system. Two profiles (project | workspace), pull-based updates, managed/seeded/state file classes.",
   "bin": {
     "wrxn": "bin/wrxn.cjs"
