@@ -2,3 +2,6 @@ node_modules/
 *.tgz
 .DS_Store
 .recon/
+# Per-slice AFK pipeline markers (review/security/qa .md) — never committed; ignored so the
+# `wrxn release` dirty-guard does not refuse a release on accumulated scratch (#111).
+acceptance/
