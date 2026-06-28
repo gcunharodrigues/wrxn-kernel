@@ -855,3 +855,50 @@ test('adjacent unbounded quantifiers (a+a+a+…$) are rejected fast; a few-quant
   );
   assert.equal(searchConversationalLog('(deploy|ship).*gate.*today', { regex: true }, benign).total, 1, 'and it still matches');
 });
+
+// ── #97: cross-arm dedup — timestamp-window + whitespace-normalize (session, normText, ts within ±window) ──
+// In production the event-log ts (stamped at hook-fire by emit-event.cjs) and the harness transcript timestamp
+// for the SAME prompt are written by DIFFERENT processes — they differ by ms — and post-strip text can differ
+// by whitespace. Exact (session, ts, text) dedup let that duplicate surface twice. The key now normalizes text
+// (trim + collapse interior whitespace) and matches ts within a TIGHT ±window, so the same turn collapses to
+// one while two genuinely-distinct prompts inside the window stay separate (test BOTH directions).
+
+test('a cross-arm duplicate (ms-skewed ts, whitespace-differing text) collapses to one; distinct in-window prompts stay separate (#97)', () => {
+  const home = tmp('wrxn-cs-dedup97-home-');
+  const root = tmp('wrxn-cs-dedup97-');
+  const sid = 'sid-dup';
+
+  // (A) the SAME prompt in both arms: event ts vs transcript ts differ by 1.5s (< window) and the text differs
+  //     only by interior whitespace → must collapse to ONE hit (query a bare word present in both spacings).
+  writeEvents(root, sid, [{ ts: '2026-06-26T14:00:00.000Z', kind: 'prompt', text: 'remember the baton echo decision' }]);
+  writeTranscript(home, root, sid, [
+    turn('user', '2026-06-26T14:00:01.500Z', 'remember the   baton   echo decision', sid), // ms-skew + extra interior spaces
+  ]);
+
+  const collapsed = searchConversationalLog('baton', { transcriptsHome: home }, root);
+  assert.equal(collapsed.total, 1, 'the ms-skewed, whitespace-differing cross-arm duplicate collapses to a single hit');
+  assert.equal(collapsed.hits[0].session, sid, 'the surviving hit carries the shared session id');
+
+  // (B) two GENUINELY-DISTINCT prompts inside the window must NOT falsely merge (different text → two hits).
+  const emptyHome = tmp('wrxn-cs-dedup97-empty-'); // an empty transcripts home → events-only, dedup unaffected
+  const root2 = tmp('wrxn-cs-dedup97b-');
+  writeEvents(root2, 'sid-x', [
+    { ts: '2026-06-26T14:00:00.000Z', kind: 'prompt', text: 'deploy the gate' },
+    { ts: '2026-06-26T14:00:01.000Z', kind: 'prompt', text: 'roll back the gate' }, // 1s apart (in-window) but DIFFERENT text
+  ]);
+  assert.equal(
+    searchConversationalLog('gate', { transcriptsHome: emptyHome }, root2).total, 2,
+    'two distinct prompts inside the ts window are NOT merged — the normalized text discriminates them',
+  );
+
+  // (C) the SAME text far apart (beyond the window) stays two distinct moments — the window is tight, not global.
+  const root3 = tmp('wrxn-cs-dedup97c-');
+  writeEvents(root3, 'sid-y', [
+    { ts: '2026-06-26T10:00:00.000Z', kind: 'prompt', text: 'ship it now' },
+    { ts: '2026-06-26T12:00:00.000Z', kind: 'prompt', text: 'ship it now' }, // same text, 2h apart → distinct moments
+  ]);
+  assert.equal(
+    searchConversationalLog('ship it now', { transcriptsHome: emptyHome }, root3).total, 2,
+    'the same text outside the window stays two hits (the window is tight, not a global text dedup)',
+  );
+});

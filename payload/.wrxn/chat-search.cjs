@@ -335,6 +335,23 @@ function compileUserRegex(pattern) {
   }
 }
 
+// ── cross-arm dedup identity (#97) ─────────────────────────────────────────────
+// The SAME prompt reaches both arms stamped by DIFFERENT processes: emit-event.cjs writes the event ts at
+// hook-fire, the harness writes the transcript timestamp when it persists the turn — they differ by ms — and
+// the transcript text can differ from the event text by whitespace (hygiene strip, soft-wrap). So the dedup
+// identity is (session, whitespace-normalized text, ts within a TIGHT ±window), NOT an exact triple. The
+// window is 2s: a single turn's two stamps land within ~1s in practice, while two genuinely-distinct prompts
+// are seconds-to-minutes apart AND (almost always) differ in text — so the window only ever collapses what is
+// really one turn. The normalized text is the primary discriminator; the window only absorbs the writer
+// clock-skew on an otherwise-identical turn (two distinct prompts inside the window keep their distinct text,
+// so they never merge; the same text outside the window stays two distinct moments).
+const DEDUP_WINDOW_MS = 2000;
+// Normalize a message's text for the dedup key: trim the ends and collapse every interior whitespace run
+// (spaces, tabs, newlines) to a single space, so an event/transcript pair that differs only in spacing keys alike.
+function normalizeForDedup(text) {
+  return String(text).trim().replace(/\s+/g, ' ');
+}
+
 // ── the engine seam ───────────────────────────────────────────────────────────
 // searchConversationalLog(query, opts, roots): scan BOTH arms across the given roots' sessions and return
 // the turns that match `query` — a case-insensitive substring by default, or (opts.regex) the compiled
@@ -346,7 +363,7 @@ function searchConversationalLog(query, opts, roots) {
   const q = String(query == null ? '' : query);
   const needle = q.toLowerCase();
   const hits = [];
-  const seen = new Set(); // a prompt present in BOTH arms (same session+ts+text) must surface only once.
+  const seen = new Map(); // dedup index (#97): `${session} ${normText}` → [{ tsMs, ts }] already surfaced; a near-stamp match collapses cross-arm duplicates.
   let degraded = false; // set when the transcript arm could not be consulted → loud events-only degrade (#84).
 
   // ── slice-3 filters (#85): each is an opts field applied per-record inside consider(), so it composes
@@ -365,9 +382,21 @@ function searchConversationalLog(query, opts, roots) {
     if (sessionScope != null && session !== sessionScope) return; // --session: exact-match a single session
     if (typeof text !== 'string' || !lineMatches(text)) return; // --regex pattern, else case-insensitive substring
     if (sinceThreshold != null && !(Date.parse(ts) >= sinceThreshold)) return; // --since: drop hits before the floor (an undatable ts → NaN → dropped)
-    const key = `${session} ${ts} ${text}`; // the AC dedup key — NUL-joined so the parts can't bleed.
-    if (seen.has(key)) return;
-    seen.add(key);
+    // Cross-arm dedup (#97): same session + whitespace-normalized text + a ts within the tight window = the
+    // same turn → surface once. NUL-joined so session and text can't bleed. An undatable or exactly-equal
+    // stamp falls back to ts-string equality, so an unparseable ts still collapses its exact twin.
+    const key = `${session} ${normalizeForDedup(text)}`;
+    const tsMs = Date.parse(ts);
+    const prior = seen.get(key);
+    if (prior) {
+      const dup = prior.some(
+        (e) => (Number.isFinite(tsMs) && Number.isFinite(e.tsMs) && Math.abs(e.tsMs - tsMs) <= DEDUP_WINDOW_MS) || e.ts === ts,
+      );
+      if (dup) return; // a near-identical turn from the other arm (or an exact twin) already surfaced
+      prior.push({ tsMs, ts });
+    } else {
+      seen.set(key, [{ tsMs, ts }]);
+    }
     hits.push({ ts, session, role, snippet: snippetFor(text, lineMatches) });
   }
 
