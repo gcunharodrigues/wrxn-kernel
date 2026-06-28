@@ -82,7 +82,11 @@ session without leaving the pipeline. Resolve the target through the ONE shared 
 `.wrxn/tracker-target.cjs` — never hand-roll the parsing:
 
 ```bash
-node -e 'console.log(JSON.stringify(require("./.wrxn/tracker-target.cjs").resolveTarget(process.argv[1])))' "<owner/repo, or empty if no --repo>"
+# WITH --repo present: pass the owner/repo value as the trailing argument.
+node -e 'console.log(JSON.stringify(require("./.wrxn/tracker-target.cjs").resolveTarget(process.argv[1])))' "owner/repo"
+# WITHOUT --repo: OMIT the argument entirely (process.argv[1] is undefined → resolves to local).
+# NEVER pass "" — resolveTarget("") THROWS (empty is malformed, not "absent"), which would break the local path.
+node -e 'console.log(JSON.stringify(require("./.wrxn/tracker-target.cjs").resolveTarget(process.argv[1])))'
 ```
 
 It returns `{ mechanism, repo, ghBaseArgs }` and **throws loud** on a malformed / empty / trailing

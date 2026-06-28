@@ -11,10 +11,15 @@
 // select-mechanism), and the gh create/label/close side-effects run through an INJECTED `gh` boundary,
 // so the decision + emitted spec are unit-testable with NO live gh.
 
-// owner/repo: exactly one slash between two non-empty segments, each free of slashes and whitespace.
-// Deliberately strict — a trailing slash, a bare owner, surrounding/internal whitespace, an extra
-// segment, or an empty value is a malformed invocation that must refuse loud BEFORE any publish.
-const OWNER_REPO = /^[^/\s]+\/[^/\s]+$/;
+// owner/repo: a GitHub-legal ALLOWLIST, not a slash/space blocklist — this is the security chokepoint.
+// The skill wirings steer the agent to hand-compose `gh -R owner/repo` Bash, so the validator is the one
+// place that must reject anything that could change the meaning of that command. Allow ONLY what GitHub
+// itself permits: owner = alphanumerics + hyphens but NOT a leading hyphen (a leading `-` would let `gh`
+// read the whole value as a flag — argument injection); repo = alphanumerics + `.` `_` `-`. This refuses
+// every shell metacharacter (`;` `$()` backtick `|` `&` `>`), embedded whitespace, a trailing slash, an
+// extra path segment, and an empty value by construction — all must refuse loud BEFORE any publish.
+// (Reviewer/security convergent finding — FIX 1.)
+const OWNER_REPO = /^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9._-]+$/;
 
 // The shared wrxn triage label vocab — the states already carried on the kernel and recon-wrxn. A label
 // means the same thing across repos; there is NO per-target label config (YAGNI for GitHub siblings).

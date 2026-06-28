@@ -56,6 +56,38 @@ test('resolveTarget: malformed / empty / trailing / whitespace --repo THROWS lou
   }
 });
 
+// ── security chokepoint: the validator is a GitHub-legal ALLOWLIST, not a slash/space blocklist. The 3
+// SKILL.md wirings steer the agent to hand-compose `gh -R owner/repo` Bash, so a value carrying a shell
+// metacharacter (`;` `$()` `|` backtick) or a leading-`-` (parsed as a gh flag) must refuse HERE, at the
+// one chokepoint, BEFORE it can reach that live command. Reviewer/security convergent finding (NB / FIX 1). ──
+
+test('resolveTarget: a --repo carrying a shell metachar or leading dash THROWS (no injection past the gate)', () => {
+  const dangerous = [
+    'a;id/b',      // command separator
+    'a$(id)/b',    // command substitution
+    'a`id`/b',     // backtick substitution
+    'a|b/c',       // pipe
+    'a&b/c',       // background / chain
+    'a>b/c',       // redirect
+    'a b/c',       // embedded space
+    'a/b/c',       // extra path segment
+    '-a/b',        // leading dash → gh would read the whole value as a flag (argument injection)
+  ];
+  for (const bad of dangerous) {
+    assert.throws(
+      () => tt.resolveTarget(bad),
+      /--repo must be "owner\/repo"/,
+      `expected ${JSON.stringify(bad)} to refuse loud (injection vector)`,
+    );
+  }
+});
+
+test('resolveTarget: both real cross-repo targets still resolve to github after the allowlist tightening', () => {
+  for (const repo of ['gcunharodrigues/wrxn-kernel', 'gcunharodrigues/recon-wrxn']) {
+    assert.deepEqual(tt.resolveTarget(repo), { mechanism: 'github', repo, ghBaseArgs: ['-R', repo] });
+  }
+});
+
 // ── the shared wrxn triage vocab is exactly these three states (a label means the same across repos) ──
 
 test('TRIAGE_LABELS == the shared wrxn vocab: ready-for-agent / backlog / epic (US-7)', () => {
@@ -140,6 +172,22 @@ test('to-prd / to-issues / triage each gain a --repo cross-repo section routing 
     assert.match(body, /--repo/, `${skill} SKILL.md does not document --repo`);
     assert.match(body, /tracker-target\.cjs/, `${skill} SKILL.md does not route through the shared tracker-target.cjs`);
     assert.match(body, /ghBaseArgs/, `${skill} SKILL.md does not publish via the resolved ghBaseArgs`);
+  }
+});
+
+// ── FIX 2: the resolver-call placeholder must instruct OMITTING the arg when there's no --repo. Passing an
+// empty string would hit resolveTarget('') → THROW (empty is a present-but-bad value), breaking the
+// absent-flag local path (AC#4 "behaves exactly as today"). Only a nullish/omitted arg resolves to local. ──
+
+test('the --repo invocation guidance says OMIT the arg when absent — never pass an empty string (AC#4)', () => {
+  for (const skill of ['to-prd', 'to-issues', 'triage']) {
+    const body = fs.readFileSync(path.join(PKG_ROOT, 'payload', '.claude', 'skills', skill, 'SKILL.md'), 'utf8');
+    assert.match(body, /omit/i, `${skill} SKILL.md must tell the agent to omit the argument when there is no --repo`);
+    assert.doesNotMatch(
+      body,
+      /empty if no/i,
+      `${skill} SKILL.md still tells the agent to pass an empty value — resolveTarget('') THROWS, breaking the local path`,
+    );
   }
 });
 
