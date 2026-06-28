@@ -15,6 +15,7 @@ const connect = require('../lib/connect.cjs');
 const ship = require('../lib/ship.cjs');
 const protect = require('../lib/protect.cjs');
 const release = require('../lib/release.cjs');
+const releaseCut = require('../lib/release-cut.cjs');
 const brain = require('../lib/brain.cjs');
 const statusline = require('../lib/statusline.cjs');
 const { convert } = require('../lib/convert.cjs');
@@ -141,6 +142,16 @@ Usage:
                                  the repo's current branch. --dry-run prints the promote plan without
                                  running it (a non-destructive preview). Stops at the first failing
                                  step (a failed push never opens a PR).
+
+  wrxn release [minor|patch|major] [--base <main>] [--root <dir>]
+                                 one-command deliberate release (ADR 0010): bump package.json+lock,
+                                 commit chore(release): <pkg> X.Y.Z on chore/release-X.Y.Z, then
+                                 delegate push → PR (base main) → arm auto-merge to the ship path. The
+                                 level is auto-computed from conventional commits since the last tag
+                                 (REUSE release-check); pass minor|patch|major to force it. Does NOT
+                                 publish or tag — CD publishes on merge. Repo-agnostic (cwd package.json
+                                 + git). Refuses loud (no mutation) when it can't safely release: not on
+                                 main, dirty tree, behind origin/main, or nothing releasable + no level.
 
   wrxn protect [--root <dir>]    apply the wrxn-main-gate server-side ruleset to this repo's origin —
                                  the hard gate that replaces the settings.local.json env-flag dance:
@@ -542,6 +553,29 @@ async function main(argv) {
     }
     process.stderr.write(`wrxn: ship failed at "${res.failed}" — promote halted (no PR/auto-merge past the failure)\n`);
     return 2;
+  }
+
+  if (cmd === 'release') {
+    // One-command deliberate release (ADR 0010): compute the bump (explicit level, else auto from
+    // conventional commits since the last tag — REUSE release-check) → npm version → commit
+    // chore(release) on chore/release-X.Y.Z → DELEGATE push/PR/arm to the ship path. Does NOT publish
+    // or tag — CD owns that on merge. Repo-agnostic (operates on the cwd package.json + git). The git/
+    // npm/ship side effects run through release-cut's realDeps (real invocation). Refuses loud (exit 2,
+    // NO mutation) on: not on main / dirty tree / behind origin/main / nothing releasable + no level.
+    const root = path.resolve(args.flags.root || process.cwd());
+    const arg = args._[1]; // optional minor|patch|major
+    const base = args.flags.base || releaseCut.DEFAULT_BASE;
+    const res = releaseCut.cutRelease({ arg, base, root });
+    if (res.refused) {
+      process.stderr.write(`wrxn: refusing to release — ${res.reason} (nothing changed)\n`);
+      return 2;
+    }
+    if (!res.ok) {
+      process.stderr.write(`wrxn: release failed at "${res.step}"${res.detail ? ` — ${res.detail}` : ''}\n`);
+      return 2;
+    }
+    process.stdout.write(`released ${res.version} (${res.bump}, ${res.source}) — committed ${res.branch}, delegated to ship → PR on ${res.base} with auto-merge armed (CD publishes on merge)\n`);
+    return 0;
   }
 
   if (cmd === 'protect') {

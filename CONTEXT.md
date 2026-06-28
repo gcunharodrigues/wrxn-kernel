@@ -171,3 +171,9 @@ mechanic by **caller context** (a typed executor running the same command is all
 text. A speedbump, not enforcement — the server CI ruleset is the only hard gate (ADR 0007).
 _Avoid_: gate (the CI ruleset is the gate; this is an advisory speedbump), linter, the SYNAPSE doctrine
 rule (passive text; the guard is an active interrupt — the distinction is the whole point).
+
+**Release**:
+A deliberate `chore(release)` PR that bumps `package.json.version` (cut by `wrxn release`); the CD publishes
+it to npm on merge (`decidePublish`: type-release OR version-not-on-npm). Distinct from a **feat-merge**,
+which lands on `main` but does **not** publish — feats accumulate unreleased until a Release (ADR 0010).
+_Avoid_: deploy, ship (`wrxn ship` is the push/PR/arm mechanic a Release reuses, not the Release itself).
