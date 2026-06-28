@@ -38,10 +38,12 @@ function snippetFor(text, matchesLine) {
 }
 
 // ── render: one hit → "timestamp · session (or 'this session') · role · snippet" ──
-// The session column collapses to "this session" when the hit is from the caller's active session
-// (opts.session), so a result set reads as scrollback relative to where the operator stands now.
+// The session column collapses to "this session" when the hit is from the caller's genuinely-LIVE session
+// (opts.activeSession — the CLI wires it from CLAUDE_SESSION_ID), so a result set reads as scrollback relative
+// to where the operator stands now. This is DECOUPLED from the --session SCOPE filter (opts.session): scoping
+// to a PAST session narrows the rows but never relabels them "this session" (#98).
 function renderHit(hit, opts) {
-  const active = opts && opts.session;
+  const active = opts && opts.activeSession;
   const sessionLabel = active && hit.session === active ? 'this session' : hit.session;
   return `${hit.ts} · ${sessionLabel} · ${hit.role} · ${hit.snippet}`;
 }
@@ -89,7 +91,8 @@ const INJECTED_STRIP_MAX = 65536;
 // Strip hook-injected framework-context blocks from one text part BEFORE matching. Two phases: (1) every
 // well-delimited <tag>…</tag> block anywhere; (2) a part-LEADING unclosed <tag>… (transcript truncated
 // mid-block) to end-of-part — anchored so a sentinel merely MENTIONED mid-prose keeps its tail. PURE and
-// FAIL-OPEN: any fault returns the input unchanged. Byte-faithful copy of memory-synth.cjs (#62).
+// FAIL-OPEN: any fault returns the input unchanged. Logic-identical to memory-synth.cjs's stripInjectedContext
+// (#62) — same strip semantics, not a byte-for-byte copy (and the 64KB strip cap is the inherited #62 tradeoff).
 function stripInjectedContext(text) {
   try {
     let out = String(text || '');
@@ -223,7 +226,12 @@ function parseSince(raw) {
     d.setUTCHours(0, 0, 0, 0);
     return d.getTime();
   }
-  const t = Date.parse(s);
+  // N3 (#99): record stamps are UTC, but Date.parse reads an ISO datetime WITH a time component and NO zone
+  // designator ("2026-06-26T12:00:00") as MACHINE-LOCAL time — silently shifting the floor by the host offset.
+  // Normalize it to UTC by appending Z. A date-only form (no 'T') is already UTC under Date.parse, and an
+  // explicit zone (trailing Z or a ±HH[:MM] offset) is honored as written — both pass through untouched.
+  const normalized = /[tT]/.test(s) && !/[zZ]$/.test(s) && !/[+-]\d{2}(:?\d{2})?$/.test(s) ? `${s}Z` : s;
+  const t = Date.parse(normalized);
   if (Number.isNaN(t)) {
     throw inputError(`chat-search: --since value "${raw}" is not a date — use "today" or an ISO-8601 date (e.g. 2026-06-26)`);
   }
@@ -314,6 +322,23 @@ function compileUserRegex(pattern) {
   }
 }
 
+// ── cross-arm dedup identity (#97) ─────────────────────────────────────────────
+// The SAME prompt reaches both arms stamped by DIFFERENT processes: emit-event.cjs writes the event ts at
+// hook-fire, the harness writes the transcript timestamp when it persists the turn — they differ by ms — and
+// the transcript text can differ from the event text by whitespace (hygiene strip, soft-wrap). So the dedup
+// identity is (session, whitespace-normalized text, ts within a TIGHT ±window), NOT an exact triple. The
+// window is 2s: a single turn's two stamps land within ~1s in practice, while two genuinely-distinct prompts
+// are seconds-to-minutes apart AND (almost always) differ in text — so the window only ever collapses what is
+// really one turn. The normalized text is the primary discriminator; the window only absorbs the writer
+// clock-skew on an otherwise-identical turn (two distinct prompts inside the window keep their distinct text,
+// so they never merge; the same text outside the window stays two distinct moments).
+const DEDUP_WINDOW_MS = 2000;
+// Normalize a message's text for the dedup key: trim the ends and collapse every interior whitespace run
+// (spaces, tabs, newlines) to a single space, so an event/transcript pair that differs only in spacing keys alike.
+function normalizeForDedup(text) {
+  return String(text).trim().replace(/\s+/g, ' ');
+}
+
 // ── the engine seam ───────────────────────────────────────────────────────────
 // searchConversationalLog(query, opts, roots): scan BOTH arms across the given roots' sessions and return
 // the turns that match `query` — a case-insensitive substring by default, or (opts.regex) the compiled
@@ -325,7 +350,7 @@ function searchConversationalLog(query, opts, roots) {
   const q = String(query == null ? '' : query);
   const needle = q.toLowerCase();
   const hits = [];
-  const seen = new Set(); // a prompt present in BOTH arms (same session+ts+text) must surface only once.
+  const seen = new Map(); // dedup index (#97): `${session} ${normText}` → [{ tsMs, ts }] already surfaced; a near-stamp match collapses cross-arm duplicates.
   let degraded = false; // set when the transcript arm could not be consulted → loud events-only degrade (#84).
 
   // ── slice-3 filters (#85): each is an opts field applied per-record inside consider(), so it composes
@@ -344,9 +369,21 @@ function searchConversationalLog(query, opts, roots) {
     if (sessionScope != null && session !== sessionScope) return; // --session: exact-match a single session
     if (typeof text !== 'string' || !lineMatches(text)) return; // --regex pattern, else case-insensitive substring
     if (sinceThreshold != null && !(Date.parse(ts) >= sinceThreshold)) return; // --since: drop hits before the floor (an undatable ts → NaN → dropped)
-    const key = `${session} ${ts} ${text}`; // the AC dedup key — NUL-joined so the parts can't bleed.
-    if (seen.has(key)) return;
-    seen.add(key);
+    // Cross-arm dedup (#97): same session + whitespace-normalized text + a ts within the tight window = the
+    // same turn → surface once. NUL-joined so session and text can't bleed. An undatable or exactly-equal
+    // stamp falls back to ts-string equality, so an unparseable ts still collapses its exact twin.
+    const key = `${session} ${normalizeForDedup(text)}`;
+    const tsMs = Date.parse(ts);
+    const prior = seen.get(key);
+    if (prior) {
+      const dup = prior.some(
+        (e) => (Number.isFinite(tsMs) && Number.isFinite(e.tsMs) && Math.abs(e.tsMs - tsMs) <= DEDUP_WINDOW_MS) || e.ts === ts,
+      );
+      if (dup) return; // a near-identical turn from the other arm (or an exact twin) already surfaced
+      prior.push({ tsMs, ts });
+    } else {
+      seen.set(key, [{ tsMs, ts }]);
+    }
     hits.push({ ts, session, role, snippet: snippetFor(text, lineMatches) });
   }
 
@@ -388,6 +425,7 @@ function searchConversationalLog(query, opts, roots) {
     if (!tfiles) {
       degraded = true;
     } else {
+      let recognizedTurns = 0; // user/assistant turns this dir yielded; zero across a non-empty dir = wholesale drift (#99 F3)
       for (const file of tfiles) {
         let lines;
         try {
@@ -404,12 +442,17 @@ function searchConversationalLog(query, opts, roots) {
             continue; // skip a malformed transcript line, never crash the scan
           }
           if (!rec || (rec.type !== 'user' && rec.type !== 'assistant')) continue; // only user/assistant turns; unknown line types (summary/system/…) skipped
+          recognizedTurns++; // a recognized turn (matchable or not) → this dir is NOT wholesale-drifted (#99 F3)
           // hygiene pipeline: flatten → strip injected framework context (a block holding the term is not a
           // hit) → redact secrets (raw chat can echo a credential; scrub BEFORE it can surface in a snippet).
           const text = redactSecrets(stripInjectedContext(transcriptText(rec)));
           consider(rec.timestamp, rec.sessionId, rec.type, text);
         }
       }
+      // F3 (#99): a present, readable dir whose EVERY line is an unknown type yielded zero usable turns — the
+      // arm is effectively unavailable → loud events-only degrade. Per-RECORD drift (some good turns) stays
+      // silent, and a present-but-empty dir ([]) is reachable-but-nothing and stays silent, both as before.
+      if (tfiles.length > 0 && recognizedTurns === 0) degraded = true;
     }
   }
 
@@ -446,13 +489,16 @@ function findInstallRoot(start) {
   return null;
 }
 
-// Value of a --name <value> flag. A following token that is itself a --flag (or a missing value) is NOT
-// consumed as the value — so `--session --regex` can't silently swallow --regex as the session id.
+// Value of a --name <value> flag, or undefined when the flag is ABSENT (optional). A PRESENT flag whose value
+// is missing or is itself a --flag fails LOUD (N2, #99) — parity with `--session ""`, never a silent
+// scope-widening drop: so `--session --regex` can't swallow --regex as the id and a trailing `--since` can't
+// vanish. The throw is userFacing, so main()'s catch prints one clean line and exits non-zero.
 function flag(name) {
   const i = process.argv.indexOf(`--${name}`);
   if (i < 0) return undefined;
   const val = process.argv[i + 1];
-  return val == null || val.startsWith('--') ? undefined : val;
+  if (val == null || val.startsWith('--')) throw inputError(`chat-search: --${name} requires a value`);
+  return val;
 }
 
 // Presence of a boolean --name flag (e.g. --regex), which carries no value.
@@ -476,34 +522,39 @@ function main() {
     process.stdout.write('Usage: node .wrxn/chat-search.cjs <search-term...> [--root <dir>] [--session <id>] [--since <when>] [--regex]\n');
     process.exit(2);
   }
-  const root = flag('root') || findInstallRoot();
-  if (!root) {
-    process.stderr.write('chat-search: cannot resolve the install root — run inside a wrxn install or pass --root <dir>\n');
-    process.exit(2);
-  }
-  // Wire the slice-3 flags (#85) into engine opts. The engine validates them (it throws a clean, user-facing
-  // error on a bad regex / unparseable --since); the CLI catch below prints that one line and exits non-zero.
-  const opts = {};
-  const session = flag('session');
-  if (session !== undefined) opts.session = session;
-  const since = flag('since');
-  if (since !== undefined) opts.since = since;
-  if (hasFlag('regex')) opts.regex = true;
-
-  let result;
+  // Flag parsing AND the engine call live inside ONE user-facing try: a value-flag with a missing/--prefixed
+  // value (flag(), N2 #99) and a bad regex / unparseable --since (the engine) both throw a clean userFacing
+  // error → the catch prints that one line and exits non-zero (never a Node stack or absolute path).
   try {
-    result = searchConversationalLog(terms.join(' '), opts, root);
+    const root = flag('root') || findInstallRoot();
+    if (!root) {
+      process.stderr.write('chat-search: cannot resolve the install root — run inside a wrxn install or pass --root <dir>\n');
+      process.exit(2);
+    }
+    // Wire the slice-3 flags (#85) into engine opts.
+    const opts = {};
+    const session = flag('session');
+    if (session !== undefined) opts.session = session;
+    const since = flag('since');
+    if (since !== undefined) opts.since = since;
+    if (hasFlag('regex')) opts.regex = true;
+    // The "this session" label tracks the genuinely-LIVE session (Claude Code exports CLAUDE_SESSION_ID), NOT
+    // the --session SCOPE filter — so scoping to a PAST session never relabels its rows "this session" (#98).
+    const activeSession = process.env.CLAUDE_SESSION_ID;
+    if (activeSession) opts.activeSession = activeSession;
+
+    const result = searchConversationalLog(terms.join(' '), opts, root);
+    process.stdout.write(result.rendered + '\n');
+    process.exit(0);
   } catch (err) {
     if (err && err.userFacing) {
-      // invalid flag input (bad/catastrophic regex, unparseable --since): fail LOUD with the one clean line
-      // the engine already built — never a Node stack or path — and exit non-zero (usage error).
+      // invalid flag input (missing flag value, bad/catastrophic regex, unparseable --since): fail LOUD with
+      // the one clean line — never a Node stack or path — and exit non-zero (usage error).
       process.stderr.write(err.message + '\n');
       process.exit(2);
     }
     throw err; // an unexpected fault → the entrypoint wrap turns it into a clean path-free diagnostic
   }
-  process.stdout.write(result.rendered + '\n');
-  process.exit(0);
 }
 
 // Belt-and-suspenders fail-loud (mirrors emit-event.cjs's entrypoint wrap): the per-file read and root

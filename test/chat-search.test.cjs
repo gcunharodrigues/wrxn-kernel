@@ -111,14 +111,15 @@ test('a term that matches nothing yields an explicit nothing-found result, not a
 test('renderHit formats the hit line and substitutes "this session" for the active sid', () => {
   const hit = { ts: '2026-06-25T10:00:00.000Z', session: 'sid-live', role: 'user', snippet: 'the gate decision' };
 
-  const past = renderHit(hit, { session: 'sid-other' });
+  // the label source is opts.activeSession (the genuinely-live session), NOT the --session scope filter (#98).
+  const past = renderHit(hit, { activeSession: 'sid-other' });
   assert.equal(
     past,
     '2026-06-25T10:00:00.000Z · sid-live · user · the gate decision',
     'a hit from another session renders timestamp · session · role · snippet',
   );
 
-  const current = renderHit(hit, { session: 'sid-live' });
+  const current = renderHit(hit, { activeSession: 'sid-live' });
   assert.match(current, /this session/, 'a hit from the active session renders "this session"');
   assert.ok(!current.includes('sid-live'), 'the raw sid is replaced, not appended');
   assert.equal(current.split(' · ').length, 4, 'four middle-dot-separated fields');
@@ -709,7 +710,7 @@ test('the CLI honors --session (scopes) and --regex (pattern match)', () => {
   writeEvents(root, 'sid-a', [prompt('2026-06-26T10:00:00.000Z', 'alpha keyword in session a')]);
   writeEvents(root, 'sid-b', [prompt('2026-06-26T11:00:00.000Z', 'beta keyword in session b')]);
 
-  // --session scopes: only sid-a's content surfaces (asserted by content, since scoped rows render "this session").
+  // --session scopes: only sid-a's content surfaces (asserted by content — robust whether or not a session is live).
   const scoped = spawnSync('node', [ENGINE, 'keyword', '--root', root, '--session', 'sid-a'], { encoding: 'utf8' });
   assert.equal(scoped.status, 0, '--session exits 0');
   assert.match(scoped.stdout, /alpha keyword/, 'the scoped session content is printed');
@@ -804,4 +805,161 @@ test('an unsafe opts.session id is rejected loud (no path traversal, no scope wi
 
   // a real session id (alnum + hyphen, like the harness UUIDs and the event sids) still scopes fine.
   assert.equal(searchConversationalLog('deploy plan', { session: 'sid-a' }, root).total, 1, 'a valid session id still scopes');
+});
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// 0.21.1 residual nits (#97/#98/#99) — chat-search hardening follow-ups settled at ship of #84/#85.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+
+// ── #97: cross-arm dedup — timestamp-window + whitespace-normalize (session, normText, ts within ±window) ──
+// In production the event-log ts (stamped at hook-fire by emit-event.cjs) and the harness transcript timestamp
+// for the SAME prompt are written by DIFFERENT processes — they differ by ms — and post-strip text can differ
+// by whitespace. Exact (session, ts, text) dedup let that duplicate surface twice. The key now normalizes text
+// (trim + collapse interior whitespace) and matches ts within a TIGHT ±window, so the same turn collapses to
+// one while two genuinely-distinct prompts inside the window stay separate (test BOTH directions).
+
+test('a cross-arm duplicate (ms-skewed ts, whitespace-differing text) collapses to one; distinct in-window prompts stay separate (#97)', () => {
+  const home = tmp('wrxn-cs-dedup97-home-');
+  const root = tmp('wrxn-cs-dedup97-');
+  const sid = 'sid-dup';
+
+  // (A) the SAME prompt in both arms: event ts vs transcript ts differ by 1.5s (< window) and the text differs
+  //     only by interior whitespace → must collapse to ONE hit (query a bare word present in both spacings).
+  writeEvents(root, sid, [{ ts: '2026-06-26T14:00:00.000Z', kind: 'prompt', text: 'remember the baton echo decision' }]);
+  writeTranscript(home, root, sid, [
+    turn('user', '2026-06-26T14:00:01.500Z', 'remember the   baton   echo decision', sid), // ms-skew + extra interior spaces
+  ]);
+
+  const collapsed = searchConversationalLog('baton', { transcriptsHome: home }, root);
+  assert.equal(collapsed.total, 1, 'the ms-skewed, whitespace-differing cross-arm duplicate collapses to a single hit');
+  assert.equal(collapsed.hits[0].session, sid, 'the surviving hit carries the shared session id');
+
+  // (B) two GENUINELY-DISTINCT prompts inside the window must NOT falsely merge (different text → two hits).
+  const emptyHome = tmp('wrxn-cs-dedup97-empty-'); // an empty transcripts home → events-only, dedup unaffected
+  const root2 = tmp('wrxn-cs-dedup97b-');
+  writeEvents(root2, 'sid-x', [
+    { ts: '2026-06-26T14:00:00.000Z', kind: 'prompt', text: 'deploy the gate' },
+    { ts: '2026-06-26T14:00:01.000Z', kind: 'prompt', text: 'roll back the gate' }, // 1s apart (in-window) but DIFFERENT text
+  ]);
+  assert.equal(
+    searchConversationalLog('gate', { transcriptsHome: emptyHome }, root2).total, 2,
+    'two distinct prompts inside the ts window are NOT merged — the normalized text discriminates them',
+  );
+
+  // (C) the SAME text far apart (beyond the window) stays two distinct moments — the window is tight, not global.
+  const root3 = tmp('wrxn-cs-dedup97c-');
+  writeEvents(root3, 'sid-y', [
+    { ts: '2026-06-26T10:00:00.000Z', kind: 'prompt', text: 'ship it now' },
+    { ts: '2026-06-26T12:00:00.000Z', kind: 'prompt', text: 'ship it now' }, // same text, 2h apart → distinct moments
+  ]);
+  assert.equal(
+    searchConversationalLog('ship it now', { transcriptsHome: emptyHome }, root3).total, 2,
+    'the same text outside the window stays two hits (the window is tight, not a global text dedup)',
+  );
+});
+
+// ── #98: --session scopes results but must NOT drive the "this session" render label ──
+// --session both SCOPED results and (slice-1) drove renderHit's "this session" label, so scoping to a PAST
+// session mislabeled its rows. The label source is now a SEPARATE opts.activeSession (the genuinely-live
+// session id, wired from CLAUDE_SESSION_ID at the CLI), decoupled from the --session scope filter.
+
+test('--session scoping to a PAST session does not mislabel rows "this session"; the active session still does (#98)', () => {
+  const root = tmp('wrxn-cs-label98-');
+  writeEvents(root, 'sid-past', [prompt('2026-06-26T10:00:00.000Z', 'the gate decision in a past session')]);
+  writeEvents(root, 'sid-live', [prompt('2026-06-26T11:00:00.000Z', 'the gate decision in the live session')]);
+
+  // scoping to a PAST session (NOT the active one) must NOT render its rows as "this session".
+  const scopedPast = searchConversationalLog('gate decision', { session: 'sid-past', activeSession: 'sid-live' }, root);
+  assert.equal(scopedPast.total, 1, 'the scope still narrows to the past session');
+  assert.equal(scopedPast.hits[0].session, 'sid-past', 'the scoped row is the past session');
+  assert.ok(!/this session/.test(scopedPast.rendered), 'a PAST scoped session is NOT mislabeled "this session"');
+  assert.match(scopedPast.rendered, /sid-past/, 'the past session renders its real id');
+
+  // rows from the genuinely-ACTIVE session ARE labeled "this session" (driven by activeSession, not scope).
+  const live = searchConversationalLog('gate decision', { activeSession: 'sid-live' }, root);
+  const liveRow = live.rendered.split('\n').find((l) => /11:00:00/.test(l));
+  assert.match(liveRow, /this session/, 'a row from the active session is labeled "this session"');
+  assert.ok(
+    !live.rendered.split('\n').some((l) => /10:00:00/.test(l) && /this session/.test(l)),
+    'a non-active row keeps its real id',
+  );
+
+  // CLI end-to-end: the label is driven by CLAUDE_SESSION_ID (the live session), decoupled from --session.
+  const cli = spawnSync('node', [ENGINE, 'gate decision', '--root', root, '--session', 'sid-past'], {
+    encoding: 'utf8',
+    env: { ...process.env, CLAUDE_SESSION_ID: 'sid-live' },
+  });
+  assert.equal(cli.status, 0, 'the CLI exits 0');
+  assert.match(cli.stdout, /sid-past/, 'the scoped past session renders its real id');
+  assert.ok(!/this session/.test(cli.stdout), 'scoping to a past session via --session does not mislabel it "this session" when a different session is live');
+});
+
+// ── #99 N3: a --since datetime lacking a Z is normalized to UTC, not parsed as machine-local time ──
+// Record stamps are UTC (…Z). Date.parse treats a no-Z datetime ("2026-06-26T12:00:00") as LOCAL, so the
+// floor silently shifts by the machine offset. Forcing a non-UTC child TZ makes the bug deterministic: under
+// the bug the floor lands hours off and the 14:00Z hit is wrongly dropped; normalized to UTC it survives.
+
+test('a --since datetime lacking a Z is normalized to UTC, not parsed as local time (#99 N3)', () => {
+  const root = tmp('wrxn-cs-sinceutc-');
+  writeEvents(root, 'sid-a', [prompt('2026-06-26T14:00:00.000Z', 'deploy plan at two pm UTC')]);
+
+  // America/New_York is UTC-4/-5: if the no-Z floor "2026-06-26T12:00:00" were parsed as LOCAL, it would be
+  // 16:00–17:00 UTC > 14:00Z and the hit would be dropped (total 0). Normalized to UTC the floor is 12:00Z,
+  // so the 14:00Z hit survives. The child env forces TZ so the red is deterministic on any CI zone.
+  const cli = spawnSync('node', [ENGINE, 'deploy plan', '--root', root, '--since', '2026-06-26T12:00:00'], {
+    encoding: 'utf8',
+    env: { ...process.env, TZ: 'America/New_York' },
+  });
+  assert.equal(cli.status, 0, 'the CLI exits 0');
+  assert.match(cli.stdout, /deploy plan at two pm UTC/, 'a no-Z --since datetime is treated as UTC, so the 14:00Z hit survives a 12:00 floor');
+  assert.ok(!/nothing found/i.test(cli.stdout), 'the hit is not wrongly dropped by a local-time misparse of the floor');
+});
+
+// ── #99 F3: a WHOLESALE-drifted transcript dir (every line an unknown type) degrades loudly ──
+// A present, readable transcript dir whose every line is an unknown type (summary/system/…) yields zero
+// usable turns — the arm is effectively unavailable, so it earns the loud events-only note. Per-RECORD drift
+// (some lines unknown, some good) correctly stays silent (that path keeps its existing regression test).
+
+test('a wholesale-drifted transcript dir (every line an unknown type) degrades loudly (#99 F3)', () => {
+  const home = tmp('wrxn-cs-f3-home-');
+  const root = tmp('wrxn-cs-f3-');
+  const dir = path.join(home, slugForRoot(root));
+  fs.mkdirSync(dir, { recursive: true });
+  // EVERY line is an unknown type — not a single user/assistant turn.
+  const body = [
+    JSON.stringify({ type: 'summary', timestamp: '2026-06-26T10:00:00.000Z', sessionId: 'sid-d', summary: 'a recap line' }),
+    JSON.stringify({ type: 'system', timestamp: '2026-06-26T10:01:00.000Z', sessionId: 'sid-d', content: 'a system line' }),
+  ].join('\n') + '\n';
+  fs.writeFileSync(path.join(dir, 'sid-d.jsonl'), body);
+  writeEvents(root, 'sid-a', [prompt('2026-06-26T11:00:00.000Z', 'event arm baton echo only')]);
+
+  const res = searchConversationalLog('baton echo', { transcriptsHome: home }, root);
+  assert.equal(res.total, 1, 'the event-log hit still surfaces');
+  assert.equal(res.degraded, true, 'a wholesale-drifted transcript dir (no recognizable turn) triggers the loud degrade');
+  assert.match(res.rendered, /transcript arm unavailable/i, 'the loud events-only degrade note is emitted');
+});
+
+// ── #99 N2: a value-flag given with a missing or --prefixed value fails LOUD (parity with --session "") ──
+// `--session` with nothing after it (or a --flag as its "value") was silently dropped, not failed loud, while
+// `--session ""` fails loud. Close the parity: a present value-flag with a missing/--prefixed value is a clean,
+// one-line, non-zero failure naming the flag — never a silent scope-widening drop, never a Node stack.
+
+test('a value-flag with a missing or --prefixed value fails loud (parity with --session "") (#99 N2)', () => {
+  const root = tmp('wrxn-cs-n2-');
+  writeEvents(root, 'sid-a', [prompt('2026-06-26T10:00:00.000Z', 'deploy plan today')]);
+
+  const assertLoud = (res, flagName, label) => {
+    assert.notEqual(res.status, 0, `${label}: exits non-zero`);
+    assert.equal(res.stdout.trim(), '', `${label}: nothing on stdout`);
+    const err = res.stderr.trim();
+    assert.ok(err.startsWith('chat-search:'), `${label}: clean chat-search line on stderr`);
+    assert.equal(err.split('\n').length, 1, `${label}: exactly one line on stderr`);
+    assert.ok(!/\n?\s+at\s/.test(res.stderr), `${label}: no Node stack frame leaks`);
+    assert.match(res.stderr, new RegExp(`--${flagName}`), `${label}: names the offending flag`);
+  };
+
+  // (1) --session whose "value" is itself a --flag (the swallow guard) → loud, not a silent drop.
+  assertLoud(spawnSync('node', [ENGINE, 'deploy', '--root', root, '--session', '--regex'], { encoding: 'utf8' }), 'session', '--session --regex');
+  // (2) --since at the end of argv with no value at all → loud.
+  assertLoud(spawnSync('node', [ENGINE, 'deploy', '--root', root, '--since'], { encoding: 'utf8' }), 'since', '--since (no value)');
 });

@@ -231,6 +231,30 @@ test('CLI: wrxn release with an unknown level refuses loud and creates NO branch
   assert.equal(repo.git('branch', '--list', 'chore/release-*'), '', 'no release branch was created (no mutation)');
 });
 
+// ── #111: gitignoring acceptance/ scratch keeps the dirty-guard from tripping on the AFK pipeline's
+// per-slice markers, WITHOUT weakening it for real uncommitted work. The guard logic (readState) is
+// unchanged — the kernel's OWN root .gitignore does the work, so this drives the fix through the REAL
+// shipped .gitignore (copied into a throwaway repo) and the real readState() seam (mirrors gitRepo). ──
+
+test('readState: gitignored acceptance/ scratch reads CLEAN, but any other untracked path still reads dirty (#111)', () => {
+  // Seed a throwaway repo with the kernel's REAL root .gitignore — the production artifact under test.
+  const repo = gitRepo('wrxn-rel-acceptance-');
+  fs.copyFileSync(path.join(__dirname, '..', '.gitignore'), path.join(repo.dir, '.gitignore'));
+  repo.git('add', '-A');
+  repo.git('commit', '-q', '-m', 'chore: add .gitignore');
+  const dirty = () => rc.realDeps(repo.dir).readState().dirty;
+
+  // (1) ONLY acceptance/NNN/ AFK scratch present → gitignored → `git status --porcelain` is empty →
+  //     the dirty-guard does NOT refuse the release.
+  fs.mkdirSync(path.join(repo.dir, 'acceptance', '111'), { recursive: true });
+  fs.writeFileSync(path.join(repo.dir, 'acceptance', '111', 'review-111.md'), '# review marker\n');
+  assert.equal(dirty(), false, 'acceptance/ scratch must be gitignored so the dirty-guard stays clean');
+
+  // (2) a stray untracked path is STILL dirty — the fix must not blanket-weaken the guard.
+  fs.writeFileSync(path.join(repo.dir, 'foo.txt'), 'stray uncommitted work\n');
+  assert.equal(dirty(), true, 'the dirty-guard must still fire for non-acceptance untracked work');
+});
+
 // ── reconciling docs (structural; mirrors test/release.test.cjs's release.yml checks) ──
 
 const PKG_ROOT = path.join(__dirname, '..');
