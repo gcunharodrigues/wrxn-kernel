@@ -25,6 +25,11 @@ are global slash-skills with no local file; the promote is yours). Follow these 
    opens a PR, and arms auto-merge (`gh pr merge --auto --squash`) — no settings file, no env flag, no
    GitHub clicks. `--branch` defaults to the current branch; pass `--base` if the trunk is not `main`.
    Run `wrxn ship --dry-run` first if you want to preview the exact promote plan before it runs.
+   - **Multi-issue PR bodies — one closing keyword PER issue.** When the PR resolves more than one
+     issue, write a closing keyword before EACH number (`Closes #104, closes #105`, or one `Closes #N`
+     per line). GitHub auto-closes only the issue directly after a keyword, so a comma/`+` list after a
+     single keyword (`Closes #104, #105`) closes ONLY the first — trailing slices leak open (real: PR
+     #106 left #105 open). Applies on squash-merge too (GitHub reads the PR body + the squash message).
 3. **Confirm auto-merge is armed** (e.g. `gh pr view --json autoMergeRequest` shows it enabled). The
    server-enforced CI ruleset is now the authority: GitHub merges to the trunk the instant CI is green.
    You never merge by hand and you never push directly to the trunk.
