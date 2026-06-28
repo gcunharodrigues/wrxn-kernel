@@ -805,3 +805,53 @@ test('an unsafe opts.session id is rejected loud (no path traversal, no scope wi
   // a real session id (alnum + hyphen, like the harness UUIDs and the event sids) still scopes fine.
   assert.equal(searchConversationalLog('deploy plan', { session: 'sid-a' }, root).total, 1, 'a valid session id still scopes');
 });
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// 0.21.1 residual nits (#96/#97/#98/#99) — chat-search hardening follow-ups settled at ship of #84/#85.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+
+// ── #96: adjacent-quantifier ReDoS residual — a flat run of unbounded quantifiers with NO group ──
+// isCatastrophicRegex models QUANTIFIED GROUPS whose body repeats/alternates, but a flat run of adjacent
+// unbounded quantifiers (a+a+a+…$) has no group for it to catch and backtracks catastrophically on a long
+// single-char line (security F2: hung the real CLI >10s). A cheap LINEAR count cap on unbounded quantifiers
+// (+ * {n,}) rejects that pileup fast as defense-in-depth, while a normal few-quantifier pattern still passes.
+
+test('adjacent unbounded quantifiers (a+a+a+…$) are rejected fast; a few-quantifier pattern is accepted (#96)', () => {
+  // BENIGN root (no long single-char run) — the pre-fix matcher can't backtrack here, so the in-process
+  // throw assertions are a CLEAN red (a fast no-throw before the fix), never an in-process hang.
+  const benign = tmp('wrxn-cs-adjq-benign-');
+  writeEvents(benign, 'sid-a', [prompt('2026-06-26T10:00:00.000Z', 'deploy the gate today')]);
+  const adjacent = 'a+'.repeat(30) + '$'; // 30 adjacent unbounded quantifiers, no group → the residual the nesting screen misses
+
+  // (1) the pileup is rejected loud + fast at compile (before any input is matched).
+  const t0 = Date.now();
+  assert.throws(
+    () => searchConversationalLog(adjacent, { regex: true }, benign),
+    (err) => {
+      assert.match(err.message, /--regex/, 'names the flag');
+      assert.match(err.message, /reject|backtrack/i, 'explains the rejection');
+      assert.equal(err.userFacing, true, 'user-facing');
+      return true;
+    },
+    'an adjacent-quantifier pileup must be rejected as a catastrophic pattern',
+  );
+  assert.ok(Date.now() - t0 < 1000, 'rejected fast at compile (no backtracking reached the matcher)');
+
+  // (2) the CLI must not hang even over a PATHOLOGICAL single-char line (the security-observed >10s hang).
+  //     The pathological text lives in its OWN root, only ever scanned by the timeout-bounded child process.
+  const patho = tmp('wrxn-cs-adjq-patho-');
+  writeEvents(patho, 'sid-a', [prompt('2026-06-26T10:00:00.000Z', 'a'.repeat(64) + ' !')]);
+  const tCli = Date.now();
+  const cli = spawnSync('node', [ENGINE, adjacent, '--root', patho, '--regex'], { encoding: 'utf8', timeout: 8000 });
+  assert.equal(cli.signal, null, 'the CLI was not killed by the 8s timeout (no hang)');
+  assert.ok(Date.now() - tCli < 5000, 'the CLI rejected fast');
+  assert.notEqual(cli.status, 0, 'the CLI exits non-zero (rejected)');
+  assert.match(cli.stderr, /reject|backtrack/i, 'the CLI explains the ReDoS rejection');
+
+  // (3) a normal pattern with a FEW unbounded quantifiers is NOT over-rejected — and still matches.
+  assert.doesNotThrow(
+    () => searchConversationalLog('(deploy|ship).*gate.*today', { regex: true }, benign),
+    'a normal multi-segment pattern with a few quantifiers is accepted',
+  );
+  assert.equal(searchConversationalLog('(deploy|ship).*gate.*today', { regex: true }, benign).total, 1, 'and it still matches');
+});

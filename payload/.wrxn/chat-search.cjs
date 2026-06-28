@@ -242,23 +242,39 @@ function parseSince(raw) {
 //       family — both FLAT (a+)+, (a|a)+, (?:a*)* AND the NESTED forms a flat regex screen misses because it
 //       cannot cross an inner paren: ((a)+)+ (the OWASP example), ((a+))+, ((\w)+)+$, (a(b+)c)+, (a{1,5})+.
 //       Plus backreferences (\1..\9), which can backtrack catastrophically — refused outright.
+//   (3) ADJACENT-QUANTIFIER COUNT CAP (#96) — the screen in (2) models *grouped* shapes, so it ACCEPTS a flat
+//       run of adjacent unbounded quantifiers with no group: a+a+a+…$ (the named residual). That run still
+//       backtracks catastrophically on a long single-char line (security F2: hung the real CLI >10s), so as
+//       cheap defense-in-depth isCatastrophicRegex ALSO counts unbounded quantifiers (+ * {n,} — the {n,m}/{n}
+//       bounded forms and the 0-or-1 ? are excluded) and refuses a pattern that packs more than the cap. Every
+//       reviewed safe pattern uses ≤1; the cap leaves generous headroom for a rich multi-segment search yet
+//       kills the dozens-deep pileup (the 200-char length cap (1) fits ~66 a+).
 // It is deliberately CONSERVATIVE: it also rejects the rare-but-safe outer-quantified alternation (foo|bar)+
 // (drop the outer quantifier to search it). It does NOT over-reject ordinary grouping — (foo|bar), (ab)+,
 // ([a+])+, (?:ab)+, a{1,5}, \d{4}-\d{2}-\d{2} all pass.
 // RESIDUAL (stated honestly): a STATIC screen cannot be airtight under the no-timeout/ADR-0008 constraint —
 // it models group/quantifier structure, not match semantics, so it cannot prove a pattern safe, only refuse
 // the known-dangerous shapes. The catastrophic families that actually occur (flat + nested star-height-2,
-// overlapping alternation under a quantifier, backreferences — incl. every reviewed probe) are refused at
-// compile before any input is matched; an exotic construct outside these structural shapes is not modelled.
+// overlapping alternation under a quantifier, the flat adjacent-quantifier run a+a+a+…, backreferences —
+// incl. every reviewed probe) are refused at compile before any input is matched. The count cap (3) bounds
+// the NUMBER of unbounded quantifiers, not the per-quantifier blowup an allowed handful can still cause over
+// an arbitrarily long single-char line — that narrow polynomial residual is the disclosed cost of the
+// no-timeout constraint; an exotic construct outside the modelled shapes and the cap is likewise not proven safe.
 const REGEX_PATTERN_MAX = 200;
+// Cap on the count of unbounded quantifiers (+ * {n,}) — see defense layer (3) above (#96).
+const REGEX_UNBOUNDED_QUANTIFIER_MAX = 10;
 
 // Linear (O(pattern length)) structural scan: does `p` contain a quantified group whose body repeats or
-// alternates at any nesting depth, or a backreference? Tracks one frame per open group; `complex` = the
-// group's body holds a quantifier/alternation (bubbled up from descendants), so a quantifier on the group's
-// `)` makes it catastrophic. Skips escapes (\w, \(, …) and char-class interiors ([a+]) where metachars are
-// literal, and the `?` of a group prefix ((?:, (?=, (?<…), which is not a quantifier.
+// alternates at any nesting depth, a backreference, OR more than the cap of adjacent unbounded quantifiers
+// (the flat a+a+a+…$ residual, #96)? Tracks one frame per open group; `complex` = the group's body holds a
+// quantifier/alternation (bubbled up from descendants), so a quantifier on the group's `)` makes it
+// catastrophic. In the SAME pass it counts unbounded quantifiers (+ * and the open-ended {n,} — bounded
+// {n}/{n,m} and the 0-or-1 ? are NOT unbounded) regardless of nesting depth and refuses a pileup over the
+// cap. Skips escapes (\w, \(, …) and char-class interiors ([a+]) where metachars are literal, and the `?` of
+// a group prefix ((?:, (?=, (?<…), which is not a quantifier.
 function isCatastrophicRegex(p) {
   const stack = [];
+  let unbounded = 0; // count of unbounded quantifiers (+ * {n,}) at any depth — the adjacent-quantifier cap (#96)
   for (let i = 0; i < p.length; i++) {
     const c = p[i];
     if (c === '\\') {
@@ -289,10 +305,15 @@ function isCatastrophicRegex(p) {
       if (stack.length) stack[stack.length - 1].complex = stack[stack.length - 1].complex || f.complex; // bubble up any depth
       continue;
     }
-    if ((c === '|' || c === '+' || c === '*' || c === '?' || c === '{') && stack.length) {
-      stack[stack.length - 1].complex = true; // a quantifier/alternation token in the current group's body
+    if (c === '|' || c === '+' || c === '*' || c === '?' || c === '{') {
+      // count unbounded quantifiers at ANY depth so a flat top-level run (a+a+a+…) is bounded too (#96):
+      // + and * are always unbounded; {n,} is unbounded only when a `}` immediately follows the comma.
+      if (c === '+' || c === '*') unbounded++;
+      else if (c === '{' && /^\{\d+,\}/.test(p.slice(i))) unbounded++;
+      if (stack.length) stack[stack.length - 1].complex = true; // a quantifier/alternation token in the current group's body
     }
   }
+  if (unbounded > REGEX_UNBOUNDED_QUANTIFIER_MAX) return true; // adjacent-quantifier pileup (a+a+a+…$) — defense-in-depth (#96)
   return false;
 }
 
@@ -305,7 +326,7 @@ function compileUserRegex(pattern) {
     throw inputError(`chat-search: --regex pattern too long (max ${REGEX_PATTERN_MAX} chars)`);
   }
   if (isCatastrophicRegex(p)) {
-    throw inputError('chat-search: --regex pattern rejected — a quantified group whose body repeats or alternates (or a backreference) risks catastrophic backtracking (ReDoS); simplify the pattern');
+    throw inputError('chat-search: --regex pattern rejected — a quantified group whose body repeats or alternates, a long run of adjacent unbounded quantifiers (a+a+a+…), or a backreference risks catastrophic backtracking (ReDoS); simplify the pattern');
   }
   try {
     return new RegExp(p);
