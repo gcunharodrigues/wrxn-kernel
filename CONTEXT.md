@@ -172,6 +172,18 @@ text. A speedbump, not enforcement — the server CI ruleset is the only hard ga
 _Avoid_: gate (the CI ruleset is the gate; this is an advisory speedbump), linter, the SYNAPSE doctrine
 rule (passive text; the guard is an active interrupt — the distinction is the whole point).
 
+**cross-repo targeting** (`--repo owner/repo`):
+The per-invocation override on `to-prd` / `to-issues` / `triage` that points the skill at a named
+**GitHub** repo (the kernel, `recon-wrxn`) instead of the install's default tracker — so a kernel
+feature can be specced, sliced, and triaged from a workspace-install session without leaving the
+pipeline. Absent → the configured default (local-md `.scratch/`), unchanged; present → publish via
+`gh -R owner/repo` with the shared wrxn triage vocab, **no git-remote inference** (the tracker TYPE is
+a config choice). All three skills resolve through one helper (`.wrxn/tracker-target.cjs`). This is the
+**"close"** half of the cross-repo seam the **Pipeline-adherence guard** only warned about (ADR 0009 /
+#81 AC#4) — removing the guard's root cause, not just its symptom.
+_Avoid_: switching the default tracker (the override is per-invocation; the default stays local-md),
+git-remote inference (the type is configured, not derived).
+
 **Release**:
 A deliberate `chore(release)` PR that bumps `package.json.version` (cut by `wrxn release`); the CD publishes
 it to npm on merge (`decidePublish`: type-release OR version-not-on-npm). Distinct from a **feat-merge**,

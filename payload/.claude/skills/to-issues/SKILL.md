@@ -83,3 +83,34 @@ Or "None - can start immediately" if no blockers.
 </issue-template>
 
 Do NOT close or modify any parent issue.
+
+## `--repo` / cross-repo targeting
+
+By default this skill publishes the slices to the project's configured tracker (see
+`docs/agents/issue-tracker.md`). Passing **`--repo owner/repo`** instead targets a named **GitHub** repo
+for this one invocation (e.g. the kernel or `recon-wrxn`), so you can slice a sibling repo from this
+session without leaving the pipeline. Resolve the target through the ONE shared helper —
+`.wrxn/tracker-target.cjs` — never hand-roll the parsing:
+
+```bash
+# WITH --repo present: pass the owner/repo value as the trailing argument.
+node -e 'console.log(JSON.stringify(require("./.wrxn/tracker-target.cjs").resolveTarget(process.argv[1])))' "owner/repo"
+# WITHOUT --repo: OMIT the argument entirely (process.argv[1] is undefined → resolves to local).
+# NEVER pass "" — resolveTarget("") THROWS (empty is malformed, not "absent"), which would break the local path.
+node -e 'console.log(JSON.stringify(require("./.wrxn/tracker-target.cjs").resolveTarget(process.argv[1])))'
+```
+
+It returns `{ mechanism, repo, ghBaseArgs }` and **throws loud** on a malformed / empty / trailing
+`--repo` BEFORE any publish — let that refusal surface; never proceed on a bad target.
+
+- **`mechanism: "local"`** (no `--repo`) → publish exactly as today, to `.scratch/` — unchanged.
+- **`mechanism: "github"`** → publish via `gh`, prepending the returned **`ghBaseArgs`** (`-R owner/repo`)
+  to every `gh` call, e.g. `gh issue create -R owner/repo --title "…" --body "…" --label ready-for-agent`.
+  Slices are AFK-ready, so apply `ready-for-agent` from the shared wrxn triage vocab
+  (`ready-for-agent` / `backlog` / `epic`). `gh` fails loud if the target lacks the label; do not work
+  around it. The helper's `publishIssue({ target, title, body, label }, gh)` builds that exact argv and
+  refuses an off-vocab label — use it as the create boundary.
+
+**Target the SAME `owner/repo` the PRD was published to** (via `to-prd --repo`), so each slice's "Parent"
+references a real PRD issue number on that tracker. Publish slices in dependency order so the "Blocked by"
+field can cite real issue identifiers.
